@@ -55,6 +55,7 @@ export default defineConfig({
     testTimeout: 15_000,
     include: [
       "__tests__/workerd/account-credentials.test.ts",
+      "__tests__/workerd/account-pinning.test.ts",
       "__tests__/workerd/bigquery-observers.test.ts",
       "__tests__/workerd/calendar-observers.test.ts",
       "__tests__/workerd/chat-actions.test.ts",
