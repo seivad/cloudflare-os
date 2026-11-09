@@ -807,12 +807,9 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     await this.#writeContextDocument(path, doc, false);
   }
 
-  async createContextSkill(
-      path: string,
-      doc: { description: string; body: string; contentType?: string }): Promise<void> {
-    if (!isSkillManifestPath(path)) throw new Error("Skill manifest filename must be SKILL.md.");
-    parseSkillManifest(path, doc.body);
-    let directory = dirName(path);
+  // Throws unless a new skill may be created in `directory`: nothing is stored there yet, and its
+  // parent is the root or an existing directory outside every skill.
+  #assertNewSkillDirectory(directory: string): void {
     let directoryOccupied = !!(directory && this.storage.documents.get(directory));
     if (directory && !directoryOccupied) {
       for (let record of this.storage.documents.list({ prefix: directory + "/" })) {
@@ -839,7 +836,69 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
         ancestor = dirName(ancestor);
       }
     }
+  }
+
+  async createContextSkill(
+      path: string,
+      doc: { description: string; body: string; contentType?: string }): Promise<void> {
+    if (!isSkillManifestPath(path)) throw new Error("Skill manifest filename must be SKILL.md.");
+    parseSkillManifest(path, doc.body);
+    this.#assertNewSkillDirectory(dirName(path));
     await this.#writeContextDocument(path, doc, true);
+  }
+
+  /**
+   * Create a complete skill in one storage transaction: its manifest (`SKILL.md` in `files`) and
+   * every supporting file, at paths relative to the new skill `directory`. Fails, writing nothing,
+   * when the directory is occupied, another skill in the collection has the manifest's name, a file
+   * is invalid or too large, or the bundle holds another skill's manifest.
+   */
+  async createContextSkillBundle(
+      directory: string,
+      files: { path: string; description: string; body: string; contentType?: string }[]): Promise<void> {
+    this.#assertWebWritable();
+    validateDocumentPath(directory);
+    let manifestPath = joinPath(directory, "SKILL.md");
+    let manifestFile = files.find(file => file.path === "SKILL.md");
+    if (!manifestFile) throw new Error("A skill bundle needs a SKILL.md manifest.");
+    let manifest = parseSkillManifest(manifestPath, manifestFile.body);
+    let paths = new Set<string>();
+    for (let file of files) {
+      let path = joinPath(directory, file.path);
+      validateDocumentPath(path);
+      if (paths.has(path)) throw new Error(`The skill bundle lists ${file.path} twice.`);
+      paths.add(path);
+      if (path !== manifestPath && isSkillManifestPath(path)) {
+        throw new Error("Cannot create a skill inside another skill.");
+      }
+    }
+    this.#ensureSkillIndex();
+    for (let entry of this.storage.skillIndex.list()) {
+      if (entry.skillName === manifest.name) {
+        throw new Error(`A skill named “${manifest.name}” already exists in this collection.`);
+      }
+    }
+    this.#assertNewSkillDirectory(directory);
+
+    let now = new Date();
+    // Records are built and size-checked inside the transaction, so any failure, including one on
+    // the last file, rolls back every write before it.
+    this.storage.transaction(() => {
+      for (let file of files) {
+        let path = joinPath(directory, file.path);
+        let record = contextRecord({
+          path, name: baseName(path), description: file.description,
+          contentType: file.contentType || contentTypeFromPath(path), body: file.body, lastUpdated: now,
+        });
+        this.#assertRecordSize(record);
+        this.#putDocument(record);
+      }
+      let meta = this.getMetadata();
+      meta.documentCount += files.length;
+      meta.lastUpdated = now;
+      this.storage.metadata.put(meta);
+    });
+    await this.#propagate();
   }
 
   async deleteContextDocument(path: string): Promise<void> {

@@ -7,6 +7,7 @@ export type ContextObservabilityFields = {
   collectionId: string;
   commit: string;
   dir: string;
+  fileCount: number;
   filepath: string;
   invalidSkillManifestCount: number;
   invalidSkillManifests: Array<{ filepath: string; reason: string }>;
@@ -15,6 +16,8 @@ export type ContextObservabilityFields = {
   operation: string;
   repoName: string;
   sizeBytes: number;
+  skillId: string;
+  source: string;
   tokenId: number | string;
   vendorId: string;
 };

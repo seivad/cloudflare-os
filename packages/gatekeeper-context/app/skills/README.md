@@ -134,11 +134,12 @@ directory APIs fail or terminate the management app's opaque-origin iframe, so c
 be selected with the folder picker. Supporting folder drops requires reading them in the Workshop host
 and passing the files into the sandboxed app.
 
-Skill manifests are created through the skill-specific RPC, but there is currently no backend RPC for
-atomically creating a complete bundle. Supporting files are written only after the manifest succeeds.
-If one of those writes fails, the user is told which skill was only partially uploaded, but the created
-manifest and any successful related files remain. A future bundle-oriented RPC is required for true
-all-or-nothing uploads.
+Uploaded manifests are created through the skill-specific RPC, and supporting files are written only
+after the manifest succeeds. If one of those writes fails, the user is told which skill was only
+partially uploaded, but the created manifest and any successful related files remain. The collection
+Durable Object's `createContextSkillBundle` writes a complete bundle in one transaction (see
+[Directory import](#directory-import)); uploads do not use it yet, because the management API would
+first need a client-facing bundle method with its own size limits.
 
 ## Skill upload format contract
 
@@ -173,11 +174,114 @@ import to already be a valid skill.
 - The existing review form checks the final name and description before upload;
   the server's `parseSkillManifest` validates the resulting stored manifest.
 
-`readSkillUploadSource` in `skillUpload.ts` is the single recognition decision used
-by both inference and conversion. New import behavior should be expressed here
-and covered by the table-driven round-trip tests, rather than added as an independent
-delimiter heuristic in a caller.
+`readSkillUploadSource` in `src/skill-manifest-source.ts` is the single recognition
+decision used by upload inference and conversion and by directory imports. New import
+behavior should be expressed there and covered by the table-driven round-trip tests,
+rather than added as an independent delimiter heuristic in a caller.
 
 This is not a claim of full specification validation: the existing server validates
 required fields, permits names differing from the parent directory, and does not
 validate every optional specification field.
+
+## Directory import
+
+**Browse skills.sh**, in the Add menu or under a search that has two or more characters, searches the
+[skills.sh](https://skills.sh) directory, previews a listed skill, and imports it with its supporting
+files as a new, ordinary skill: once imported it is edited, renamed, moved and deleted like any other.
+
+### Contract
+
+The management API has three methods, validated by `capnweb-validate` like the rest of `ContextApi`:
+
+- `searchSkillDirectory(query)` calls `GET https://skills.sh/api/search?q=…` (at least two
+  characters). Results carry the name, the `owner/repo` source and the install count. A source that is
+  not a GitHub repository (skills.sh also lists skills hosted elsewhere, such as `docs.stripe.com`) is
+  listed with `importable: false` and cannot be previewed.
+- `previewDirectorySkill(source, skillId)` reads the repository's default branch and returns the
+  commit SHA it read, the skill's directory in the repository, the manifest's name, description and
+  instructions, every file it would import with sizes, the files it leaves out and why, and
+  `blockers`: reasons the import would be refused. Nothing is stored.
+- `importDirectorySkill(collectionId, source, skillId, commitSha, { name? })` imports exactly
+  `commitSha`, so what is stored is what was previewed. The skill goes to `<name>/SKILL.md` at the
+  collection root; `name` defaults to the preview's `suggestedName`, the skill id.
+
+skills.sh has no content API, so files come from GitHub. The skill's directory is found with the
+rules of the skills CLI that skills.sh is built around (`npx skills add`, vercel-labs/skills): its
+priority directories (`skills/`, `skills/.curated/`, agent directories such as `.claude/skills/`, and
+any `skills.sh.json` `paths`) before a search at most five levels deep; a directory named after the
+skill id narrows the choice, then the frontmatter `name`, slugged as skills.sh slugs it, decides. A
+root-level `SKILL.md` imports alone, as the CLI installs it, not with the whole repository.
+
+### Permissions and conflicts
+
+Importing follows the rules for creating a skill, checked before anything is fetched: the account
+must be able to edit the collection (deployment admins only, for public collections) and the
+collection must be web-backed. The picker lists only those collections, and the server enforces it.
+Searching and previewing need no collection.
+
+An import never overwrites. It fails when another skill in the collection already has the name,
+including one in a legacy directory, or when anything already exists at `<name>/`. The preview flags a
+conflict in the chosen collection so the name can be changed first.
+
+### The atomic bundle RPC
+
+`ContextCollectionDurableObject.createContextSkillBundle(directory, files)` validates the manifest and
+every path, refuses a nested `SKILL.md`, an occupied directory and a duplicate skill name, then writes
+every document in one storage transaction, building and size-checking each record inside it: any
+failure, including one on the last file, leaves nothing behind.
+
+### Provenance
+
+The stored manifest is the published one with `name` set to the chosen name and these entries merged
+into its frontmatter `metadata` map, which the Agent Skills specification reserves for client-defined
+string properties; the instructions after the frontmatter are kept byte for byte.
+
+```yaml
+metadata:
+  imported-from: skills.sh
+  skills-sh-id: anthropics/skills/frontend-design
+  source-repository: https://github.com/anthropics/skills
+  source-path: skills/frontend-design   # "." for a root-level SKILL.md
+  source-commit: 2c5958ecac7cee2b583967a2c4981d0f4a75c579
+  imported-at: "2026-11-09T13:40:00.000Z"
+```
+
+These are what an "update from source" action would read; there is no such action yet.
+
+### Limits
+
+At most 200 files, 1 MB per file and 5 MB in total per skill. A larger file is left out and listed;
+more files or bytes block the import. Text is stored as text; binary files are kept as bytes, with
+their extension's type or `application/octet-stream`, as uploads store them. Symbolic links, Git
+submodules, nested skills (import them separately) and the files the skills CLI excludes
+(`metadata.json`, `.git/`, `__pycache__/`) are left out and listed. A repository archive is limited
+to 64 MB compressed and 256 MB expanded.
+
+### Security model
+
+Fetched content is untrusted, and is stored only on an explicit import after a preview. The preview
+says that a skill is instructions agents will follow.
+
+The module that talks to skills.sh and GitHub, `src/skill-directory/`, depends on nothing in Context.
+It builds URLs only for fixed hosts (`skills.sh`, `codeload.github.com`, and `api.github.com` when a
+token is set) from components validated against strict patterns: `owner` and `repo` against GitHub's
+name rules, the skill id against the slug pattern, the commit against 40 hexadecimal characters. A
+crafted `source` cannot name another host or path. Redirects are followed by hand, only to
+`www.skills.sh` or `codeload.github.com`, and credentials are dropped when the host changes. Every
+request has a timeout. An archive path that is absolute or contains `..` fails the whole import, and
+paths are confined to the skill's directory. The commit comes from the archive's own pax header, and
+an archive for a requested commit must say it is that commit.
+
+The management app runs in an opaque-origin sandbox, so every directory request goes through these
+server methods. Successful imports are logged as `context.skill.directory.imported` with the source,
+skill id, commit, collection and file count, never content.
+
+### Rate limits and caching
+
+Archives come from `codeload.github.com` as one gzipped tarball per repository, which is not subject
+to GitHub's 60-requests-an-hour limit for unauthenticated REST calls, a limit Workers would share
+across egress IPs. An optional `GITHUB_TOKEN` secret on the Context Worker sends archive requests
+through the REST tarball endpoint under the token's limit instead. Each isolate caches search results
+for a minute, the commit a repository's default branch was at for a minute, and up to 24 MB of
+archives by commit, so a preview followed by an import downloads once.
+

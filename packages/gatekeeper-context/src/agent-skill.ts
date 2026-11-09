@@ -127,6 +127,12 @@ const SkillFrontmatterSchema = z.object({
           .max(1024, "Skill description must be at most 1024 characters.")),
 }).passthrough();
 
+/** Throws parseSkillManifest's message unless `name` is a valid skill name. */
+export function assertSkillName(name: string): void {
+  let result = SkillFrontmatterSchema.shape.name.safeParse(name);
+  if (!result.success) throw new Error(result.error.issues[0]?.message ?? "Skill name is invalid.");
+}
+
 /** Check whether the last path segment is exactly SKILL.md. */
 export function isSkillManifestPath(path: string): boolean {
   return path.split("/").at(-1) === "SKILL.md";
