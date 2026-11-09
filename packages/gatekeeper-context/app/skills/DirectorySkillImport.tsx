@@ -65,7 +65,8 @@ export const DirectorySkillImport = ({
 
   return (
     <>
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-6">
+      {/* Sections keep their height so the column scrolls; the clipped cards would otherwise shrink. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-5 sm:px-6 [&>*]:shrink-0">
         <section aria-label="Skill details" className="flex flex-col gap-2">
           <div className="flex min-w-0 items-center gap-1.5 text-xs text-kumo-subtle">
             <GithubLogo aria-hidden size={14} className="shrink-0" />
