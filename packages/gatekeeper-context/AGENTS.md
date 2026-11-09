@@ -46,3 +46,11 @@ private data by its own generated `accountId`). The account exposes the agent re
 (`getSession()`), collection discovery metadata (`getAgentCatalog()`), and a management UI
 (`startAppUi({ isAdmin })`). The UI is a single-file React SPA in `app/` (Vite + Tailwind + Kumo)
 bundled by `build-app.ts` into `src/generated/app.txt`.
+
+## skills.sh import
+
+The Skills Navigator imports skills from the skills.sh directory. `src/skill-directory/` is the
+directory client (skills.sh search, GitHub archives, discovery, path and size limits) and depends on
+nothing in Context; `src/directory-import.ts` turns its bundles into Context documents, written by the
+collection's atomic `createContextSkillBundle`. The contract, limits and security model are in
+`app/skills/README.md#directory-import`.

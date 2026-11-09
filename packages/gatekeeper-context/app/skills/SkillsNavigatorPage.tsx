@@ -9,6 +9,7 @@ import {
 } from "@cloudflare/kumo";
 import {
   FolderPlus,
+  GlobeSimple,
   MagnifyingGlassIcon,
   PlusIcon,
   UploadSimple,
@@ -25,6 +26,7 @@ import {
 import { EditCollectionDialog } from "./EditCollectionDialog";
 import { LeaveCollectionDialog } from "./LeaveCollectionDialog";
 import { ShareCollectionDialog } from "./ShareCollectionDialog";
+import { SkillDirectoryDialog } from "./SkillDirectoryDialog";
 import { buildSkillNavigator, filterSkillNavigator } from "./skillNavigatorModel";
 import { SkillsNavigatorTree } from "./SkillsNavigatorTree";
 import { UploadSkillsDialog, type UploadSkillsTarget } from "./UploadSkillsDialog";
@@ -59,6 +61,7 @@ export const SkillsNavigatorPage = ({ onSelectSkill, onOpenCollection }: SkillsN
   const [pendingShare, setPendingShare] = useState<{ id: string; title: string } | null>(null);
   const [pendingLeave, setPendingLeave] = useState<{ id: string; title: string } | null>(null);
   const [pendingRemove, setPendingRemove] = useState<NavigatorDeleteTarget | null>(null);
+  const [pendingBrowse, setPendingBrowse] = useState<{ query: string } | null>(null);
 
   const writableCollections = useMemo(
     () => collections.filter((collection) => writableCollectionIds.has(collection.id)),
@@ -78,6 +81,7 @@ export const SkillsNavigatorPage = ({ onSelectSkill, onOpenCollection }: SkillsN
   };
 
   const reload = () => setReloadKey((value) => value + 1);
+  const trimmedQuery = query.trim();
 
   return (
     <main className="h-full overflow-y-auto bg-kumo-base px-5 py-8 sm:px-10 sm:py-10">
@@ -152,6 +156,12 @@ export const SkillsNavigatorPage = ({ onSelectSkill, onOpenCollection }: SkillsN
               >
                 Upload skills
               </DropdownMenu.Item>
+              <DropdownMenu.Item
+                icon={<GlobeSimple className="size-3.25" />}
+                onClick={() => setPendingBrowse({ query: trimmedQuery })}
+              >
+                Browse skills.sh
+              </DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu>
         </div>
@@ -196,6 +206,18 @@ export const SkillsNavigatorPage = ({ onSelectSkill, onOpenCollection }: SkillsN
                 {query.trim() ? "No skills match your search." : "No skills are available."}
               </Text>
             </LayerCard>
+          )}
+          {trimmedQuery.length >= 2 && status !== "loading" && (
+            <div className="mt-3 flex justify-center">
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<GlobeSimple size={16} />}
+                onClick={() => setPendingBrowse({ query: trimmedQuery })}
+              >
+                Search skills.sh for “{trimmedQuery}”
+              </Button>
+            </div>
           )}
         </div>
       </div>
@@ -249,6 +271,16 @@ export const SkillsNavigatorPage = ({ onSelectSkill, onOpenCollection }: SkillsN
           onChanged={reload}
           onLeft={reload}
           onClose={() => setPendingLeave(null)}
+        />
+      )}
+      {pendingBrowse && (
+        <SkillDirectoryDialog
+          initialQuery={pendingBrowse.query}
+          collections={collections}
+          writableCollections={writableCollections}
+          documents={documents}
+          onImported={onSelectSkill}
+          onClose={() => setPendingBrowse(null)}
         />
       )}
       {pendingRemove && (

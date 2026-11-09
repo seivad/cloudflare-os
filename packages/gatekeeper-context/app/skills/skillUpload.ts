@@ -1,5 +1,5 @@
-import { Document, isMap, parseDocument } from "yaml";
-import { splitFrontmatter } from "../../src/description-extractors";
+import { Document } from "yaml";
+import { readSkillUploadSource } from "../../src/skill-manifest-source";
 import type { DecodedUploadFile } from "../uploadFiles";
 import { isValidSkillName, skillNameFromTitle } from "./skillName";
 
@@ -19,23 +19,6 @@ export type SkillUploadCandidate = {
 const baseName = (path: string) => path.split("/").at(-1) ?? path;
 const dirName = (path: string) => path.split("/").slice(0, -1).join("/");
 const isMarkdownPath = (path: string) => /\.(?:md|markdown)$/i.test(path);
-
-/**
- * Frontmatter is an import convention, not Markdown syntax. Only a complete YAML mapping
- * with a skill metadata key opts in; ambiguous or malformed blocks remain instruction text.
- * Both metadata inference and conversion must use this decision to avoid losing content.
- */
-const readSkillUploadSource = (body: string) => {
-  const { frontmatter, content } = splitFrontmatter(body);
-  if (frontmatter !== null) {
-    const document = parseDocument(frontmatter);
-    if (document.errors.length === 0 && isMap(document.contents)
-      && (document.has("name") || document.has("description"))) {
-      return { document, content };
-    }
-  }
-  return { document: null, content: body };
-};
 
 const normalizeFolderPaths = (files: readonly SkillUploadFile[]) => {
   const roots = files.map((file) => file.path.split("/"));

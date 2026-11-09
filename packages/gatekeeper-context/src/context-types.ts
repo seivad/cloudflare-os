@@ -260,6 +260,56 @@ export type ContextCollectionSharing = {
 };
 
 // ---------------------------------------------------------------------------
+// skills.sh directory import
+// ---------------------------------------------------------------------------
+
+/** One skill the skills.sh directory lists. */
+export type DirectorySkillSearchResult = {
+  /** skills.sh's identifier, `<source>/<skillId>`. */
+  id: string;
+  /** The publishing GitHub repository, `owner/repo`; a host name for skills published elsewhere. */
+  source: string;
+  /** The skill's id within its source, passed to previewDirectorySkill(). */
+  skillId: string;
+  name: string;
+  installs: number;
+  /** False for skills not published from a GitHub repository, which cannot be imported. */
+  importable: boolean;
+};
+
+/** One skill as it would be imported, read from its repository at one commit. */
+export type DirectorySkillPreview = {
+  source: string;
+  skillId: string;
+  /** The commit the preview was read from; importDirectorySkill() imports exactly this commit. */
+  commitSha: string;
+  /** The skill's directory within the repository; "" when its SKILL.md is at the root. */
+  repoPath: string;
+  /** The manifest's frontmatter name, as published. */
+  name: string;
+  /** A valid Context skill name to import under, derived from the skill id. */
+  suggestedName: string;
+  description: string;
+  /** The manifest's instructions, after its frontmatter. */
+  body: string;
+  /** Every file the import writes, relative to the skill directory, SKILL.md first. */
+  files: { path: string; size: number }[];
+  /** Files below the skill directory that the import leaves out, and why. */
+  skipped: { path: string; reason: string }[];
+  totalBytes: number;
+  /** Why this skill cannot be imported; empty when it can. */
+  blockers: string[];
+};
+
+/** Where an imported skill was stored. */
+export type DirectorySkillImportResult = {
+  /** The new skill's manifest, `<name>/SKILL.md` at the collection root. */
+  manifestPath: string;
+  name: string;
+  fileCount: number;
+};
+
+// ---------------------------------------------------------------------------
 // Content-type helpers for context documents
 // ---------------------------------------------------------------------------
 
@@ -418,6 +468,28 @@ export interface ContextApi extends RpcTarget {
   moveContextSkill(collectionId: string, manifestPath: string, directoryPath: string): Promise<void>;
   /** Atomically renames a skill directory and its manifest name. */
   renameContextSkill(collectionId: string, manifestPath: string, newName: string): Promise<void>;
+
+  // --- skills.sh directory ---
+
+  /** Search the skills.sh directory; `query` needs at least two characters. */
+  searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]>;
+  /**
+   * Read a listed skill from its GitHub repository's default branch, resolving the commit it was
+   * read at. Nothing is stored.
+   */
+  previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview>;
+  /**
+   * Import a previewed skill, with every supporting file, as a new skill at the root of a web-backed
+   * collection the viewer can edit. It reads `commitSha` exactly, so what is stored is what was
+   * previewed. `options.name` names the new skill (default: the preview's suggestedName); a skill
+   * with that name, or anything at its directory, fails the import rather than being overwritten.
+   * The whole bundle is written in one transaction, or nothing is. The manifest's frontmatter
+   * `metadata` records where it came from.
+   */
+  importDirectorySkill(
+    collectionId: string, source: string, skillId: string, commitSha: string,
+    options?: { name?: string },
+  ): Promise<DirectorySkillImportResult>;
   /** Collections this account holds a role on, plus every public one. */
   listEnabledContextCollections(): Promise<EnabledCollectionInfo[]>;
   /** What the viewer may do with a collection it can read. */

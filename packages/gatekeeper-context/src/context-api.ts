@@ -9,7 +9,8 @@ import {
   ContextApi, ContextCollectionContent, ContextCollectionMetadata, ContextCollectionPermissions,
   ContextCollectionRole, ContextCollectionSharing, ContextCollectionVisibility,
   ContextDocument, ContextDocumentSummary, ContextGitTokenCreateResult, ContextGitTokenList,
-  DEFAULT_GIT_BRANCH, EnabledCollectionInfo,
+  DEFAULT_GIT_BRANCH, DirectorySkillImportResult, DirectorySkillPreview, DirectorySkillSearchResult,
+  EnabledCollectionInfo,
 } from "./context-types.js";
 import type { ContextCollectionDurableObject } from "./context-collection.js";
 import type { UserLibraryDurableObject } from "./user-library.js";
@@ -18,6 +19,11 @@ import type { ContextVerifierApi } from "./context-observers.js";
 import { canReadCollection, collectionPermissions } from "./collection-access.js";
 import { metadataToSummary } from "./collection-kv.js";
 import { domainName } from "./domain.js";
+import { assertSkillName } from "./agent-skill.js";
+import {
+  directoryLogger, directoryPreview, importedSkillDocuments, skillDirectoryClient, suggestedSkillName,
+} from "./directory-import.js";
+import type { SkillDirectoryClient } from "./skill-directory/index.js";
 
 const NOT_FOUND = "Collection not found or you don't have access.";
 
@@ -32,8 +38,14 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     private userLibraries: DurableObjectNamespace<UserLibraryDurableObject>,
     private registries: DurableObjectNamespace<LibraryRegistryDurableObject>,
     private userSelectionExchange: Fetcher<GatekeeperUserSelectionExchange>,
+    // Tests inject a directory client with a fake fetch; production shares the isolate's.
+    private directory?: SkillDirectoryClient,
   ) {
     super();
+  }
+
+  #directory(): SkillDirectoryClient {
+    return this.directory ?? skillDirectoryClient(this.env);
   }
 
   #collection(id: string) {
@@ -241,6 +253,46 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
   ): Promise<void> {
     await this.#assertCanEdit(collectionId);
     await this.#collection(collectionId).renameContextSkill(manifestPath, newName);
+  }
+
+  // --- skills.sh directory ---
+
+  async searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]> {
+    return this.#directory().search(query);
+  }
+
+  async previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview> {
+    return directoryPreview(await this.#directory().resolve(source, skillId));
+  }
+
+  async importDirectorySkill(
+    collectionId: string,
+    source: string,
+    skillId: string,
+    commitSha: string,
+    options: { name?: string } = {},
+  ): Promise<DirectorySkillImportResult> {
+    // The same checks as creating a skill, made before anything is fetched: the viewer can edit the
+    // collection (admins only, for a public one) and it is web-backed.
+    let collection = this.#collection(collectionId);
+    let [access, metadata] = await Promise.all([
+      collection.getAccess(this.accountId), collection.getMetadata(),
+    ]);
+    if (!collectionPermissions(access, this.isAdmin).canEdit) throw new Error(NOT_FOUND);
+    if (metadata.content.source !== "web") {
+      throw new Error("Git-based collections are read-only. All changes must be made through git.");
+    }
+    let name = options.name ?? suggestedSkillName(skillId);
+    assertSkillName(name);
+
+    let bundle = await this.#directory().resolve(source, skillId, commitSha);
+    let files = importedSkillDocuments(bundle, name, new Date());
+    await collection.createContextSkillBundle(name, files);
+    directoryLogger.info("imported skill from skills.sh", {
+      event: "context.skill.directory.imported",
+      source, skillId, commit: commitSha, collectionId, fileCount: files.length,
+    });
+    return { manifestPath: `${name}/SKILL.md`, name, fileCount: files.length };
   }
 
   // --- Listing & access ---
