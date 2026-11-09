@@ -2,7 +2,7 @@ import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind, GitCache, workerVersionTag, type ActionDescription, type ConnectHandoff } from '@gadgets/workshop-shared/gatekeeper';
 import { buildDescription, codeSpan, plainInline } from "@gadgets/gatekeeper-kit/action-description";
-import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
+import { connectHandoffPageHtml, errorPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { KvTtlCache } from "@gadgets/gatekeeper-kit/cache";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import {
@@ -185,6 +185,7 @@ const NONCE_BYTES = 32;
 // behind it.
 const TOKEN_MINT_TIMEOUT_MS = 20 * 1000;
 const AUTH_CODE_EXCHANGE_TIMEOUT_MS = 30 * 1000;
+const ACCOUNT_PROFILE_TIMEOUT_MS = 10 * 1000;
 const TOKEN_REVOKE_TIMEOUT_MS = 10 * 1000;
 
 // How long a permanent mint failure suppresses further attempts. Long enough to absorb the burst a
@@ -302,7 +303,11 @@ export default {
       newUrl.searchParams.set("response_type", "code");
       newUrl.searchParams.set("scope", begun.scopes.join(" "));
       newUrl.searchParams.set("access_type", "offline");
-      newUrl.searchParams.set("prompt", "consent");
+      // Always show the account picker: the browser's signed-in Google account is often not the
+      // one meant for this connection, and a silent sign-in would bind the wrong one. `consent`
+      // stays, since only a consent screen reliably returns a refresh token.
+      newUrl.searchParams.set("prompt", "consent select_account");
+      if (begun.loginHint) newUrl.searchParams.set("login_hint", begun.loginHint);
       // Add newly-requested scopes to any the user already granted, rather than replacing them.
       newUrl.searchParams.set("include_granted_scopes", "true");
       const encodedState = await previewOAuth.createAuthorizationState({
@@ -359,13 +364,16 @@ export default {
       let code = url.searchParams.get("code");
       if (!code) return new Response("Error: no 'code' provided", { status: 400 });
 
-      let handoff = await stub.acceptAuthCode(code, oauthState.oauthNonce);
-      if (!handoff) {
+      let result = await stub.acceptAuthCode(code, oauthState.oauthNonce);
+      if (!result) {
         return new Response(INVALID_LINK_HTML, {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
-      return htmlResponse(connectHandoffPageHtml(handoff));
+      if ("refused" in result) {
+        return htmlResponse(errorPageHtml(result.refused.title, result.refused.detail), 409);
+      }
+      return htmlResponse(connectHandoffPageHtml(result.handoff));
     } else {
       return new Response("Not Found", {status: 404});
     }
@@ -463,13 +471,26 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
  */
 export type HookDriverRef = { kind: "gmail" | "chat"; name: string };
 
+/**
+ * The Google account a connection was made as, pinned at its first connect so that a reconnect can
+ * renew it but never move it to whichever account the browser happens to be signed in to. Accounts
+ * connected before pinning existed are pinned by their next reconnect.
+ */
+type PinnedGoogleAccount = { sub: string; email?: string };
+const PINNED_ACCOUNT_KEY = "pinnedAccount";
+
 /** What a reconnect flow obtains, held in escrow until commitReconnect() writes it live. */
 type StagedGoogleCredentials = {
   refreshToken: string;
   accessToken: GoogleAccessToken;
   grantedScopes: string[];
   requestedResources: string[];
+  /** Absent from a stage the version before pinning made. */
+  account?: PinnedGoogleAccount;
 };
+
+/** A sign-in the account will not take, as the page the browser lands on describes it. */
+type RefusedSignIn = { refused: { title: string; detail: string } };
 
 // How long an account reuses an answer about its access to a subresource, counted from when it
 // started asking Google. Google doesn't tell us when a share changes: a revoked share is noticed
@@ -586,24 +607,33 @@ export class UserAccount extends DurableObject<Env> {
     };
   }
 
-  /** Begin the stored consent attempt, or return null when its initiation nonce is invalid. */
+  /**
+   * Begin the stored consent attempt, or return null when its initiation nonce is invalid. A
+   * reconnect or scope expansion pre-selects the pinned account, since only it can complete one.
+   */
   async beginOAuthFlow(initiationNonce: string, oauthRedirectUri: string): Promise<{
     oauthNonce: string,
     scopes: string[],
+    loginHint?: string,
   } | null> {
     let oauthNonce = generateNonce();
-    return beginStoredOAuthFlow(
+    let begun = beginStoredOAuthFlow(
         this.ctx.storage.kv, initiationNonce, oauthNonce, oauthRedirectUri, Date.now());
+    if (!begun) return null;
+    let pinned = this.ctx.storage.kv.get<PinnedGoogleAccount>(PINNED_ACCOUNT_KEY);
+    return pinned ? { ...begun, loginHint: pinned.sub } : begun;
   }
 
   consumeOAuthNonce(oauthNonce: string): boolean {
     return claimStoredOAuthFlow(this.ctx.storage.kv, oauthNonce, Date.now()) !== null;
   }
   /**
-   * Finishes the OAuth code exchange and returns the handoff for the page the browser lands on, or
-   * null if the OAuth nonce is invalid or expired.
+   * Finishes the OAuth code exchange and returns the handoff for the page the browser lands on, a
+   * refusal when a reconnect signed in as another Google account than the pinned one, or null if
+   * the OAuth nonce is invalid or expired.
    */
-  async acceptAuthCode(code: string, oauthNonce: string): Promise<ConnectHandoff | null> {
+  async acceptAuthCode(code: string, oauthNonce: string)
+      : Promise<{ handoff: ConnectHandoff } | RefusedSignIn | null> {
     let flow = claimStoredOAuthFlow(this.ctx.storage.kv, oauthNonce, Date.now());
     if (!flow) return null;
 
@@ -631,18 +661,38 @@ export class UserAccount extends DurableObject<Env> {
         throw new Error("OAuth exchange didn't return refresh token?");
       }
 
+      let profile = await getGoogleAccountProfile(
+          response.accessToken.token, AbortSignal.timeout(ACCOUNT_PROFILE_TIMEOUT_MS));
+      let account: PinnedGoogleAccount = { sub: profile.sub, ...(profile.email ? { email: profile.email } : {}) };
+
       if (flow.mode === "reconnect") {
+        let pinned = this.ctx.storage.kv.get<PinnedGoogleAccount>(PINNED_ACCOUNT_KEY);
+        if (pinned && pinned.sub !== account.sub) {
+          // The new grant is simply never stored, and not revoked: Google revokes per user, so
+          // revoking it would also sign out any other connection to that account.
+          let pinnedName = pinned.email ?? "the Google account it was made with";
+          let signedIn = account.email ?? "a different Google account";
+          return {
+            refused: {
+              title: "That's a different Google account",
+              detail: `This connection is for ${pinnedName}, but you signed in as ${signedIn}. ` +
+                  `Reconnect as ${pinnedName}, or connect ${signedIn} as a separate account.`,
+            },
+          };
+        }
         // The reconnect URL is a bearer capability, so the new grant is only staged until the
         // Workshop has confirmed the browser that finished the flow is the owner's (see
         // commitReconnect). Bound gadgets keep reading the current token meanwhile.
         let staged: StagedGoogleCredentials = {
           refreshToken: response.refreshToken, accessToken: response.accessToken,
           grantedScopes: response.grantedScopes, requestedResources: flow.requestedResources,
+          account,
         };
         let stageId = stageCredentials(this.ctx.storage.kv, staged, Date.now());
         return { callback, mode: flow.mode, stageId };
       }
 
+      this.ctx.storage.kv.put<PinnedGoogleAccount>(PINNED_ACCOUNT_KEY, account);
       this.ctx.storage.kv.put<string>("refreshToken", response.refreshToken);
       this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", response.accessToken);
       this.ctx.storage.kv.put<string>("credentialsId", crypto.randomUUID());
@@ -652,6 +702,7 @@ export class UserAccount extends DurableObject<Env> {
       mergeGrantedResources(this.ctx.storage.kv, flow.requestedResources);
       return { callback, mode: flow.mode, stageId: undefined };
     });
+    if (completion.refused) return { refused: completion.refused };
 
     let callback = completion.callback;
     let handoff: ConnectHandoff;
@@ -674,7 +725,7 @@ export class UserAccount extends DurableObject<Env> {
       }
     }
 
-    return handoff;
+    return { handoff };
   }
 
   /** Makes the grant staged under `stageId` live; see GatekeeperUser.commitReconnect. */
@@ -690,6 +741,7 @@ export class UserAccount extends DurableObject<Env> {
       this.#mintFailure = undefined;
       this.ctx.storage.kv.put<string[]>("grantedScopes", staged.grantedScopes);
       mergeGrantedResources(this.ctx.storage.kv, staged.requestedResources);
+      if (staged.account) this.ctx.storage.kv.put<PinnedGoogleAccount>(PINNED_ACCOUNT_KEY, staged.account);
     });
   }
 

@@ -16,7 +16,7 @@ import type { GoogleSpreadsheetSession } from "../../src/sheets-types";
 import type { GoogleSlidesGatekeeperImplProps } from "../../src/slides";
 import type { GooglePresentationSession } from "../../src/slides-types";
 import type {
-  ActionKind, HookController, ResourceDescription,
+  ActionKind, ConnectHandoff, HookController, ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {TestGitCache} from "../test-git-cache";
 import type {
@@ -33,7 +33,7 @@ import type { ChatMessageRaw } from "../../src/chat-api";
 import { ChatHookDriver as GoogleChatHookDriver, type ChatHookParams } from "../../src/chat-hooks";
 import { GmailHookDriver as GoogleGmailHookDriver, type GmailHookParams } from "../../src/gmail-hooks";
 
-export { default } from "../../src/google";
+export { default, GatekeeperUserImpl } from "../../src/google";
 export { ChatHookController } from "../../src/chat-hooks";
 export { GmailHookController } from "../../src/gmail-hooks";
 export {
@@ -83,6 +83,17 @@ export class UserAccount extends GoogleUserAccount {
       kv.delete("test:trackingHeld");
     }
     return await super.trackHookDriver(driver);
+  }
+}
+
+/** The Workshop's end of a connect flow, naming in its ticket which completion it received. */
+export class TestConnectCallback extends WorkerEntrypoint<Cloudflare.Env> {
+  async complete(): Promise<ConnectHandoff> {
+    return { targetOrigin: "https://workshop.example", ticket: "connected" };
+  }
+
+  async reconnectComplete(stageId: string): Promise<ConnectHandoff> {
+    return { targetOrigin: "https://workshop.example", ticket: `reconnected:${stageId}` };
   }
 }
 
