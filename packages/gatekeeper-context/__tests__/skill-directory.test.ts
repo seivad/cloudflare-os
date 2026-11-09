@@ -16,10 +16,7 @@ async function client(entries: ArchiveEntry[], options: {
 } = {}) {
   let archive = await repositoryArchive(entries, { commit: options.commit });
   let source = options.source ?? "cloudflare/skills";
-  let fake = fakeFetch({
-    [codeloadUrl(source)]: archiveResponse(archive),
-    [codeloadUrl(source, COMMIT)]: archiveResponse(archive),
-  });
+  let fake = fakeFetch({ [codeloadUrl(source)]: archiveResponse(archive) });
   return { directory: new SkillDirectoryClient({ fetch: fake.fetch, limits: options.limits }), ...fake };
 }
 
@@ -215,10 +212,12 @@ describe("skill bundles", () => {
     // One download: the second read is served from the recorded archive.
     expect(requests.map(request => request.url)).toEqual([codeloadUrl("cloudflare/skills")]);
 
-    // HEAD's commit is remembered briefly, and its archive kept, so a repeat needs no network.
+    // HEAD's commit is remembered briefly, and its archive kept, so another preview needs no
+    // network. An import of the previewed commit reads the default branch afresh.
     await directory.resolve("cloudflare/skills", "wrangler");
-    await directory.resolve("cloudflare/skills", "cloudflare", COMMIT);
     expect(requests).toHaveLength(1);
+    expect((await directory.resolve("cloudflare/skills", "cloudflare", COMMIT)).contents).toHaveLength(5);
+    expect(requests.map(request => request.url)).toEqual([codeloadUrl("cloudflare/skills"), codeloadUrl("cloudflare/skills")]);
   });
 
   it("imports only the manifest of a root-level skill", async () => {
@@ -251,11 +250,14 @@ describe("skill bundles", () => {
     }
   });
 
-  it("returns exactly the requested commit or fails", async () => {
+  it("imports the previewed commit only while it is still the default branch", async () => {
     let archive = await repositoryArchive([{ path: "skills/x/SKILL.md", body: manifest("x") }], { commit: OTHER_COMMIT });
-    let fake = fakeFetch({ [codeloadUrl("cloudflare/skills", COMMIT)]: archiveResponse(archive) });
-    await expect(new SkillDirectoryClient({ fetch: fake.fetch }).resolve("cloudflare/skills", "x", COMMIT))
-      .rejects.toThrow("different commit");
+    let fake = fakeFetch({ [codeloadUrl("cloudflare/skills")]: archiveResponse(archive) });
+    let directory = new SkillDirectoryClient({ fetch: fake.fetch });
+    await expect(directory.resolve("cloudflare/skills", "x", COMMIT)).rejects.toThrow("changed on GitHub since it was previewed");
+    expect((await directory.resolve("cloudflare/skills", "x", OTHER_COMMIT)).commitSha).toBe(OTHER_COMMIT);
+    // Never fetched by SHA: a commit could otherwise come from elsewhere in the fork network.
+    expect(fake.requests.every(request => !request.url.includes(COMMIT) && !request.url.includes(OTHER_COMMIT))).toBe(true);
   });
 
   it("explains a missing skill or repository without fetching for invalid input", async () => {
@@ -266,12 +268,108 @@ describe("skill bundles", () => {
     await expect(directory.resolve("cloudflare/skills", "x", "main")).rejects.toThrow("full Git commit");
     expect(requests).toHaveLength(1);
     await expect(new SkillDirectoryClient({ fetch: fakeFetch({}).fetch }).resolve("cloudflare/nothing", "x"))
-      .rejects.toThrow("no public repository");
+      .rejects.toThrow("Only public GitHub repositories can be imported, and cloudflare/nothing is private or does not exist.");
   });
 
   it("rejects an archive that is not a repository archive", async () => {
     let fake = fakeFetch({ [codeloadUrl("cloudflare/skills")]: () => new Response("<html>nope</html>") });
     await expect(new SkillDirectoryClient({ fetch: fake.fetch }).resolve("cloudflare/skills", "x"))
       .rejects.toThrow("could not be read");
+  });
+});
+
+const TOKEN = "github_pat_test";
+const metadataUrl = (source: string) => `https://api.github.com/repos/${source}`;
+const metadata = (fullName: string, visibility: "public" | "private" | "internal") => () =>
+  Response.json({ full_name: fullName, private: visibility !== "public", visibility });
+
+describe("public repositories only", () => {
+  const entries = [{ path: "skills/x/SKILL.md", body: manifest("x") }];
+
+  it("refuses a private repository without a token, anonymously", async () => {
+    // Codeload answers an anonymous request for a private repository as if it did not exist.
+    let fake = fakeFetch({});
+    await expect(new SkillDirectoryClient({ fetch: fake.fetch }).resolve("acme/secret", "x"))
+      .rejects.toThrow("Only public GitHub repositories can be imported, and acme/secret is private or does not exist.");
+    expect(fake.requests.map(request => request.url)).toEqual([codeloadUrl("acme/secret")]);
+    expect(fake.requests.every(request => request.headers.authorization === undefined)).toBe(true);
+  });
+
+  it("refuses a private or internal repository with a token, never requesting its archive", async () => {
+    let archive = await repositoryArchive(entries);
+    for (let visibility of ["private", "internal"] as const) {
+      let fake = fakeFetch({
+        [metadataUrl("acme/secret")]: metadata("acme/secret", visibility),
+        [codeloadUrl("acme/secret")]: archiveResponse(archive),
+      });
+      let directory = new SkillDirectoryClient({ fetch: fake.fetch, githubToken: TOKEN });
+      await expect(directory.resolve("acme/secret", "x"), visibility)
+        .rejects.toThrow("Only public GitHub repositories can be imported, and acme/secret is private or does not exist.");
+      await expect(directory.resolve("acme/secret", "x", COMMIT), visibility).rejects.toThrow("Only public GitHub repositories");
+      expect(fake.requests.map(request => request.url)).toEqual([metadataUrl("acme/secret"), metadataUrl("acme/secret")]);
+    }
+    let missing = fakeFetch({});
+    await expect(new SkillDirectoryClient({ fetch: missing.fetch, githubToken: TOKEN }).resolve("acme/gone", "x"))
+      .rejects.toThrow("acme/gone is private or does not exist");
+    expect(missing.requests.map(request => request.url)).toEqual([metadataUrl("acme/gone")]);
+  });
+
+  it("downloads a public repository under the token, by its canonical name, and checks again after", async () => {
+    let archive = await repositoryArchive(entries);
+    let fake = fakeFetch({
+      [metadataUrl("old-owner/skills")]: () => new Response(null, {
+        status: 301, headers: { location: "https://api.github.com/repositories/42" },
+      }),
+      "https://api.github.com/repositories/42": metadata("new-owner/skills", "public"),
+      [metadataUrl("new-owner/skills")]: metadata("new-owner/skills", "public"),
+      [codeloadUrl("new-owner/skills")]: archiveResponse(archive),
+    });
+    let bundle = await new SkillDirectoryClient({ fetch: fake.fetch, githubToken: TOKEN }).resolve("old-owner/skills", "x");
+    expect(bundle.commitSha).toBe(COMMIT);
+    expect(fake.requests.map(request => [request.url, request.headers.authorization])).toEqual([
+      [metadataUrl("old-owner/skills"), `Bearer ${TOKEN}`],
+      ["https://api.github.com/repositories/42", `Bearer ${TOKEN}`],
+      [codeloadUrl("new-owner/skills"), `Bearer ${TOKEN}`],
+      [metadataUrl("new-owner/skills"), `Bearer ${TOKEN}`],
+    ]);
+  });
+
+  it("refuses, and keeps nothing, when a repository turns private while it downloads", async () => {
+    let archive = await repositoryArchive(entries);
+    let checks = 0;
+    let fake = fakeFetch({
+      [metadataUrl("acme/flip")]: () => metadata("acme/flip", checks++ === 0 ? "public" : "private")(),
+      [codeloadUrl("acme/flip")]: archiveResponse(archive),
+    });
+    let directory = new SkillDirectoryClient({ fetch: fake.fetch, githubToken: TOKEN });
+    await expect(directory.resolve("acme/flip", "x")).rejects.toThrow("acme/flip is private or does not exist");
+    await expect(directory.resolve("acme/flip", "x")).rejects.toThrow("acme/flip is private or does not exist");
+    // Nothing was cached from the refused download: the second attempt checked first and stopped.
+    expect(fake.requests.map(request => request.url)).toEqual([
+      metadataUrl("acme/flip"), codeloadUrl("acme/flip"), metadataUrl("acme/flip"), metadataUrl("acme/flip"),
+    ]);
+  });
+
+  it("checks again on import, even when the previewed archive is cached", async () => {
+    let archive = await repositoryArchive(entries);
+    let visibility: "public" | "private" = "public";
+    let fake = fakeFetch({
+      [metadataUrl("acme/skills")]: () => metadata("acme/skills", visibility)(),
+      [codeloadUrl("acme/skills")]: archiveResponse(archive),
+    });
+    let directory = new SkillDirectoryClient({ fetch: fake.fetch, githubToken: TOKEN });
+    let preview = await directory.resolve("acme/skills", "x");
+    visibility = "private";
+    await expect(directory.resolve("acme/skills", "x", preview.commitSha)).rejects.toThrow("Only public GitHub repositories");
+  });
+
+  it("never follows a redirect away from the archive it asked for", async () => {
+    let fake = fakeFetch({
+      [codeloadUrl("acme/skills")]: () => new Response(null, {
+        status: 302, headers: { location: "https://codeload.github.com/acme/private/legacy.tar.gz/HEAD?token=signed" },
+      }),
+    });
+    await expect(new SkillDirectoryClient({ fetch: fake.fetch }).resolve("acme/skills", "x")).rejects.toThrow("does not fetch from");
+    expect(fake.requests).toHaveLength(1);
   });
 });
