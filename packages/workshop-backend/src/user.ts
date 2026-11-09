@@ -1919,9 +1919,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         this.#findConnectedAccountByIdentity(record.vendorId, uniqueName, record.id)) {
       // OAuth providers often return the currently logged-in identity when the user tries to add
       // another account. Avoid showing duplicate account rows: keep the existing record stable for
-      // any UI references, and revoke the newly-created duplicate grant.
-      await record.account.revoke();
-      return;
+      // any UI references, and say why nothing was added. #dropPendingConnect leaves the duplicate
+      // grant unrevoked.
+      throw new Error(`${uniqueName} is already connected. To add another account, choose it ` +
+          "when asked which account to use.");
     }
 
     this.storage.connectedAccounts.put(record);
@@ -1937,25 +1938,39 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async markCredentialsRestored(accountId: number, expiresAt?: Date) {
+  /**
+   * Returns the identity when the restored credentials are another connected account's, which a
+   * gatekeeper that does not pin its reconnects lets a reconnect sign in as. The record then keeps
+   * its description, so the two don't show as one, and is marked expired, so it asks to be
+   * reconnected as the account it was made with.
+   */
+  async markCredentialsRestored(accountId: number, expiresAt?: Date): Promise<string | undefined> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
-
-    record.credentialsExpired = false;
-    record.credentialExpiresAt = expiresAt;
-    this.storage.connectedAccounts.put(record);
 
     // Re-fetch the description since the user may have re-authed with different info. Best-effort:
     // the credentials are live either way, and a record still showing as expired over a failed
     // describe() would send the user back through a reconnect that changes nothing.
+    let description: AccountDescription | undefined;
     try {
-      record.description = await record.account.describe();
-      this.storage.connectedAccounts.put(record);
+      description = await record.account.describe();
     } catch (err) {
       logger.warn("failed to refresh the description of a restored account", {
         event: "account.describe.refresh.failed", vendorId: record.vendorId, accountId, error: err,
       });
     }
+    let uniqueName = description?.uniqueName;
+    if (uniqueName && this.#findConnectedAccountByIdentity(record.vendorId, uniqueName, accountId)) {
+      record.credentialsExpired = true;
+      this.storage.connectedAccounts.put(record);
+      return uniqueName;
+    }
+
+    record.credentialsExpired = false;
+    record.credentialExpiresAt = expiresAt;
+    if (description) record.description = description;
+    this.storage.connectedAccounts.put(record);
+    return undefined;
   }
 
   // --- Connect handoff (see connect-handoff.ts) ---
@@ -2054,7 +2069,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (record.stageId === undefined) throw new Error("Corrupt pending reconnect.");
       // A failed commit changed nothing live, and the gatekeeper's stage expires on its own.
       await account.account.commitReconnect(record.stageId);
-      await this.markCredentialsRestored(record.accountId, record.credentialExpiresAt);
+      let duplicate = await this.markCredentialsRestored(record.accountId, record.credentialExpiresAt);
+      if (duplicate !== undefined) {
+        throw new Error(`You signed in as ${duplicate}, which is connected separately. Reconnect ` +
+            "and choose the account this connection was made with.");
+      }
       logger.info("account credentials restored", {
         event: "account.reconnect.completed", vendorId: account.vendorId,
         accountId: record.accountId,
@@ -2063,12 +2082,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   // Drop a pending handoff that will never activate. A staged connect holds a victim's (or just an
-  // abandoned) grant in a reachable gatekeeper DO, so it is revoked, best-effort. A staged restore
-  // left nothing live: the gatekeeper's staged credentials stop being committable on their own
-  // (commitStagedCredentials refuses an expired stage), though they stay stored until the next
-  // reconnect overwrites them; deleting them from here is a follow-up.
+  // abandoned) grant in a reachable gatekeeper DO, so it is revoked, best-effort, unless a connected
+  // account has the same identity: a provider that revokes per user rather than per token (Google)
+  // would sign that account out too. A staged restore left nothing live: the gatekeeper's staged
+  // credentials stop being committable on their own (commitStagedCredentials refuses an expired
+  // stage), though they stay stored until the next reconnect overwrites them; deleting them from
+  // here is a follow-up.
   async #dropPendingConnect(pending: PendingHandoffRecord): Promise<void> {
-    if (pending.kind === "connect" && pending.connect) {
+    let { uniqueName } = pending.connect?.description ?? {};
+    if (pending.kind === "connect" && pending.connect && !(uniqueName &&
+        this.#findConnectedAccountByIdentity(pending.connect.vendorId, uniqueName, pending.accountId))) {
       try {
         await pending.connect.account.revoke();
       } catch (err) {
