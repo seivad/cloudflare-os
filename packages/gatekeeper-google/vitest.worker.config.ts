@@ -33,6 +33,7 @@ export default defineConfig({
   test: {
     testTimeout: 15_000,
     include: [
+      "__tests__/workerd/account-pinning.test.ts",
       "__tests__/workerd/chat-actions.test.ts",
       "__tests__/workerd/chat-hooks.test.ts",
       "__tests__/workerd/configurators.test.ts",
