@@ -158,29 +158,75 @@ describe("connect handoff", () => {
     });
   });
 
-  it("revokes a staged connect it failed to persist, and reports the failure", async () => {
+  it("refuses a connect of an identity already connected, saying so and revoking nothing", async () => {
     const { stub, inDo } = freshUser();
     const { ticket } = await inDo(async user => {
       user.storage.nextAccountId.put(1);
-      // The same identity is already connected, so persisting runs the dedupe path, whose revoke of
-      // the duplicate grant fails here — the one way putConnectedAccount itself can throw.
       user.storage.connectedAccounts.put({
-        id: 0, account: fakeAccount(user, "dup").account, vendorId: "github",
+        id: 0, account: fakeAccount(user, "dup").account, vendorId: "google",
         description: { displayName: "dup", uniqueName: "dup" },
       });
-      return user.stagePendingConnect(1, fakeAccount(user, "dup", { failRevoke: true }).account, "github");
+      return user.stagePendingConnect(1, fakeAccount(user, "dup").account, "google");
     });
     const nonce = await stub.openConnectFlow(1);
 
-    expect(await redeem(stub, ticket, nonce)).toBe("revoke failed");
+    expect(await redeem(stub, ticket, nonce)).toBe(
+      "dup is already connected. To add another account, choose it when asked which account to use.");
     await inDo(async user => {
       expect(user.storage.connectedAccounts.get(1)).toBeUndefined();
+      expect(user.storage.connectedAccounts.get(0)?.description).toEqual({ displayName: "dup", uniqueName: "dup" });
       expect(pendingCount(user)).toBe(0);
-      // The dedupe revoke that threw, then the best-effort revoke of the dropped grant.
-      expect(await fakeAccount(user, "dup").calls()).toEqual(["describe", "revoke", "revoke"]);
+      // A provider that revokes per user would sign the live account out with the duplicate.
+      expect(await fakeAccount(user, "dup").calls()).toEqual(["describe"]);
     });
     // The ticket was consumed by the attempt.
     expect(await redeem(stub, ticket, nonce)).toBe(EXPIRED);
+  });
+
+  it("sweeps an unconfirmed connect without revoking an identity a live account has", async () => {
+    const { inDo } = freshUser();
+    await inDo(async user => {
+      user.storage.nextAccountId.put(1);
+      user.storage.connectedAccounts.put({
+        id: 0, account: fakeAccount(user, "shared").account, vendorId: "google",
+        description: { displayName: "shared", uniqueName: "shared" },
+      });
+      // The provider signed in the account already connected, and the popup was abandoned.
+      await user.stagePendingConnect(1, fakeAccount(user, "shared").account, "google");
+      await user.stagePendingConnect(2, fakeAccount(user, "abandoned").account, "google");
+      expireAll(user.storage.pendingHandoffs);
+      await user.alarm();
+      expect(pendingCount(user)).toBe(0);
+      expect(await fakeAccount(user, "shared").calls()).toEqual(["describe"]);
+      expect(await fakeAccount(user, "abandoned").calls()).toEqual(["describe", "revoke"]);
+    });
+  });
+
+  it("leaves a reconnect that signed in as another connected account expired, and says so", async () => {
+    const { stub, inDo } = freshUser();
+    const { ticket } = await inDo(async user => {
+      user.storage.nextAccountId.put(2);
+      user.storage.connectedAccounts.put({
+        id: 0, account: fakeAccount(user, "taken").account, vendorId: "google",
+        description: { displayName: "taken", uniqueName: "taken" },
+      });
+      // Record 1 was made as "bob"; its gatekeeper, which does not pin reconnects, now holds "taken".
+      user.storage.connectedAccounts.put({
+        id: 1, account: fakeAccount(user, "taken").account, vendorId: "google",
+        description: { displayName: "bob", uniqueName: "bob" }, credentialsExpired: true,
+      });
+      return user.stagePendingRestore(1, STAGE_ID, new Date("2027-06-01"));
+    });
+    const nonce = await stub.openConnectFlow(1);
+
+    expect(await redeem(stub, ticket, nonce)).toBe("You signed in as taken, which is connected " +
+      "separately. Reconnect and choose the account this connection was made with.");
+    await inDo(async user => {
+      expect(await fakeAccount(user, "taken").calls()).toEqual([`commitReconnect(${STAGE_ID})`, "describe"]);
+      expect(user.storage.connectedAccounts.get(1)).toMatchObject({
+        credentialsExpired: true, description: { displayName: "bob", uniqueName: "bob" },
+      });
+    });
   });
 
   it("commits a staged reconnect and then marks the credentials restored", async () => {
