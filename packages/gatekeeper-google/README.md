@@ -265,6 +265,19 @@ Disconnecting a Google account drops its hooks from the mailbox's and each space
 nothing goes on reading or renewing with credentials that are gone; a watch or subscription no
 hook uses any more lapses, as when the hooks are disabled.
 
+## Several Google accounts
+
+Every consent screen shows Google's account picker (`prompt=consent select_account`), so a browser
+signed in to several Google accounts connects the one the user picks rather than whichever Google
+would choose silently. Each connection is pinned to the account its first connect signed in as, by
+Google's stable `sub`: a reconnect or scope expansion pre-selects it (`login_hint`), and one that
+signs in as anyone else is refused, and its grant is never stored. Connections made before pinning
+are pinned by their next reconnect.
+
+A refused or duplicate grant is never revoked. Google revokes per user, not per token, so revoking
+it would also sign out every other connection to that account. Connecting an account that is
+already connected adds nothing and says so.
+
 ## Worker Preview OAuth callbacks
 
 Deployments using Worker Preview hostnames can register one stable Google callback and relay the
