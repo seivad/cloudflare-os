@@ -202,8 +202,10 @@ The management API has three methods, validated by `capnweb-validate` like the r
   instructions, every file it would import with sizes, the files it leaves out and why, and
   `blockers`: reasons the import would be refused. Nothing is stored.
 - `importDirectorySkill(collectionId, source, skillId, commitSha, { name? })` imports exactly
-  `commitSha`, so what is stored is what was previewed. The skill goes to `<name>/SKILL.md` at the
-  collection root; `name` defaults to the preview's `suggestedName`, the skill id.
+  `commitSha`, so what is stored is what was previewed. It reads the default branch afresh, which
+  must still be at `commitSha`; if the skill changed after the preview, the import is refused and the
+  skill must be previewed again. The skill goes to `<name>/SKILL.md` at the collection root; `name`
+  defaults to the preview's `suggestedName`, the skill id.
 
 skills.sh has no content API, so files come from GitHub. The skill's directory is found with the
 rules of the skills CLI that skills.sh is built around (`npx skills add`, vercel-labs/skills): its
@@ -266,11 +268,27 @@ The module that talks to skills.sh and GitHub, `src/skill-directory/`, depends o
 It builds URLs only for fixed hosts (`skills.sh`, `codeload.github.com`, and `api.github.com` when a
 token is set) from components validated against strict patterns: `owner` and `repo` against GitHub's
 name rules, the skill id against the slug pattern, the commit against 40 hexadecimal characters. A
-crafted `source` cannot name another host or path. Redirects are followed by hand, only to
-`www.skills.sh` or `codeload.github.com`, and credentials are dropped when the host changes. Every
-request has a timeout. An archive path that is absolute or contains `..` fails the whole import, and
-paths are confined to the skill's directory. The commit comes from the archive's own pax header, and
-an archive for a requested commit must say it is that commit.
+crafted `source` cannot name another host or path. Redirects are followed by hand: search may move to
+`www.skills.sh`, and a renamed repository's metadata within `api.github.com`; archive requests follow
+none, and credentials are dropped whenever the host changes. Every request has a timeout. An archive
+path that is absolute or contains `..` fails the whole import, and paths are confined to the skill's
+directory.
+
+Only public repositories are ever read, whatever the configuration, so no account can use the
+deployment to read a repository it could not read itself:
+
+- Without `GITHUB_TOKEN`, archive requests are anonymous, and GitHub serves anonymous archive
+  requests for public repositories only.
+- With it, the token is used only to raise rate limits. Because codeload honours a token for any
+  repository it can read, the repository's metadata (`GET /repos/{owner}/{repo}`, under the token)
+  must say `private: false` and `visibility: "public"` before its archive is requested, under the
+  canonical name that check returned, and again once the archive has been read. A private, internal
+  or missing repository is refused with "Only public GitHub repositories can be imported", and its
+  archive is never requested with the token.
+- Only a repository's default branch is downloaded; a commit is never fetched by SHA, which could
+  return a commit from elsewhere in the repository's fork network. The commit comes from the
+  archive's own pax header. An import reads the default branch afresh, re-running the public check,
+  and refuses unless it is still at the previewed commit.
 
 The management app runs in an opaque-origin sandbox, so every directory request goes through these
 server methods. Successful imports are logged as `context.skill.directory.imported` with the source,
@@ -280,8 +298,14 @@ skill id, commit, collection and file count, never content.
 
 Archives come from `codeload.github.com` as one gzipped tarball per repository, which is not subject
 to GitHub's 60-requests-an-hour limit for unauthenticated REST calls, a limit Workers would share
-across egress IPs. An optional `GITHUB_TOKEN` secret on the Context Worker sends archive requests
-through the REST tarball endpoint under the token's limit instead. Each isolate caches search results
-for a minute, the commit a repository's default branch was at for a minute, and up to 24 MB of
-archives by commit, so a preview followed by an import downloads once.
+across egress IPs. Should anonymous archive downloads be throttled anyway, an optional `GITHUB_TOKEN`
+secret on the Context Worker downloads them under a token's limits, at the cost of two metadata
+requests per download for the public check. It must be a fine-grained personal access token with
+"Public repositories (read-only)" access and no private repositories; the public check refuses
+private repositories even so, but a token that cannot read them is the first line of defence.
+
+Each isolate caches search results for a minute, the commit a repository's default branch was at for
+a minute, and up to 24 MB of archives by repository and commit, all from public repositories only. A
+preview reads one download for both passes over the archive; an import downloads the default branch
+again to confirm it.
 

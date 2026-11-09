@@ -27,14 +27,19 @@ export class TtlCache<V> {
 }
 
 /**
- * Compressed repository archives keyed by commit, which never change: least recently used entries
- * are evicted once their total size exceeds `maxBytes`.
+ * Compressed repository archives keyed by repository and commit, which never change: least recently
+ * used entries are evicted once their total size exceeds `maxBytes`. Only archives fetched from a
+ * repository confirmed public belong here.
  */
 export class ArchiveCache {
   #entries = new Map<string, { chunks: Uint8Array[]; size: number }>();
   #size = 0;
 
   constructor(private maxBytes: number) {}
+
+  has(key: string): boolean {
+    return this.#entries.has(key);
+  }
 
   get(key: string): Uint8Array[] | undefined {
     let entry = this.#entries.get(key);

@@ -474,14 +474,15 @@ export interface ContextApi extends RpcTarget {
   /** Search the skills.sh directory; `query` needs at least two characters. */
   searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]>;
   /**
-   * Read a listed skill from its GitHub repository's default branch, resolving the commit it was
-   * read at. Nothing is stored.
+   * Read a listed skill from the default branch of its GitHub repository, which must be public,
+   * resolving the commit it was read at. Nothing is stored.
    */
   previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview>;
   /**
    * Import a previewed skill, with every supporting file, as a new skill at the root of a web-backed
    * collection the viewer can edit. It reads `commitSha` exactly, so what is stored is what was
-   * previewed. `options.name` names the new skill (default: the preview's suggestedName); a skill
+   * previewed: the repository's default branch is read again, must still be public and must still be
+   * at `commitSha`, or the import is refused and the skill must be previewed again. `options.name` names the new skill (default: the preview's suggestedName); a skill
    * with that name, or anything at its directory, fails the import rather than being overwritten.
    * The whole bundle is written in one transaction, or nothing is. The manifest's frontmatter
    * `metadata` records where it came from.

@@ -3,16 +3,17 @@
 // stored; callers turn a bundle into their own documents.
 //
 // Every request goes to a fixed host (skills.sh, codeload.github.com, or api.github.com with a
-// token), built only from validated components, with a timeout, and redirects are followed only to
-// codeload.github.com (or www.skills.sh). Fetched content is untrusted: paths are confined to the
-// skill's directory and sizes are capped (see `bundle.ts`).
+// token), built only from validated components, with a timeout; redirects are followed only to
+// www.skills.sh, and within api.github.com for renamed repositories. Only public repositories are
+// read, and only their default branch (see `github.ts`). Fetched content is untrusted: paths are
+// confined to the skill's directory and sizes are capped (see `bundle.ts`).
 
 import { ArchiveCache, TtlCache } from "./cache.js";
 import {
   DEFAULT_BUNDLE_LIMITS, resolveDirectorySkill, type ArchiveSource, type BundleLimits,
   type DirectorySkillBundle,
 } from "./bundle.js";
-import { fetchRepositoryArchive } from "./github.js";
+import { fetchPublicRepositoryArchive } from "./github.js";
 import { rethrowAsDirectoryError, type FetchLike } from "./http.js";
 import { searchSkillsSh, type SkillsShSkill } from "./skills-sh.js";
 import {
@@ -31,7 +32,10 @@ export {
 
 export type SkillDirectoryOptions = {
   fetch?: FetchLike;
-  /** A GitHub token: archives then come through the REST API, under the token's rate limit. */
+  /**
+   * A GitHub token, used only to raise rate limits: archives are then downloaded under it, after
+   * the repository's metadata confirms it is public.
+   */
   githubToken?: string;
   limits?: Partial<BundleLimits>;
   now?: () => number;
@@ -124,51 +128,68 @@ export class SkillDirectoryClient {
   }
 
   /**
-   * Resolve skill `skillId` published from `source` (`owner/repo`): at `commitSha` exactly, or at
-   * the repository's default branch when it is omitted.
+   * Resolve skill `skillId` published from `source` (`owner/repo`), a public GitHub repository.
+   *
+   * Without `commitSha`, it is read from the default branch, or from that branch's commit as read
+   * within the last minute. With `commitSha` (an import of a previewed skill), the default branch
+   * is read afresh, confirming again that the repository is public, and must still be at
+   * `commitSha`; otherwise the skill changed after the preview and the import is refused.
    */
   async resolve(source: string, skillId: string, commitSha?: string): Promise<DirectorySkillBundle> {
     let repository = assertGitHubSource(source);
     assertSkillId(skillId);
     if (commitSha !== undefined) assertCommitSha(commitSha);
     let repositoryKey = `${repository.owner}/${repository.repo}`.toLowerCase();
-    let ref = commitSha ?? this.#heads.get(repositoryKey) ?? "HEAD";
-    let limitError: SkillDirectoryError | null = null;
+    let head = this.#heads.get(repositoryKey);
+    let ref = commitSha
+      ?? (head !== undefined && this.#archives.has(`${repositoryKey}@${head}`) ? head : "HEAD");
+    let streamError: SkillDirectoryError | null = null;
     try {
       return await resolveDirectorySkill(
-        this.#archiveSource(repository, repositoryKey, error => { limitError = error; }),
+        this.#archiveSource(repository, repositoryKey, commitSha !== undefined, error => { streamError = error; }),
         repository, skillId, ref, this.#limits);
     } catch (error) {
-      rethrowAsDirectoryError(limitError ?? error, "GitHub");
+      rethrowAsDirectoryError(streamError ?? error, "GitHub");
     }
   }
 
-  #archiveSource(repository: GitHubRepository, repositoryKey: string,
-      onLimit: (error: SkillDirectoryError) => void): ArchiveSource {
+  /**
+   * Archives for one resolution. The network is only asked for the default branch of a repository
+   * confirmed public; a commit is served from an archive recorded from such a request, and the
+   * caller checks that the archive names the commit it asked for. `fresh` makes the first read go
+   * to the network even when the commit is cached.
+   */
+  #archiveSource(repository: GitHubRepository, repositoryKey: string, fresh: boolean,
+      onStreamError: (error: SkillDirectoryError) => void): ArchiveSource {
     let recordings = new Map<string, Recording>();
+    let fetched = false;
     let expand = (compressed: ReadableStream<Uint8Array>) => compressed
       .pipeThrough(new DecompressionStream("gzip"))
-      .pipeThrough(meter(MAX_EXPANDED_BYTES, "This repository is too large to import from.", null, 0, onLimit));
+      .pipeThrough(meter(MAX_EXPANDED_BYTES, "This repository is too large to import from.", null, 0, onStreamError));
     return {
       open: async (ref) => {
-        let cached = isCommitSha(ref) ? this.#archives.get(`${repositoryKey}@${ref}`) : undefined;
+        let cached = isCommitSha(ref) && (fetched || !fresh)
+          ? this.#archives.get(`${repositoryKey}@${ref}`)
+          : undefined;
         if (cached) return expand(streamOf(cached));
-        let compressed = await fetchRepositoryArchive(this.#fetch, repository, ref, {
+        fetched = true;
+        let compressed = await fetchPublicRepositoryArchive(this.#fetch, repository, {
           token: this.#token,
           signal: AbortSignal.timeout(ARCHIVE_TIMEOUT_MS),
+          onStreamError,
         });
         let recording: Recording = { chunks: [], size: 0, complete: false, overflowed: false };
         recordings.set(ref, recording);
         return expand(compressed.pipeThrough(meter(
           MAX_ARCHIVE_BYTES, "This repository is too large to import from.", recording,
-          ARCHIVE_CACHE_BYTES / 2, onLimit)));
+          ARCHIVE_CACHE_BYTES / 2, onStreamError)));
       },
       scanned: (ref, sha) => {
         let recording = recordings.get(ref);
         if (recording?.complete && !recording.overflowed) {
           this.#archives.set(`${repositoryKey}@${sha}`, recording.chunks, recording.size);
         }
-        if (ref === "HEAD") this.#heads.set(repositoryKey, sha);
+        if (recording) this.#heads.set(repositoryKey, sha);
       },
     };
   }

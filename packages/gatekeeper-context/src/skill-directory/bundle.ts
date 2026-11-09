@@ -60,7 +60,10 @@ export type DirectorySkillBundle = {
 
 /** Where archives come from; the client caches and records them. */
 export interface ArchiveSource {
-  /** The uncompressed tar stream of the repository at `ref` ("HEAD" or a commit SHA). */
+  /**
+   * The uncompressed tar stream of the repository at `ref`: "HEAD", or a commit SHA, for which the
+   * stream may still hold another commit; the resolver checks the commit each archive names.
+   */
   open(ref: string): Promise<ReadableStream<Uint8Array>>;
   /** Called after a stream from `open(ref)` was read to its end and found to hold commit `sha`. */
   scanned?(ref: string, sha: string): void;
@@ -267,7 +270,8 @@ export async function resolveDirectorySkill(
   let commitSha = index.commitSha ?? (isCommitSha(ref) ? ref : null);
   if (!commitSha) throw new SkillDirectoryError("GitHub did not say which commit it sent.");
   if (isCommitSha(ref) && commitSha !== ref) {
-    throw new SkillDirectoryError("GitHub sent a different commit than the one requested.");
+    throw new SkillDirectoryError(
+      "This skill has changed on GitHub since it was previewed. Preview it again to import the latest version.");
   }
   source.scanned?.(ref, commitSha);
 
@@ -316,7 +320,11 @@ export async function resolveDirectorySkill(
 
   let paths = new ArchivePaths();
   let found = new Map<string, Uint8Array>();
+  let contentCommit: string | null = null;
   await scanTar(await source.open(commitSha), {
+    onGlobalHeader(records) {
+      contentCommit ??= commitFromGlobalHeader(records);
+    },
     onEntry(entry) {
       let path = paths.relative(entry.path, entry.type);
       return path !== null && entry.type === "file" && wanted.has(path) ? limits.maxFileBytes : null;
@@ -325,6 +333,9 @@ export async function resolveDirectorySkill(
       found.set(wanted.get(entry.path.slice(entry.path.indexOf("/") + 1))!, body);
     },
   });
+  if (contentCommit !== commitSha) {
+    throw new SkillDirectoryError("The skill changed on GitHub while it was being read. Try again.");
+  }
   for (let file of plan.files.slice(1)) {
     let bytes = found.get(file.path);
     if (!bytes) throw new SkillDirectoryError("The repository archive changed while it was being read.");

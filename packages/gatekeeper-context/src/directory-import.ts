@@ -23,8 +23,8 @@ const SKILL_NAME_MAX_LENGTH = 64;
 let client: { token: string | undefined; instance: SkillDirectoryClient } | null = null;
 
 /**
- * The isolate's directory client. One is shared by every account so its caches are too; directory
- * data is public, and with `GITHUB_TOKEN` set every account reads through the same token anyway.
+ * The isolate's directory client. One is shared by every account so its caches are too: it reads
+ * public repositories only, with or without `GITHUB_TOKEN`, so nothing cached is private.
  */
 export function skillDirectoryClient(env: Cloudflare.Env): SkillDirectoryClient {
   let token = env.GITHUB_TOKEN || undefined;

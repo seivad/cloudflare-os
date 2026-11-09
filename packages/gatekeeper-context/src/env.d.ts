@@ -6,8 +6,9 @@ declare namespace Cloudflare {
     CONTEXT_COLLECTIONS: KVNamespace;
     // Optional Git-compatible backing repos for artifact-backed context collections.
     ARTIFACTS?: Artifacts;
-    // Optional GitHub token (a secret) for skills.sh imports: archives then come through the REST
-    // API under the token's rate limit, and private repositories it can read become importable.
+    // Optional GitHub token (a secret) for skills.sh imports, used only to raise rate limits on
+    // archive downloads. Only public repositories are read even with it: see skill-directory/github.ts.
+    // Make it a fine-grained token with public-repository read-only access.
     GITHUB_TOKEN?: string;
   }
 

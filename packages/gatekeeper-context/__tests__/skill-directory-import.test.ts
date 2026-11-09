@@ -81,10 +81,7 @@ const SKILL_ENTRIES = [
 
 async function directoryFor(entries = SKILL_ENTRIES) {
   let archive = await repositoryArchive(entries);
-  let fake = fakeFetch({
-    [codeloadUrl("anthropics/skills")]: archiveResponse(archive),
-    [codeloadUrl("anthropics/skills", COMMIT)]: archiveResponse(archive),
-  });
+  let fake = fakeFetch({ [codeloadUrl("anthropics/skills")]: archiveResponse(archive) });
   return { directory: new SkillDirectoryClient({ fetch: fake.fetch }), requests: fake.requests };
 }
 
