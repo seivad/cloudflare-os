@@ -262,7 +262,10 @@ still resumes that wipe. No recipient fetches the source during removal.
 
 Successful first workspace admission seeds captured legacy or already-enrolled chat tails as read;
 it does not create private state for untouched new chats. Ordinary reopen does not
-initialize missing or preference-only cursors or consume pending new-thread arrivals. Initial join
+initialize missing or preference-only cursors or consume pending new-thread arrivals. A workspace a grant has listed
+for a collaborator before they open it (its listing carries `newShare`; see
+[sharing](sharing.md#home-page-behavior)) tracks nothing: the User DO ignores fanout for it, as for
+an unlisted workspace, and its first open is the first admission. Initial join
 remains the existing best-effort flow: events racing the registration callback need not be covered. Once
 registration completes, enrolled events follow the durable handoff above. First chat opening uses
 the existing `viewChat` call and dirty journal for catch-up, without a new RPC or background admission lifecycle.

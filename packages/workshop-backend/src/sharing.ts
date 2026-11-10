@@ -45,8 +45,8 @@ export function accessIncludesGadget(access: CollaboratorAccess, gadgetId: Workp
   return access.role === "build" || access.gadgetIds.includes(gadgetId);
 }
 
-// Whether `a` grants everything `b` does.
-function accessCovers(a: CollaboratorAccess, b: CollaboratorAccess): boolean {
+/** Whether `a` grants everything `b` does. */
+export function accessCovers(a: CollaboratorAccess, b: CollaboratorAccess): boolean {
   if (a.role === "build") return true;
   if (b.role === "build") return false;
   let held = a.gadgetIds;

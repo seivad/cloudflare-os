@@ -6,9 +6,11 @@ import type {
   AuthenticatedApi,
   NotificationSubscriber,
   UserNotification,
+  WorkspaceMetadataWithTimestamps,
 } from "@gadgets/workshop-shared/api";
 import { logRpcFailure } from "../../rpcErrors";
 import { nativeApp } from "../native-app/nativeApp";
+import { announceWorkspaceShared, shareNoticeText } from "../shared-workspaces/newShares";
 import { registerNativeNotificationEnrollment } from "./nativeNotificationEnrollment";
 import { isChatVisible } from "./visibleChat";
 
@@ -27,6 +29,7 @@ type LegacyNativeNotificationWindow = Window & {
 class NotificationSubscriberImpl extends RpcTarget implements NotificationSubscriber {
   constructor(
     private readonly present: (notification: UserNotification) => void,
+    private readonly presentShare: (workspace: WorkspaceMetadataWithTimestamps) => void,
     private readonly onReleased: () => void,
   ) {
     super();
@@ -37,6 +40,13 @@ class NotificationSubscriberImpl extends RpcTarget implements NotificationSubscr
       throw new Error("notification client is not visible");
     }
     this.present(notification);
+  }
+
+  async workspaceShared(workspace: WorkspaceMetadataWithTimestamps): Promise<void> {
+    if (document.visibilityState !== "visible") {
+      throw new Error("notification client is not visible");
+    }
+    this.presentShare(workspace);
   }
 
   // capnweb calls this once the server drops its last reference to the subscriber.
@@ -223,6 +233,21 @@ export const NotificationBridge = ({
               to: "/workspace/$id",
               params: { id: workspaceId },
               search: { chat: chatId, showChat: true },
+            }),
+          }],
+        });
+      }, workspace => {
+        announceWorkspaceShared(workspace);
+        if (!workspace.newShare) return;
+        addToast.current({
+          id: `shared:${workspace.id}`,
+          title: shareNoticeText({ title: workspace.title, newShare: workspace.newShare }),
+          description: workspace.newShare.note,
+          variant: "info",
+          actions: [{
+            children: "Open workspace",
+            onClick: () => router.navigate({
+              to: "/workspace/$id", params: { id: workspace.id }, search: {},
             }),
           }],
         });

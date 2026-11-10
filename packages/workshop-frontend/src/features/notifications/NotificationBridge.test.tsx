@@ -6,8 +6,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { RpcStub } from "capnweb";
 import type {
-  AuthenticatedApi, NotificationSubscriber, UserNotification,
+  AuthenticatedApi, NotificationSubscriber, UserNotification, WorkspaceMetadataWithTimestamps,
 } from "@gadgets/workshop-shared/api";
+import { onWorkspaceShared } from "../shared-workspaces/newShares";
 import { NotificationBridge } from "./NotificationBridge";
 import { disconnectNativeNotificationEnrollment } from "./nativeNotificationEnrollment";
 import { reportVisibleChat } from "./visibleChat";
@@ -397,6 +398,29 @@ describe("NotificationBridge", () => {
     addToast.mock.calls[0][0].actions[0].onClick();
     expect(router.navigate).toHaveBeenCalledWith({
       to: "/workspace/$id", params: { id: "workspace-1" }, search: { chat: 1, showChat: true },
+    });
+  });
+
+  it("announces a workspace shared with the user, which opens like its share link", async () => {
+    const shared = vi.fn<(workspace: WorkspaceMetadataWithTimestamps) => void>();
+    const unsubscribe = onWorkspaceShared(shared);
+    const owner = { type: "user" as const, id: "owner@example.com", name: "Olive" };
+    const workspace: WorkspaceMetadataWithTimestamps = {
+      id: "workspace-2", title: "Budget", owner, role: "build", created: new Date(), lastActive: new Date(),
+      newShare: { sharedBy: { type: "user", id: "sam@example.com", name: "Sam" }, note: "Numbers for Q3" },
+    };
+    await render();
+    await act(() => subscribers[0].workspaceShared(workspace));
+    unsubscribe();
+
+    expect(addToast).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      title: "Sam shared “Budget” with you", description: "Numbers for Q3",
+    }));
+    // The sidebar lists it at once, without waiting for its next refresh.
+    expect(shared).toHaveBeenCalledExactlyOnceWith(workspace);
+    addToast.mock.calls[0][0].actions[0].onClick();
+    expect(router.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id", params: { id: "workspace-2" }, search: {},
     });
   });
 

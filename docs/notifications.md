@@ -254,6 +254,13 @@ first message; agent-spawned chats start with nobody enrolled. Opening enrolls u
 enabling notifications; muting keeps that enrollment. Approval requests can alert an untouched chat
 without enrolling it. See [user-owned unread state](user-unread-state.md).
 
+Being added to a workspace notifies in the app only. When an owner or `build` collaborator adds
+someone directly, the User DO lists the workspace for them and offers it to their open tabs through
+`NotificationSubscriber.workspaceShared()` (see [sharing](sharing.md#home-page-behavior)). That
+offer is not queued, retried or pushed, since the central service accepts only its typed task
+templates: the listing's `newShare` keeps the workspace marked new until they open it, so someone
+who was away finds it in their sidebar instead.
+
 ## Deployment contract
 
 The trusted deploy service injects these into the backend; the private key is a secret:
