@@ -28,8 +28,12 @@ let client: { token: string | undefined; instance: SkillDirectoryClient } | null
  */
 export function skillDirectoryClient(env: Cloudflare.Env): SkillDirectoryClient {
   let token = env.GITHUB_TOKEN || undefined;
-  if (client?.token !== token) client = { token, instance: new SkillDirectoryClient({ githubToken: token }) };
-  return client!.instance;
+  // Compared explicitly: with no token, `client?.token !== token` is `undefined !== undefined`, so a
+  // fresh isolate would never make its client.
+  if (client === null || client.token !== token) {
+    client = { token, instance: new SkillDirectoryClient({ githubToken: token }) };
+  }
+  return client.instance;
 }
 
 /** The name an import suggests: the skill id, within the skill-name length limit. */
