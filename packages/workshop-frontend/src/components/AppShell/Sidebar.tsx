@@ -34,7 +34,7 @@ import { inNativeApp, returnToInstalls } from '../../features/native-app/nativeA
  *   • brand row                            pinned
  *   • primary nav (Home, Workspaces, …)    pinned
  *   • workspace tools (⌘K search)          pinned
- *   • Favorites / Recent workspaces        SCROLLS
+ *   • Shared with you / Favorites / Recent SCROLLS
  *   • utility strip (plug, avatar)         pinned
  */
 export default function Sidebar({

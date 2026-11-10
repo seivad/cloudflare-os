@@ -27,6 +27,8 @@ import { useOutputFormats } from '../components/format/useOutputFormats'
 import NewFormatRow from '../components/format/NewFormatRow'
 import DeleteConfirmationDialog from '../components/DeleteConfirmationDialog'
 import { WorkshopButton, WorkshopIconButton } from '../components/WorkshopControls'
+import { NewSharesSection } from '../features/shared-workspaces/NewSharesSection'
+import { useNewShares } from '../features/shared-workspaces/useNewShares'
 
 // The Outputs page: everything the user's workspaces have produced, in one place, so they don't
 // have to remember which workspace they made a thing in. Backed by an index in the user's own
@@ -414,6 +416,7 @@ function OutputsPage() {
   const [renameValue, setRenameValue] = useState('')
   const [removeOutput, setRemoveOutput] = useState<OutputSummary | null>(null)
   const [mutationBusy, setMutationBusy] = useState(false)
+  const newShares = useNewShares()
 
   useEffect(() => {
     localStorage.setItem('outputs-view', view)
@@ -471,6 +474,10 @@ function OutputsPage() {
 
   const openWorkspace = (output: OutputSummary) => {
     navigate({ to: '/workspace/$id', params: { id: output.workspaceId }, search: {} })
+  }
+
+  const openSharedWorkspace = (workspaceId: string) => {
+    navigate({ to: '/workspace/$id', params: { id: workspaceId }, search: {} })
   }
 
   const beginRename = (output: OutputSummary) => {
@@ -571,6 +578,11 @@ function OutputsPage() {
   const filtered = inTypeScope.filter(matchesType)
   const isFiltered = q !== '' || (showTypeFilters && typeFilter !== 'all')
       || (showOwnerFilters && ownerFilter !== 'all')
+  // Workspaces shared with the user and not yet opened have no outputs in the index, so they are
+  // listed as workspaces, in the shared scope, until the user opens them. They have no format.
+  const sharesInScope = showTypeFilters && typeFilter !== 'all' ? [] : newShares.filter((w) => !q ||
+    [w.title, w.newShare?.sharedBy.name ?? '', w.owner?.name ?? ''].join('\n').toLowerCase().includes(q))
+  const shownShares = showOwnerFilters && ownerFilter === 'mine' ? [] : sharesInScope
 
   return (
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-3 sm:px-10">
@@ -610,9 +622,9 @@ function OutputsPage() {
             <ScopeSelect
               value={ownerFilter}
               counts={{
-                all: inOwnerScope.length,
+                all: inOwnerScope.length + sharesInScope.length,
                 mine: inOwnerScope.filter((o) => !o.owner).length,
-                shared: inOwnerScope.filter((o) => o.owner).length,
+                shared: inOwnerScope.filter((o) => o.owner).length + sharesInScope.length,
               }}
               onChange={setOwnerFilter}
             />
@@ -631,6 +643,9 @@ function OutputsPage() {
       </div>
 
       <div className="chat-panel min-h-0 flex-1 overflow-y-auto pb-8 pt-1">
+        {!loading && !loadError && shownShares.length > 0 && (
+          <NewSharesSection shares={shownShares} onOpen={openSharedWorkspace} />
+        )}
         {loading ? (
           <div className="grid grid-cols-1 gap-4 px-3 min-[400px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
             {[0, 1, 2, 3].map((i) => (
@@ -644,7 +659,7 @@ function OutputsPage() {
               Try again
             </button>
           </div>
-        ) : filtered.length === 0 ? (
+        ) : filtered.length === 0 ? (shownShares.length > 0 ? null : (
           <div className="flex flex-col items-center gap-3 px-3 py-20 text-center">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
               <Stack size={18} />
@@ -662,7 +677,7 @@ function OutputsPage() {
             {/* Offer the deployment's formats here rather than sending them to the home page. */}
             {!isFiltered && <NewFormatRow label="Start with" />}
           </div>
-        ) : view === 'grid' ? (
+        )) : view === 'grid' ? (
           <div className="grid grid-cols-1 gap-4 px-3 min-[400px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
             {filtered.map((output) => (
               <OutputCard key={outputKey(output)} output={output}

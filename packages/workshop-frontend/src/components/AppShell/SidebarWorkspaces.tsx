@@ -14,6 +14,7 @@ import {
   ArrowRight,
   CaretDown,
   MagnifyingGlass,
+  ShareNetwork,
   Star,
 } from '@phosphor-icons/react'
 import { openCommandPalette } from './commandPaletteBus'
@@ -29,6 +30,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import ShareModal from '../../ShareModal'
 import DeleteConfirmationDialog from '../DeleteConfirmationDialog'
 import SidebarGadgetRow from './SidebarGadgetRow'
+import { onWorkspaceShared } from '../../features/shared-workspaces/newShares'
 
 // Cap on items shown in the Recent list before the user clicks through to /workspaces.
 const RECENT_INITIAL_LIMIT = 6
@@ -45,6 +47,7 @@ type WorkspacesContextValue = {
 
   gadgets: WorkspaceMetadataWithTimestamps[]
   gadgetsLoading: boolean
+  shared: WorkspaceMetadataWithTimestamps[]
   favorites: WorkspaceMetadataWithTimestamps[]
   recent: WorkspaceMetadataWithTimestamps[]
 
@@ -90,10 +93,11 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     authenticatedApi.whoami().then(setCurrentUser).catch(() => {})
   }, [authenticatedApi])
 
-  // Load gadgets. Refresh on mount + after mutation; no live subscription yet.
+  // Load gadgets. Refresh on mount, after mutation and when the user returns to the window (which
+  // picks up shares made, or withdrawn, while away); no live subscription yet.
+  const [reloadToken, setReloadToken] = useState(0)
   useEffect(() => {
     let cancelled = false
-    setGadgetsLoading(true)
     authenticatedApi.listWorkspaces()
       .then((list) => {
         if (cancelled) return
@@ -105,7 +109,18 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
         if (!cancelled) setGadgetsLoading(false)
       })
     return () => { cancelled = true }
-  }, [authenticatedApi])
+  }, [authenticatedApi, reloadToken])
+
+  useEffect(() => {
+    const refresh = () => setReloadToken((n) => n + 1)
+    window.addEventListener('focus', refresh)
+    const unsubscribe = onWorkspaceShared((workspace) =>
+      setGadgets((prev) => [workspace, ...prev.filter((x) => x.id !== workspace.id)]))
+    return () => {
+      window.removeEventListener('focus', refresh)
+      unsubscribe()
+    }
+  }, [])
 
   // Dispose share overseer on close / unmount.
   useEffect(() => {
@@ -124,19 +139,24 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     [needle],
   )
 
-  const { favorites, recent } = useMemo(() => {
+  // Workspaces shared with the user that they haven't opened yet sit apart, under "Shared with
+  // you", until they do.
+  const { shared, favorites, recent } = useMemo(() => {
+    const fresh: WorkspaceMetadataWithTimestamps[] = []
     const favs: WorkspaceMetadataWithTimestamps[] = []
     const rest: WorkspaceMetadataWithTimestamps[] = []
     for (const g of gadgets) {
       if (!matchText(g.title)) continue
-      if (g.pinned) favs.push(g)
+      if (g.newShare) fresh.push(g)
+      else if (g.pinned) favs.push(g)
       else rest.push(g)
     }
     const byActive = (a: WorkspaceMetadataWithTimestamps, b: WorkspaceMetadataWithTimestamps) =>
       b.lastActive.getTime() - a.lastActive.getTime()
+    fresh.sort(byActive)
     favs.sort(byActive)
     rest.sort(byActive)
-    return { favorites: favs, recent: rest }
+    return { shared: fresh, favorites: favs, recent: rest }
   }, [gadgets, matchText])
 
   // --- Workspace actions ---------------------------------------------------
@@ -218,6 +238,7 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     setSearch,
     gadgets,
     gadgetsLoading,
+    shared,
     favorites,
     recent,
     onTogglePin,
@@ -292,13 +313,14 @@ export function SidebarWorkspacesTools({ collapsed = false }: { collapsed?: bool
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
- * Lists (Favorites / Recent workspaces). Lives in the rail's scrolling middle
+ * Lists (Shared with you / Favorites / Recent workspaces). Lives in the rail's scrolling middle
  * region. In collapsed mode shows a compact avatar stack.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 export function SidebarWorkspacesLists({ collapsed = false }: { collapsed?: boolean }) {
   const {
     search,
+    shared,
     favorites,
     recent,
     gadgetsLoading,
@@ -309,11 +331,12 @@ export function SidebarWorkspacesLists({ collapsed = false }: { collapsed?: bool
     onDelete,
   } = useWorkspacesContext()
 
+  const [sharedOpen, setSharedOpen] = useState(true)
   const [favOpen, setFavOpen] = useState(true)
   const [recentOpen, setRecentOpen] = useState(true)
 
   if (collapsed) {
-    const compact = [...favorites, ...recent].slice(0, 8)
+    const compact = [...shared, ...favorites, ...recent].slice(0, 8)
     return (
       <div className="flex flex-col items-center gap-1.5 px-2">
         {compact.map((g) => (
@@ -337,6 +360,31 @@ export function SidebarWorkspacesLists({ collapsed = false }: { collapsed?: bool
 
   return (
     <div className="flex flex-col pb-3">
+      {/* Shared with you: only while something shared is still unopened. */}
+      {shared.length > 0 && (
+        <SidebarSection
+          label="Shared with you"
+          count={shared.length}
+          open={sharedOpen}
+          onToggle={() => setSharedOpen((o) => !o)}
+          icon={<ShareNetwork size={12} weight="regular" className="text-kumo-inactive" />}
+        >
+          <div className="flex flex-col">
+            {shared.map((g) => (
+              <SidebarGadgetRow
+                key={g.id}
+                gadget={g}
+                onTogglePin={onTogglePin}
+                onRename={onRename}
+                onShare={onShare}
+                onNotificationMuteChange={onNotificationMuteChange}
+                onDelete={onDelete}
+              />
+            ))}
+          </div>
+        </SidebarSection>
+      )}
+
       {/* Favorites */}
       <SidebarSection
         label="Favorites"
