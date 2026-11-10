@@ -244,6 +244,13 @@ function isFullyCreated(g: GadgetRecord): g is WorkspaceMetadataWithTimestamps {
   return g.lastActive !== undefined;
 }
 
+// Whether the user's unread state follows this workspace. Not with "use" access, and not for a
+// workspace shared with them that they haven't opened yet: their first open as "build" starts it,
+// from the baselines it carries (see recordSharedWorkspaceOpen()).
+function tracksUnread(listing: GadgetRecord): boolean {
+  return listing.role !== "use" && !listing.newShare;
+}
+
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length != b.length) {
     return false;
@@ -347,12 +354,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       remove: event => queued(event.workspaceId, event.chatId, -1),
     });
     for (let listing of this.storage.gadgets.list()) {
-      if (listing.role !== "use") this.#unreadWorkspaces.set(listing.id, new AbortController());
+      if (tracksUnread(listing)) this.#unreadWorkspaces.set(listing.id, new AbortController());
     }
     this.storage.gadgets.subscribe({
-      add: listing => { if (listing.role !== "use") this.#unreadWorkspaces.set(listing.id, new AbortController()); },
+      add: listing => { if (tracksUnread(listing)) this.#unreadWorkspaces.set(listing.id, new AbortController()); },
       update: (_old, listing) => {
-        if (listing.role === "use") {
+        if (!tracksUnread(listing)) {
           this.#unreadWorkspaces.get(listing.id)?.abort();
           this.#unreadWorkspaces.delete(listing.id);
         } else if (!this.#unreadWorkspaces.has(listing.id)) this.#unreadWorkspaces.set(listing.id, new AbortController());
@@ -1216,7 +1223,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * Called by the overseer every time a collaborator opens a shared workspace.
-   * Creates the record on first open; updates lastActive on subsequent opens.
+   * Creates the record on first open; updates lastActive on subsequent opens. Clears the
+   * `newShare` a grant may have listed it with (see recordSharedWorkspaceGrant()).
    *
    * `role` is cached so listings built from this DO can offer the actions it permits without
    * reopening the workspace to ask. Presentation only: every operation is still authorized by the
@@ -1230,7 +1238,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (record && !record.owner) {
       throw new Error("User owns this workspace; it's not shared with them.");
     }
-    let firstAdmission = !record || record.role !== "build";
+    let firstAdmission = !record || record.role !== "build" || record.newShare !== undefined;
     let now = new Date();
     if (record) {
       // Already tracked -- update lastActive and cached fields.
@@ -1238,6 +1246,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       record.title = title;
       record.owner = ownerProfile;
       record.role = role;
+      delete record.newShare;
       this.storage.gadgets.put(record);
     } else {
       // First time opening this shared workspace.
@@ -1273,6 +1282,37 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       });
       if (changed) this.#unreadChanged();
       await this.#armExpirySweep();
+    }
+  }
+
+  /**
+   * Called by the overseer when someone grants this user access to a workspace, or widens it, so
+   * it is listed as shared with them, with a `newShare` naming `sharedBy`, before they open it.
+   * Their open tabs are told at once. Their first open clears it (see recordSharedWorkspaceOpen()),
+   * which is also when unread tracking starts. Revocation and dismissal remove it with the listing.
+   * Like that listing, this is presentation only: every operation is still authorized by the
+   * Overseer when attempted.
+   */
+  async recordSharedWorkspaceGrant(
+      workspaceId: string, title: string, ownerProfile: AiChatAuthorInfo, role: CollaboratorRole,
+      sharedBy: AiChatAuthorInfo, note: string | undefined
+  ): Promise<void> {
+    // The overseer only shares with existing accounts, but never create one here.
+    if (!this.storage.created.get()) return;
+    let record = this.storage.gadgets.get(workspaceId);
+    if (record && !record.owner) return;
+    // Admitted with "build" already (the grant raced their open): nothing is new to them, and a
+    // `newShare` would pause their unread tracking until they reopened.
+    if (record?.role === "build" && !record.newShare) return;
+    let now = new Date();
+    let listing: WorkspaceMetadataWithTimestamps = {
+      ...record, id: workspaceId, title, owner: ownerProfile, role,
+      newShare: {sharedBy, ...(note ? {note} : {})},
+      created: record?.created ?? now, lastActive: now,
+    };
+    this.storage.gadgets.put(listing);
+    for (let subscriber of this.#notificationSubscribers.values()) {
+      this.ctx.waitUntil(subscriber.workspaceShared(listing).catch(() => {}));
     }
   }
 
@@ -1660,11 +1700,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * whenever its gadget registry changes and whenever it is opened.
    *
    * A workspace the user no longer tracks (deleted, or a shared one they dismissed) has its
-   * entries dropped.
+   * entries dropped. One listed with a `newShare` is left as it is until the user opens it: a
+   * grant tells them nothing about its contents.
    */
   syncWorkspaceOutputs(workspaceId: string, entries: WorkspaceOutputEntry[]): void {
+    let listing = this.storage.gadgets.get(workspaceId);
+    if (listing?.newShare) return;
     this.storage.outputs.byWorkspace.delete(workspaceId);
-    if (!this.storage.gadgets.get(workspaceId)) return;
+    if (!listing) return;
     for (let entry of entries) {
       this.storage.outputs.put({...entry, workspaceId});
     }

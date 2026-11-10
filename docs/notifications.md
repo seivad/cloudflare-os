@@ -238,6 +238,13 @@ user's own User DO (`notificationMute`), so it applies only to them and is delet
 While it lasts, the User DO sends the workspace's finished tasks to no tab and no device. Permission
 requests still come through, since a task waiting on the user stays stuck until they answer.
 
+Being added to a workspace notifies in the app only. When an owner or `build` collaborator adds
+someone directly, the User DO lists the workspace for them and offers it to their open tabs through
+`NotificationSubscriber.workspaceShared()` (see [sharing](sharing.md#home-page-behavior)). That
+offer is not queued, retried or pushed, since the central service accepts only its typed task
+templates: the listing's `newShare` keeps the workspace marked new until they open it, so someone
+who was away finds it in their sidebar instead.
+
 ## Deployment contract
 
 The trusted deploy service injects these into the backend; the private key is a secret:

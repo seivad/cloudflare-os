@@ -219,6 +219,13 @@ export interface NotificationSubscriber extends RpcTarget {
    * the user's registered devices and browsers.
    */
   notify(notification: UserNotification): Promise<void>;
+
+  /**
+   * Present a workspace someone has just shared with the user, as now listed for them (with its
+   * `newShare` set). Nothing falls back to push: the listing keeps the notice until the user opens
+   * the workspace, dismisses it or loses access.
+   */
+  workspaceShared(workspace: WorkspaceMetadataWithTimestamps): Promise<void>;
 }
 
 // Unread tracking
@@ -948,8 +955,9 @@ export interface AuthenticatedApi extends RpcTarget {
    * the user find things they made without remembering which workspace they made them in.
    *
    * Served from an index in the user's own account which each workspace pushes to; a workspace
-   * shared with the user contributes its outputs from the first time the user opens it (matching
-   * when it appears in listWorkspaces()), and stops updating them if their access is revoked.
+   * shared with the user contributes its outputs from the first time the user opens it (until
+   * then listWorkspaces() lists it with a `newShare` and nothing more), and stops updating them if
+   * their access is revoked.
    * Provisional workspaces (still awaiting acceptance of a chat's changes) are never included.
    *
    * TODO: Pagination, sort options.
@@ -2851,6 +2859,13 @@ export type WorkspaceMetadata = {
   role?: CollaboratorRole;
 
   /**
+   * Set on the user's listing of a workspace shared with them that they haven't opened since it was
+   * shared, or since their access last widened: who shared it, for a "new" marker and notice. Their
+   * next open clears it. Only listings (`listWorkspaces()`) carry it.
+   */
+  newShare?: ShareNotice;
+
+  /**
    * True when the workspace has observed data marked `containsRestrictedData` (see
    * `ObservationDescription`). It can still be shared, with collaborators verified per
    * gatekeeper (if `ownerInvitesOnly` is also set, only the owner can add them), but its web
@@ -2889,6 +2904,15 @@ export type WorkspaceMetadataWithTimestamps = WorkspaceMetadata & {
   created: Date;
   lastActive: Date;
 }
+
+/** Who shared a workspace with the user, while it is new to them (see `WorkspaceMetadata.newShare`). */
+export type ShareNotice = {
+  /** The owner or "build" collaborator who granted the access. */
+  sharedBy: AiChatAuthorInfo;
+
+  /** The note they left with the grant, if any. */
+  note?: string;
+};
 
 /**
  * The icons an output format may be drawn with. A closed set because we want them to look consistent.
@@ -4015,8 +4039,10 @@ export interface Overseer extends RpcTarget {
    * them as a collaborator by username/email, or grant an existing one more access. The caller must
    * be the owner or a "build" collaborator, since only their grants confer anything.
    * A grant the caller already gave them covers (e.g. a gadget, after "build") changes nothing but
-   * the note; one that covers the caller's earlier grants to them replaces those. Returns the
-   * collaborator's info, or null if the username doesn't correspond to an existing account.
+   * the note; one that covers the caller's earlier grants to them replaces those. A grant that
+   * widens their access lists the workspace for them at once, with a notification naming the caller
+   * (see `WorkspaceMetadata.newShare`). Returns the collaborator's info, or null if the username
+   * doesn't correspond to an existing account.
    */
   addCollaborator(username: string, grant: CollaboratorGrant,
                   note?: string): Promise<CollaboratorInfo | null>;

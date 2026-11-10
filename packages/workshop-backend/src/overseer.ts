@@ -77,7 +77,7 @@ import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
 import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
-import { SharingManager, SharingCaller, accessIncludesGadget } from "./sharing";
+import { SharingManager, SharingCaller, accessCovers, accessIncludesGadget } from "./sharing";
 import {
   MAX_VERIFICATION_PASSES, ObserverLedger, requireVerifier, sameObserverScope, type ObserverScope,
 } from "./observer-ledger";
@@ -10423,6 +10423,28 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // List this workspace for a collaborator whose access a grant has just widened, marked new and
+  // naming the sharer, so it shows as shared with them, with a notification, before they open it.
+  // Fire-and-forget and best-effort, like the listing an open records (which clears the mark).
+  // Only the title, owner, sharer, role and note cross over, and the title not even that once the
+  // workspace holds restricted data: they have not been verified as an observer yet.
+  announceShare(profileId: string, role: CollaboratorRole,
+      sharer: () => Promise<AiChatAuthorInfo>, note: string | undefined): void {
+    let workspaceId = this.ctx.id.toString();
+    let title = this.storage.containsRestrictedData.get() ? "" : this.storage.title.get();
+    this.ctx.waitUntil((async () => {
+      try {
+        let [owner, sharedBy] = await Promise.all([this.ownerUserDo().whoami(), sharer()]);
+        await this.wrapUserDo(this.users.get(this.users.idFromName(profileId)))
+            .recordSharedWorkspaceGrant(workspaceId, title, owner, role, sharedBy, note);
+      } catch (error) {
+        this.logger.warn("failed to list shared workspace for its new collaborator", {
+          event: "shared.gadget.grant.record.failed", gadgetId: workspaceId, error,
+        });
+      }
+    })());
+  }
+
   // Reconcile this workspace's cached listing for collaborators whose access changed: remove it
   // for those who lost access entirely, and for those who kept some, refresh the
   // presentation-only role and their Outputs index, which may list gadgets they no longer hold.
@@ -13266,12 +13288,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return null;
     }
 
-    return (await this.impl.getSharingManager()).addCollaborator({
+    let sharing = await this.impl.getSharingManager();
+    let before = sharing.getEffectiveAccess(profile.id);
+    let added = sharing.addCollaborator({
       caller: this.#sharingCaller(),
       profile,
       grant,
       note,
     });
+    // Tell them only of access they didn't have: granting what they hold changes just the note.
+    let after = sharing.getEffectiveAccess(profile.id);
+    if (after && !(before && accessCovers(before, after))) {
+      this.impl.announceShare(profile.id, after.role, () => this.#getClientProfile(), note);
+    }
+    return added;
   }
 
   async previewRemoveCollaborator(profileId: string, gadgetId?: WorkpieceId)
