@@ -9,6 +9,8 @@ import { describeMute } from '../../features/notifications/notificationMute'
 import { isImeComposing } from '../../keyboardEvent'
 import { useUnreadState } from '../../features/notifications/UnreadStateBridge'
 import { UnreadBadge } from '../../features/notifications/UnreadBadge'
+import { NewShareBadge } from '../../features/shared-workspaces/NewShareBadge'
+import { shareNoticeText } from '../../features/shared-workspaces/newShares'
 
 function initials(title: string | undefined): string {
   const t = (title || 'Untitled').trim()
@@ -18,9 +20,9 @@ function initials(title: string | undefined): string {
 }
 
 /**
- * One row in the sidebar's Favorites / Recent list. Compact, with a monogram avatar, a truncated
- * title, and an overflow menu (favorite, rename, share, notifications, delete). Its callbacks are
- * passed in by the parent so this row stays a pure presentational component.
+ * One row in the sidebar's Shared with you / Favorites / Recent list. Compact, with a monogram
+ * avatar, a truncated title, and an overflow menu (favorite, rename, share, notifications, delete).
+ * Its callbacks are passed in by the parent so this row stays a pure presentational component.
  */
 export default function SidebarGadgetRow({
   gadget,
@@ -61,6 +63,9 @@ export default function SidebarGadgetRow({
   }
 
   const muteDescription = describeMute(gadget.notificationMute)
+  const { newShare } = gadget
+  const shareNotice = newShare && [shareNoticeText({ title: gadget.title, newShare }), newShare.note]
+    .filter(Boolean).join('\n')
 
   return (
     <Link
@@ -71,13 +76,14 @@ export default function SidebarGadgetRow({
       onClick={(e) => {
         if (renaming) e.preventDefault()
       }}
-      title={collapsed ? gadget.title || 'Untitled workspace' : undefined}
+      title={shareNotice || (collapsed ? gadget.title || 'Untitled workspace' : undefined)}
     >
       <div className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-kumo-fill text-[10px] font-medium text-kumo-subtle">
         <span aria-hidden="true">{initials(gadget.title)}</span>
-        {collapsed && unreadMessages > 0 && <span
+        {collapsed && (newShare || unreadMessages > 0) && <span
           role="img"
-          aria-label={`${unreadMessages} unread ${unreadMessages === 1 ? "message" : "messages"}`}
+          aria-label={newShare ? 'New'
+            : `${unreadMessages} unread ${unreadMessages === 1 ? "message" : "messages"}`}
           className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-kumo-badge-blue" />}
       </div>
       {!collapsed && (
@@ -109,7 +115,7 @@ export default function SidebarGadgetRow({
             onClick={(e) => { e.stopPropagation(); e.preventDefault() }}>
             {/* Reuse the trailing slot: a hidden actions button must not squeeze the title/badge. */}
             <span className="pointer-events-none group-hover:invisible group-focus-within:invisible">
-              <UnreadBadge count={unreadMessages} />
+              {newShare ? <NewShareBadge /> : <UnreadBadge count={unreadMessages} />}
             </span>
             <DropdownMenu>
               <DropdownMenu.Trigger

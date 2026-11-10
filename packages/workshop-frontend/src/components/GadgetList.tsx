@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
 import { useUnreadState } from '../features/notifications/UnreadStateBridge'
 import { UnreadBadge } from '../features/notifications/UnreadBadge'
+import { NewShareBadge } from '../features/shared-workspaces/NewShareBadge'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
 import { WorkspaceMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo, NotificationMute } from '@gadgets/workshop-shared/api'
@@ -122,6 +123,7 @@ function AppRow({
           {muteDescription && (
             <BellSlash size={12} alt={muteDescription} className="text-kumo-inactive flex-shrink-0" />
           )}
+          {gadget.newShare && <NewShareBadge />}
         </div>
         {gadget.owner && (
           <p className="text-xs text-kumo-subtle truncate mt-0.5">
