@@ -6,7 +6,9 @@ import { ContextApiImpl } from "../src/context-api.js";
 import type { ContextCollectionDurableObject } from "../src/context-collection.js";
 import type { UserLibraryDurableObject } from "../src/user-library.js";
 import type { LibraryRegistryDurableObject } from "../src/registry-do.js";
-import { directoryPreview, importedContentType, importedSkillDocuments } from "../src/directory-import.js";
+import {
+  directoryPreview, importedContentType, importedSkillDocuments, skillDirectoryClient,
+} from "../src/directory-import.js";
 import { domainName } from "../src/domain.js";
 import { SkillDirectoryClient } from "../src/skill-directory/index.js";
 import { splitFrontmatter } from "../src/description-extractors.js";
@@ -92,6 +94,23 @@ function api(accountId: string, directory: SkillDirectoryClient, isAdmin = false
 }
 
 const file = (path: string, text: string | null) => ({ path, size: 1, bytes: new Uint8Array(1), text });
+
+describe("skillDirectoryClient", () => {
+  // Runs first in this file, so the isolate has no client yet, as on a fresh deployment.
+  it("makes the isolate's client when no GITHUB_TOKEN is set", () => {
+    let tokenless = { ...testEnv, GITHUB_TOKEN: undefined } as Cloudflare.Env;
+    let client = skillDirectoryClient(tokenless);
+    expect(client).toBeInstanceOf(SkillDirectoryClient);
+    expect(skillDirectoryClient(tokenless)).toBe(client);
+  });
+
+  it("makes a new client when the token changes", () => {
+    let tokenless = skillDirectoryClient({ ...testEnv, GITHUB_TOKEN: undefined } as Cloudflare.Env);
+    let withToken = skillDirectoryClient({ ...testEnv, GITHUB_TOKEN: "token" } as Cloudflare.Env);
+    expect(withToken).not.toBe(tokenless);
+    expect(skillDirectoryClient({ ...testEnv, GITHUB_TOKEN: undefined } as Cloudflare.Env)).not.toBe(withToken);
+  });
+});
 
 describe("directory import conversion", () => {
   it("records provenance in metadata and keeps the instructions byte for byte", async () => {
