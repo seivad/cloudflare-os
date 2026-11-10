@@ -935,8 +935,9 @@ test("an argument types a capability property as a gatekeeper app UI's node, whi
   assert.equal(searchCommands(table, "pick the pen colour")[0]!.command, "cf-os api get-panel sketch ui pick <color>");
   assert.equal(searchCommands(realTable, "create a skill")[0]!.command,
     "cf-os api get-gatekeeper-app context ui create-context-skill <collectionId> <path> <doc>");
-  assert.equal(searchCommands(realTable, "skills")[0]!.command,
-    "cf-os api get-gatekeeper-app context ui create-context-skill <collectionId> <path> <doc>");
+  // "skills" alone finds the Skills app: creating one, or searching the skills.sh directory.
+  assert.match(searchCommands(realTable, "skills")[0]!.command,
+    /^cf-os api get-gatekeeper-app context ui (create-context-skill <collectionId> <path> <doc>|search-skill-directory <query>)$/);
   assert.ok(searchCommands(realTable, "list scheduled tasks").some((match) => match.command === "cf-os api get-gatekeeper-app scheduler ui list"));
   // And an app's command typed on another node is pointed at its line.
   usage(["pick"], /^FixtureAuthedApi has no command "pick"\. pick is on sketch:SketchApi: `cf-os api get-panel sketch ui pick <color>`\. /);
