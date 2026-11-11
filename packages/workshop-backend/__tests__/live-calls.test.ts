@@ -46,9 +46,14 @@ class FakeRealtimeKit {
   participants = new Map<string, {meetingId: string, customId: string, name: string, tokens: number}>();
   // Who is in each meeting's live session, by custom participant id, in join order.
   live = new Map<string, string[]>();
+  // Peers of each meeting's session who have already left, listed before those still there.
+  left = new Map<string, string[]>();
   requests: string[] = [];
   failing = false;
   hold?: Promise<void>;
+  holdDeletes?: Promise<void>;
+  // Adding a participant whose custom id the meeting already has returns that participant.
+  reuseCustomIds = false;
   #next = 0;
 
   fetch: typeof fetch = async (input, init) => {
@@ -83,6 +88,14 @@ class FakeRealtimeKit {
     if ((m = path.match(/^\/meetings\/([^/]+)\/participants$/)) && method === "POST") {
       await this.hold;
       if (body.preset_name !== LIVE_CALL_PRESET) return reply(400, null);
+      let meetingId = m[1];
+      let reused = this.reuseCustomIds && [...this.participants]
+          .find(([, p]) => p.meetingId === meetingId && p.customId === body.custom_participant_id);
+      if (reused) {
+        reused[1].tokens++;
+        return reply(201, {id: reused[0], token: `token-for-${reused[0]}-${reused[1].tokens}`,
+          expires_on: body.token.expires_on});
+      }
       let id = `participant-${++this.#next}`;
       this.participants.set(id, {meetingId: m[1], customId: body.custom_participant_id, name: body.name, tokens: 1});
       return reply(201, {id, token: `token-for-${id}-1`, expires_on: body.token.expires_on});
@@ -94,6 +107,7 @@ class FakeRealtimeKit {
       return reply(200, {token: `token-for-${m[2]}-${participant.tokens}`, expires_on: body.expires_on});
     }
     if ((m = path.match(/^\/meetings\/([^/]+)\/participants\/([^/]+)$/)) && method === "DELETE") {
+      await this.holdDeletes;
       let participant = this.participants.get(m[2]);
       if (!participant) return reply(404, null);
       this.participants.delete(m[2]);
@@ -105,9 +119,18 @@ class FakeRealtimeKit {
       return reply(200, {id: `session-of-${m[1]}`, status: "LIVE"});
     }
     if ((m = path.match(/^\/sessions\/session-of-([^/]+)\/participants$/)) && method === "GET") {
-      return reply(200, {participants: (this.live.get(m[1]) ?? []).map(customId => ({
-        custom_participant_id: customId, display_name: "ignored",
-      }))});
+      // page_no counts from 0 here; per_page is honoured, as the real API's maximum of 200 is.
+      let perPage = Number(url.searchParams.get("per_page"));
+      let page = Number(url.searchParams.get("page_no"));
+      let peers = [
+        ...(this.left.get(m[1]) ?? []).map((customId, i) => ({
+          id: `left-${i}`, custom_participant_id: customId, left_at: "2026-11-11T00:00:00Z",
+        })),
+        ...(this.live.get(m[1]) ?? []).map(customId => ({
+          id: `peer-${customId}`, custom_participant_id: customId, display_name: "ignored",
+        })),
+      ];
+      return reply(200, {participants: peers.slice(page * perPage, (page + 1) * perPage)});
     }
     return reply(404, null);
   };
@@ -350,6 +373,21 @@ describe("getCallRoster", () => {
   });
 });
 
+describe("getCallRoster across a long session", () => {
+  it("finds people still live past the first page of peers who left", async () => {
+    let fixture = await setup();
+    let ticket = await asOwner(fixture, async s => (await gadget(s, 100)).joinCall());
+    let meetingId = [...fixture.rtk.meetings.keys()][0];
+    fixture.rtk.left.set(meetingId, Array.from({length: 450}, (_, i) => `gone-${i}`));
+    fixture.rtk.enter(ticket.authToken);
+
+    await asOwner(fixture, async session => {
+      expect((await (await gadget(session, 100)).getCallRoster()).map(e => e.name)).toEqual(["Owner"]);
+    });
+    expect(fixture.rtk.requests.filter(r => r.startsWith("GET /sessions/"))).toHaveLength(3);
+  });
+});
+
 describe("revocation", () => {
   it("deletes the participant of someone who loses the gadget, kicking them from the call", async () => {
     let fixture = await setup();
@@ -433,25 +471,87 @@ describe("revocation", () => {
     expect(fixture.rtk.participants.size).toBe(0);
   });
 
-  it("wipes a deleted workspace only once its calls are closed", async () => {
+  it("wipes a deleted workspace at once, keeping only the call cleanup still owed", async () => {
     let fixture = await setup();
-    await asOwner(fixture, async s => (await gadget(s, 100)).joinCall());
+    let owner = await asOwner(fixture, async s => (await gadget(s, 100)).joinCall());
+    fixture.rtk.enter(owner.authToken);
     fixture.rtk.failing = true;
 
     await withImpl(fixture.workspace, async impl => {
-      impl.beginDeletion(new Set());
-      await impl.liveCalls.deliverCleanup();
-      await impl.deliverUserUpdates();
-      expect(impl.liveCalls.hasPendingCleanup()).toBe(true);
-      expect(impl.storage.deleting.get()).toBe(true);
-
-      fixture.rtk.failing = false;
+      // As deleteSelf() does: the owner forgets the workspace before its storage goes.
+      impl.beginDeletion(new Set([fixture.ownerUser.id.toString()]));
       await impl.runAlarmTasks();
-      expect(impl.liveCalls.hasPendingCleanup()).toBe(false);
+      // Everything but the journal is gone, and the alarm still retries it.
+      let keys = [...(await impl.ctx.storage.list()).keys()];
+      expect(keys.length).toBe(2);
+      expect(keys.every(key => key.startsWith("callCleanup:"))).toBe(true);
+      expect(await impl.ctx.storage.getAlarm()).not.toBeNull();
+    });
+    // What remains opens as not found, as any wiped workspace does: open() finds no owner and asks
+    // the owner's account, which no longer lists it. (Opening here would reset the test's DO.)
+    await withImpl(fixture.workspace, async impl => {
+      expect(impl.storage.deleting.get()).toBe(false);
+      expect(impl.storage.ownerId.get()).toBeUndefined();
+    });
+    expect(await fixture.ownerUser.getWorkspace(fixture.workspaceId)).toBeNull();
+
+    fixture.rtk.failing = false;
+    await withImpl(fixture.workspace, async impl => {
+      await impl.runAlarmTasks();
       expect(await impl.ctx.storage.list()).toEqual(new Map());
+      expect(await impl.ctx.storage.getAlarm()).toBeNull();
     });
     expect([...fixture.rtk.meetings.values()]).toEqual([{status: "INACTIVE"}]);
     expect(fixture.rtk.participants.size).toBe(0);
+  });
+
+  it("deletes a re-added person's owed participant before their next ticket", async () => {
+    let fixture = await setup();
+    fixture.rtk.reuseCustomIds = true;
+    let viewer = await collaborator(fixture, "Viewer", {gadgetId: 100});
+    let join = () => asUser(fixture, viewer.user, viewer.profile, async s => (await gadget(s, 100)).joinCall());
+    await join();
+    fixture.rtk.failing = true;
+    await asOwner(fixture, owner => owner.removeCollaborator(viewer.profile.id, [], 100));
+    await share(fixture, viewer.profile.id, {gadgetId: 100});
+
+    // The deletion still can't be delivered, so neither can a ticket.
+    await expect(join()).rejects.toThrow("still being removed");
+
+    fixture.rtk.failing = false;
+    fixture.rtk.requests = [];
+    let ticket = await join();
+    fixture.rtk.enter(ticket.authToken);
+    let deleted = fixture.rtk.requests.findIndex(r => r.startsWith("DELETE /meetings/"));
+    let added = fixture.rtk.requests.findIndex(r => /^POST \/meetings\/[^/]+\/participants$/.test(r));
+    expect(deleted).toBeGreaterThanOrEqual(0);
+    expect(deleted).toBeLessThan(added);
+    // Nothing is left to land late and kick them from the call they just joined.
+    await withImpl(fixture.workspace, impl => cleanedUp(impl));
+    expect([...fixture.rtk.live.values()].flat()).toEqual([viewer.user.id.toString()]);
+  });
+
+  it("waits out a cleanup pass already deleting their participant before a re-added person joins", async () => {
+    let fixture = await setup();
+    fixture.rtk.reuseCustomIds = true;
+    let viewer = await collaborator(fixture, "Viewer", {gadgetId: 100});
+    let join = () => asUser(fixture, viewer.user, viewer.profile, async s => (await gadget(s, 100)).joinCall());
+    await join();
+    let release!: () => void;
+    fixture.rtk.holdDeletes = new Promise(resolve => { release = resolve; });
+
+    await asOwner(fixture, owner => owner.removeCollaborator(viewer.profile.id, [], 100));
+    await vi.waitFor(() => expect(fixture.rtk.requests.some(r => r.startsWith("DELETE"))).toBe(true));
+    await share(fixture, viewer.profile.id, {gadgetId: 100});
+    let joined = join();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(fixture.rtk.requests.filter(r => /^POST \/meetings\/[^/]+\/participants$/.test(r))).toHaveLength(1);
+    release();
+
+    let ticket = await joined;
+    fixture.rtk.enter(ticket.authToken);
+    await withImpl(fixture.workspace, impl => cleanedUp(impl));
+    expect([...fixture.rtk.live.values()].flat()).toEqual([viewer.user.id.toString()]);
   });
 });
 
@@ -516,6 +616,28 @@ describe("inviteToCall", () => {
       await (await gadget(session, 100)).inviteToCall(viewer.profile.id);
       await expect((await gadget(session, 100)).inviteToCall(viewer.profile.id))
           .rejects.toThrow("just invited");
+    });
+  });
+
+  it("is refused to someone demoted from build who still holds the capability", async () => {
+    let fixture = await setup();
+    let builder = await collaborator(fixture, "Builder", "workspace", {gadgetId: 100});
+    let viewer = await collaborator(fixture, "Viewer", {gadgetId: 100});
+    await runInDurableObject(fixture.workspace, async (instance: OverseerDurableObject) => {
+      let impl = instance["impl"];
+      impl.scheduleAccessRestart = async () => {};
+      impl.ensureAmbientCapsules = async () => {};
+      let open = (user: UserStub, profile: AiChatAuthorInfo) =>
+          instance.open(user.id.toString(), profile.id, new NativeRpcStub(() => {}));
+      let held = await gadget(await open(builder.user, builder.profile), 100);
+      // Left with use of gadget 100 alone (the restart is a no-op here).
+      let owner = await open(fixture.ownerUser, fixture.owner);
+      let edges = impl.storage.collaborators.get(builder.profile.id)!.addedBy;
+      expect(edges.some(edge => (edge.role ?? "build") === "build")).toBe(true);
+      await owner.removeCollaborator(builder.profile.id, []);
+      await owner.addCollaborator(builder.profile.id, {gadgetId: 100});
+
+      await expect(held.inviteToCall(viewer.profile.id)).rejects.toThrow("Unauthorized");
     });
   });
 

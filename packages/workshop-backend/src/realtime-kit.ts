@@ -38,6 +38,13 @@ export class RealtimeKitError extends Error {
 /** One person currently in a meeting's live session. */
 export type LiveParticipant = {customParticipantId: string; name: string};
 
+// The session participants API lists a peer per connection, including every one that has left,
+// with no filter for those still there, so a long session is read a page at a time: at most
+// SESSION_PAGES pages of SESSION_PAGE_SIZE (its maximum), which a roster outgrowing would only
+// leave short.
+const SESSION_PAGE_SIZE = 200;
+const SESSION_PAGES = 10;
+
 // A group video call and nothing else: no screen share, chat, polls, plugins, recording,
 // livestream, transcription or waiting room, nobody hidden, and nobody able to rename themselves
 // (names come from Workshop profiles) or act on anyone else. The UI tokens are required by the
@@ -46,7 +53,9 @@ const PRESET = {
   name: LIVE_CALL_PRESET,
   config: {
     view_type: "GROUP_CALL",
-    max_screenshare_count: 0,
+    // Not 0, which the API may refuse (it documents no minimum): media.screenshare's NOT_ALLOWED
+    // below is what stops anyone sharing a screen.
+    max_screenshare_count: 1,
     max_video_streams: {desktop: 12, mobile: 6},
     media: {
       video: {quality: "vga", frame_rate: 24},
@@ -243,17 +252,28 @@ export class RealtimeKitApi {
         "GET", `/meetings/${encodeURIComponent(meetingId)}/active-session`));
     let sessionId = session?.data?.id;
     if (!sessionId || session?.data?.status === "ENDED") return [];
-    let result = await this.#ignoreNotFound(() => this.#request<{participants?: {
-      custom_participant_id?: string, display_name?: string, left_at?: string | null,
-    }[]}>("GET", `/sessions/${encodeURIComponent(sessionId)}/participants` +
-        "?sort_by=joinedAt&sort_order=ASC&per_page=100"));
+    // Peers already read, by id: the API doesn't say whether page_no counts from 0 or 1, so the
+    // first page may come twice.
+    let peers = new Set<string>();
     let seen = new Set<string>();
     let live: LiveParticipant[] = [];
-    for (let entry of result?.data?.participants ?? []) {
-      let id = entry.custom_participant_id;
-      if (!id || entry.left_at || seen.has(id)) continue;
-      seen.add(id);
-      live.push({customParticipantId: id, name: entry.display_name ?? ""});
+    for (let page = 0; page < SESSION_PAGES; page++) {
+      let result = await this.#ignoreNotFound(() => this.#request<{participants?: {
+        id?: string, custom_participant_id?: string, display_name?: string, left_at?: string | null,
+      }[]}>("GET", `/sessions/${encodeURIComponent(sessionId)}/participants` +
+          `?sort_by=joinedAt&sort_order=ASC&per_page=${SESSION_PAGE_SIZE}&page_no=${page}`));
+      let entries = result?.data?.participants ?? [];
+      for (let entry of entries) {
+        if (entry.id !== undefined) {
+          if (peers.has(entry.id)) continue;
+          peers.add(entry.id);
+        }
+        let id = entry.custom_participant_id;
+        if (!id || entry.left_at || seen.has(id)) continue;
+        seen.add(id);
+        live.push({customParticipantId: id, name: entry.display_name ?? ""});
+      }
+      if (entries.length < SESSION_PAGE_SIZE) break;
     }
     return live;
   }

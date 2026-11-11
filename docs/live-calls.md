@@ -68,7 +68,10 @@ does not hold.
 ### Roster
 
 `GadgetClient.getCallRoster()` lists who is in the call now, in join order, from RealtimeKit's
-active session and its participants. One lookup per gadget is shared for ten seconds
+active session and its participants. RealtimeKit lists a session's peers, one per connection and
+including every one that left, with no filter for those still there, so they are read a page of
+200 at a time, up to ten pages; a session that outgrows that only leaves the roster short. One
+lookup per gadget is shared for ten seconds
 (`CALL_ROSTER_CACHE_MS`), so any number of viewers polling costs one lookup per interval. Each
 person in the lookup is matched to the participants stored now, so someone revoked drops out at
 once. The roster checks only that the gadget exists, not the caller's live access: it shows the
@@ -83,7 +86,8 @@ from before live calls has no `callInvite()`, and its rejection is ignored.
 
 - Only the owner and `build` collaborators can invite, as only they can share.
   `UseGadgetClientInterface.inviteToCall()` throws `Unauthorized`.
-- The inviter must still hold the gadget, by live access.
+- The inviter must still hold the gadget and still be able to share it (the owner, or `build`), by
+  live access: a capability minted for `build` outlives a demotion until the restart after it.
 - The invitee must already hold the gadget. An invitation grants nothing, so a client inviting
   someone who lacks the gadget shares it with them first, with `addCollaborator()`.
 - One person can invite another to one gadget's call at most once per 20 seconds
@@ -111,11 +115,17 @@ as soon as the Overseer is back. A participant RealtimeKit no longer has counts 
 
 Deleting a gadget retires all its participants and closes its meeting (`status: "INACTIVE"`, which
 also removes everyone from it and stops anyone joining again), then forgets the meeting. Deleting
-the workspace does the same for every gadget, and the workspace's storage is wiped only once none
-of that cleanup remains.
+the workspace does the same for every gadget. The workspace's storage is wiped as soon as every
+account that listed it has forgotten it, without waiting on RealtimeKit: the cleanup still owed is
+all that outlives the wipe, alone, and the alarm keeps delivering it, then stops. Like any wiped
+workspace, what remains opens as not found, so a RealtimeKit outage or a revoked token can't hold
+the workspace's data.
 
-Re-admission does not supersede a journaled deletion: someone removed and added back before the
-deletion lands is kicked once, and their next join adds a new participant.
+Re-admission does not supersede a journaled deletion. Someone removed and added back before the
+deletion lands has it delivered by their next join, before anything else: RealtimeKit may hand back
+the same participant for their `custom_participant_id`, which a deletion landing late would then
+revoke and kick from the call. A cleanup pass already sending it is waited out first, and a
+deletion that still fails refuses the join, to be tried again.
 
 ## Frontend
 
