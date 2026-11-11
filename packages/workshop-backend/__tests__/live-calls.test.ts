@@ -693,4 +693,24 @@ describe("RealtimeKitApi", () => {
         "RealtimeKit POST /meetings/m/participants failed with HTTP 401 (1000).");
     expect(JSON.stringify(error)).not.toContain("SECRET");
   });
+
+  // The Overseer builds it with no fetch of its own, so it calls the global one. workerd's fetch
+  // throws "Illegal invocation" when called as a method of anything but the global scope, as the
+  // stand-in below does: holding it as a field and calling this.fetchFn() broke every live call.
+  it("calls the global fetch with the global scope, as workerd requires", async () => {
+    let globalFetch = vi.fn(function (this: unknown, _input: RequestInfo | URL, _init?: RequestInit) {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
+      }
+      return Promise.resolve(Response.json({success: true, data: {id: "meeting-1"}}));
+    });
+    vi.stubGlobal("fetch", globalFetch);
+    try {
+      let api = new RealtimeKitApi(CONFIG);
+      expect(await api.createMeeting()).toBe("meeting-1");
+      expect(globalFetch).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
