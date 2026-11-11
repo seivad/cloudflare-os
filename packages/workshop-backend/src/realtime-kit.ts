@@ -118,14 +118,19 @@ type Envelope<T> = {success?: boolean; data?: T; errors?: {code?: number | strin
 /** The RealtimeKit REST calls live calls make, against one app. */
 export class RealtimeKitApi {
   #presetReady?: Promise<void>;
+  readonly #fetch: typeof fetch;
 
-  constructor(private config: RealtimeKitConfig, private fetchFn: typeof fetch = fetch) {}
+  constructor(private config: RealtimeKitConfig, fetchFn: typeof fetch = fetch) {
+    // Called as a plain function, never as a method: workerd's global fetch throws "Illegal
+    // invocation" when its `this` is anything but the global scope.
+    this.#fetch = (input, init) => fetchFn(input, init);
+  }
 
   async #request<T>(method: string, path: string, body?: object): Promise<{status: number, data?: T}> {
     let {accountId, appId, apiToken} = this.config;
     let url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}` +
         `/realtime/kit/${encodeURIComponent(appId)}${path}`;
-    let response = await this.fetchFn(url, {
+    let response = await this.#fetch(url, {
       method,
       headers: {
         "Authorization": `Bearer ${apiToken}`,
