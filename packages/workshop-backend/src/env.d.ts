@@ -62,6 +62,13 @@ declare global {
       // profile page offers no browser notifications, and native push is unaffected.
       NOTIFICATION_WEB_PUSH_PUBLIC_KEY?: string;
 
+      // Gadgets' live calls (live-calls.ts), available only when all three are set: the account and
+      // app of the deployment's RealtimeKit app, and a secret account API token with the "Realtime
+      // Admin" permission for it. See docs/live-calls.md.
+      REALTIMEKIT_ACCOUNT_ID?: string;
+      REALTIMEKIT_APP_ID?: string;
+      REALTIMEKIT_API_TOKEN?: string;
+
       // Optional product analytics stream. Deployments can bind this to a
       // structured Cloudflare Pipelines stream; local/dev configs omit it and analytics no-op.
       PRODUCT_ANALYTICS?: import("cloudflare:pipelines").Pipeline<ProductAnalyticsRecord>;

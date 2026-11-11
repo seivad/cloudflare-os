@@ -226,6 +226,12 @@ export interface NotificationSubscriber extends RpcTarget {
    * the workspace, dismisses it or loses access.
    */
   workspaceShared(workspace: WorkspaceMetadataWithTimestamps): Promise<void>;
+
+  /**
+   * Present an invitation to a gadget's live call (see GadgetClient.inviteToCall()). Delivered
+   * only to tabs open at the time: nothing is stored, and nothing falls back to push.
+   */
+  callInvite(invite: CallInvite): Promise<void>;
 }
 
 // Unread tracking
@@ -2233,6 +2239,12 @@ export type ServerConfig = {
    * notification setting.
    */
   webPushPublicKey?: string;
+
+  /**
+   * Whether gadgets' live calls are available (see GadgetClient.joinCall()): true only when the
+   * deployment is configured with a RealtimeKit app. Absent from older servers, meaning false.
+   */
+  liveCallsEnabled?: boolean;
 
   /**
    * The version id of the backend answering this connection, or undefined where it has none.
@@ -6490,7 +6502,86 @@ export interface GadgetClient extends WorkpieceClient {
    */
   applyBlueprint(blueprintId: string, options: {modelId: string | null, allowUnrelated?: boolean})
       : Promise<ApplyBlueprintResult>;
+
+  // --- Live call ---
+  //
+  // Each gadget has one live video call, open to exactly the people who hold the gadget: the
+  // owner, "build" collaborators, and "use" collaborators given it. Available only when
+  // `ServerConfig.liveCallsEnabled`; otherwise each of these throws. See docs/live-calls.md.
+
+  /**
+   * Get a ticket to join this gadget's live call, creating the call on its first join. Holding
+   * this gadget is what authorizes it, so a "use" collaborator may call it too, and the caller's
+   * access is checked again before the ticket is issued. Each call issues a fresh ticket.
+   */
+  joinCall(): Promise<CallTicket>;
+
+  /**
+   * Who is in this gadget's live call right now, in the order they joined. Refreshed at most every
+   * few seconds, so it can briefly lag someone joining or leaving.
+   */
+  getCallRoster(): Promise<CallRosterEntry[]>;
+
+  /**
+   * Invite `profileId` to this gadget's live call: their open tabs are told at once (see
+   * NotificationSubscriber.callInvite()), and nothing is stored or pushed. Refused unless they
+   * already hold this gadget, so share it with them first (Overseer.addCollaborator()). Only the
+   * owner and "build" collaborators may invite, as only they may share. Repeating an invitation
+   * to the same person within a few seconds is refused.
+   */
+  inviteToCall(profileId: string): Promise<void>;
 }
+
+/** A ticket to join a gadget's live call, returned by GadgetClient.joinCall(). */
+export type CallTicket = {
+  /**
+   * The RealtimeKit participant auth token to pass to the RealtimeKit SDK's
+   * `RealtimeKitClient.init({authToken})`. A bearer credential for this caller in this gadget's
+   * call: never log or store it. It admits new connections until `expiresAt`, unless the caller
+   * loses the gadget first, which revokes it and removes them from the call.
+   */
+  authToken: string;
+
+  /** When `authToken` stops admitting new connections. A connection already made outlives it. */
+  expiresAt: Date;
+
+  /** The name the call shows for the caller. */
+  displayName: string;
+};
+
+/** One person in a gadget's live call, as GadgetClient.getCallRoster() lists them. */
+export type CallRosterEntry = {
+  /** Their profile ID, as `AiChatAuthorInfo.id` and presence carry it. */
+  profileId: string;
+
+  /** The name the call shows for them. */
+  name: string;
+
+  /**
+   * The opaque ID they carry inside the call: the RealtimeKit SDK's
+   * `participant.customParticipantId`, by which a call participant is matched to a profile.
+   */
+  callParticipantId: string;
+};
+
+/** An invitation to a gadget's live call, delivered by NotificationSubscriber.callInvite(). */
+export type CallInvite = {
+  /** The workspace holding the gadget. */
+  workspaceId: string;
+
+  /** The gadget whose call this is. */
+  gadgetId: WorkpieceId;
+
+  /**
+   * The gadget's title, or "" once the workspace holds restricted data (see
+   * `WorkspaceMetadata.containsRestrictedData`), as the person invited may not yet have been
+   * verified to see anything it read.
+   */
+  gadgetTitle: string;
+
+  /** Who sent the invitation. */
+  inviter: AiChatAuthorInfo;
+};
 
 /**
  * Capability representing one gatekeeper (connection) workpiece. Note that binding-edge

@@ -157,7 +157,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
 };
 
 const deniedGadget = (chatId: number): Record<
-    Exclude<keyof GadgetClient, keyof RpcTarget | "getId" | "getTitle">,
+    // A use collaborator holds the gadget, which admits them to its live call.
+    Exclude<keyof GadgetClient, keyof RpcTarget | "getId" | "getTitle" | "joinCall" | "getCallRoster">,
     (gadget: RpcStub<GadgetClient>) => unknown> => ({
   setTitle: g => g.setTitle("Title"),
   remove: g => g.remove(),
@@ -175,6 +176,7 @@ const deniedGadget = (chatId: number): Record<
   setBlueprintAnnotation: g => g.setBlueprintAnnotation("DATA", { title: "Data", description: "" }),
   createBlueprint: g => g.createBlueprint(),
   applyBlueprint: g => g.applyBlueprint("blueprint", { modelId: null }),
+  inviteToCall: g => g.inviteToCall("someone"),
 });
 
 it("a use collaborator reaches only the mainline gadget UI", async () => {

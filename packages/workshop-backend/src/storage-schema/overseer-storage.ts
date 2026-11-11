@@ -1328,6 +1328,21 @@ export type BlueprintGadgetRecord = {
   dirty?: boolean;
 };
 
+/**
+ * One person's RealtimeKit participant in a gadget's live call (see live-calls.ts). Reused for
+ * every ticket they are issued to that call; deleting it revokes them all.
+ */
+export type CallParticipantRecord = {
+  gadgetId: WorkpieceId;
+  /** Their User DO ID, which is also their RealtimeKit `custom_participant_id`. */
+  userId: string;
+  profileId: string;
+  meetingId: string;
+  participantId: string;
+  /** The name the call shows for them, taken from their profile when the participant was added. */
+  name: string;
+};
+
 // =======================================================================================
 // Schema
 
@@ -1456,6 +1471,32 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         profileId?: string;
         role: CollaboratorRole | null;
       }>()({primaryKey: "userId"}),
+      // Live calls (live-calls.ts). The RealtimeKit meeting each gadget's call runs in, created on
+      // its first join and forgotten when the gadget or workspace is deleted.
+      callMeetings: collection<{gadgetId: WorkpieceId; meetingId: string}>()({
+        primaryKey: "gadgetId",
+      }),
+      // Each person's participant in a gadget's call, keyed `${gadgetId}:${userId}`. Removed (and
+      // journaled in callCleanup) as soon as they lose the gadget.
+      callParticipants: collection<CallParticipantRecord>()({
+        primaryKey: record => `${record.gadgetId}:${record.userId}`,
+        nonUniqueIndexes: {
+          byProfile(record: CallParticipantRecord) { return record.profileId; },
+        },
+      }),
+      // RealtimeKit cleanup still owed: a participant to delete, which revokes every ticket it was
+      // issued and removes it from the call, or else a meeting to close for good. Written in the
+      // same synchronous step as the change that calls for it, so it survives the restart a
+      // revocation schedules, and retried from the alarm until RealtimeKit confirms. A deleted
+      // workspace's storage is wiped only once none remains.
+      callCleanup: collection<{
+        /** `participant:<participantId>` or `meeting:<meetingId>`. */
+        key: string;
+        meetingId: string;
+        participantId?: string;
+        /** When it was first owed (ms since the epoch). */
+        since: number;
+      }>()({primaryKey: "key"}),
       // Chats whose changes (new visible messages, new notifications, renames, deletion) haven't yet
       // reached every user who tracks unread state for this workspace (the owner and build
       // collaborators). Written in the same transaction as the change itself, so the update isn't

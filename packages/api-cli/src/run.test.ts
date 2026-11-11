@@ -530,7 +530,8 @@ test("search finds the commands for gadget-worded tasks, by what the API says of
     ["built-in gadgets", /^cf-os api list-output-formats$/, 1],
     ["what gadgets ship with this instance", /^cf-os api list-output-formats$/, 2],
     ["gadget console logs", / subscribe-to-console-logs$/, 1],
-    ["call a method on a gadget", / get-gadget <id> connect-to-gadget$/, 1],
+    // "Call" also names a gadget's live call (join-call, get-call-roster), which outranks it.
+    ["call a method on a gadget", / get-gadget <id> connect-to-gadget$/, 3],
     ["import gadget data", / connect-to-gadget$/, 2],
     ["export gadget data", / get-gadget <id> export <id>$/, 5],
     // A gadget and a gatekeeper share remove and set-title, and one doc: where each sits tells them apart.
@@ -814,7 +815,7 @@ test("`--` lets through the one token after it, so a later segment's options are
 test("a positional typed after a `--` is never said to be a forgotten one, whatever the chain ends on", () => {
   assert.equal(incompleteChain(realTable, parseInvocation(realTable, ["open-workspace", "abc", "create-gadget", "--", "export"])),
     "create-gadget returns a capability (GadgetClient), so the chain goes on: nothing was sent. " +
-    "Finish it with one of GadgetClient's commands, as in `cf-os api open-workspace abc create-gadget -- export get-export-formats`; " +
+    "Finish it with one of GadgetClient's commands, as in `cf-os api open-workspace abc create-gadget -- export get-call-roster`; " +
     "`cf-os api open-workspace abc create-gadget -- export --help` lists them.");
   assert.throws(() => parseInvocation(realTable, ["new-workspace-from-blueprint", "--", "get-metadata"]), (error: Error) =>
     error instanceof UsageError && error.message === "new-workspace-from-blueprint needs <bindings>. " +

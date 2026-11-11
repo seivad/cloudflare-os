@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import type { ChatReadState, ChatTimelineHead, UnreadStateScope, UnreadStateSubscriber, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
+import type { CallInvite, ChatReadState, ChatTimelineHead, UnreadStateScope, UnreadStateSubscriber, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
 import { WorkspaceMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, WorkspaceMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart, type WebPushSubscription } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -1313,6 +1313,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.gadgets.put(listing);
     for (let subscriber of this.#notificationSubscribers.values()) {
       this.ctx.waitUntil(subscriber.workspaceShared(listing).catch(() => {}));
+    }
+  }
+
+  /**
+   * Called by an overseer when someone invites this user to a gadget's live call (see
+   * `GadgetClient.inviteToCall()`), which it has checked they hold. Only tabs open now are told:
+   * nothing is stored or pushed. A tab too old to know the method rejects, which is ignored.
+   */
+  async notifyCallInvite(invite: CallInvite): Promise<void> {
+    if (!this.storage.created.get()) return;
+    for (let subscriber of this.#notificationSubscribers.values()) {
+      this.ctx.waitUntil(subscriber.callInvite(invite).catch(() => {}));
     }
   }
 

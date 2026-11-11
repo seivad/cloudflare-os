@@ -9,6 +9,7 @@ import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
 import { siteLogoImage } from "./site-logo.js";
+import { realtimeKitConfig } from "./realtime-kit.js";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
@@ -65,6 +66,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     bannerColor: config.banner.color,
     accentColor: config.accentColor,
     webPushPublicKey: env.NOTIFICATION_WEB_PUSH_PUBLIC_KEY,
+    liveCallsEnabled: realtimeKitConfig(env) !== null,
     backendVersion: backendVersion(env),
   };
 }
