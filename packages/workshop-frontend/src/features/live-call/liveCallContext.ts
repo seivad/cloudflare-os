@@ -74,6 +74,24 @@ export const useLiveCallActions = (): LiveCallActions | null => useContext(LiveC
 export const isSameCall = (a: LiveCallTarget, b: LiveCallTarget): boolean =>
   a.workspaceId === b.workspaceId && a.gadgetId === b.gadgetId
 
+declare module '@tanstack/react-router' {
+  interface HistoryState {
+    /**
+     * Set by a call invitation's Join, which the person just clicked: join the call of the gadget
+     * the address names at once. Navigation state, unlike the address's `?call=join`, can't come
+     * from a pasted link, which only opens the sidebar and leaves joining to the person.
+     */
+    liveCallJoin?: true
+  }
+}
+
+/**
+ * What a gadget view asks of its gadget's call once registered: to show it (`?call=join`), or to
+ * join it (a call invitation's own Join). `onHonoured` runs once it has, so the caller can drop
+ * the request.
+ */
+export type LiveCallRequest = { join: boolean; onHonoured: () => void }
+
 /** What a gadget view tells the live call about itself; see useLiveCallGadget(). */
 export type LiveCallGadgetView = LiveCallTarget & {
   client: RpcStub<GadgetClient>
@@ -84,20 +102,20 @@ export type LiveCallGadgetView = LiveCallTarget & {
 /**
  * Registers the gadget a view shows with the live call while the view is mounted, so the sidebar
  * can show its call and join it. `view` is null while there is nothing to register (no committed
- * gadget selected, or its capability not open yet). `joinRequest` asks to join this gadget's call
- * once, as soon as it is registered (a call invitation's Join does this); `onJoinRequested` then
- * runs so the caller can drop the request.
+ * gadget selected, or its capability not open yet). `request` is honoured once, as soon as the
+ * gadget is registered: it opens the sidebar on the gadget's call, or joins it only when
+ * `request.join` says the person asked to (see HistoryState.liveCallJoin).
  */
 export const useLiveCallGadget = (
   view: LiveCallGadgetView | null,
-  joinRequest: { onJoinRequested: () => void } | null = null,
+  request: LiveCallRequest | null = null,
 ): void => {
   const actions = useLiveCallActions()
   // Kept current in refs so that a new callback each render doesn't re-register the gadget.
   const onInvite = useRef(view?.onInvite ?? null)
   onInvite.current = view?.onInvite ?? null
-  const onJoinRequested = useRef(joinRequest?.onJoinRequested)
-  onJoinRequested.current = joinRequest?.onJoinRequested
+  const onHonoured = useRef(request?.onHonoured)
+  onHonoured.current = request?.onHonoured
   const canInvite = view?.onInvite != null
   const workspaceId = view?.workspaceId
   const gadgetId = view?.gadgetId
@@ -117,10 +135,11 @@ export const useLiveCallGadget = (
     return actions.registerGadget(gadget)
   }, [actions, gadget])
 
-  const joinRequested = joinRequest !== null
+  const requested = request === null ? null : request.join ? 'join' : 'open'
   useEffect(() => {
-    if (!actions || !gadget || !joinRequested) return
-    actions.join(gadget)
-    onJoinRequested.current?.()
-  }, [actions, gadget, joinRequested])
+    if (!actions || !gadget || requested === null) return
+    if (requested === 'join') actions.join(gadget)
+    else actions.setPanelOpen(true)
+    onHonoured.current?.()
+  }, [actions, gadget, requested])
 }

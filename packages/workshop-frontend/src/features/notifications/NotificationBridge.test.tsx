@@ -429,7 +429,7 @@ describe("NotificationBridge", () => {
     });
   });
 
-  it("offers to join a live call the user is invited to, opening its gadget to join", async () => {
+  it("offers to join a live call the user is invited to, opening its gadget to join at once", async () => {
     const invite: CallInvite = {
       workspaceId: "workspace-3", gadgetId: 0, gadgetTitle: "Canaries",
       inviter: { type: "user", id: "sam@example.com", name: "Sam" },
@@ -444,7 +444,11 @@ describe("NotificationBridge", () => {
     join.onClick();
     expect(router.navigate).toHaveBeenCalledExactlyOnceWith({
       to: "/workspace/$id", params: { id: "workspace-3" }, search: { w: 0, call: "join" },
+      state: expect.any(Function),
     });
+    // Navigation state, which a pasted link can't carry, is what makes this click join.
+    const { state } = router.navigate.mock.calls[0][0] as { state: (prev: object) => object };
+    expect(state({ __TSR_index: 4 })).toEqual({ __TSR_index: 4, liveCallJoin: true });
     dismiss.onClick();
     expect(router.navigate).toHaveBeenCalledOnce();
     expect(closeToast).toHaveBeenCalledTimes(2);
