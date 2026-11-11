@@ -13,6 +13,9 @@ type GadgetSearch = {
   // Show the chat even where the workspace pane hides it (a notification's "Open task" asks for
   // this). The editor drops it once honoured.
   showChat?: true
+  // Join the selected gadget's live call (a call invitation's Join asks for this). The editor drops
+  // it once honoured, or once it can't be.
+  call?: 'join'
 }
 
 function parseIntParam(value: unknown): number | undefined {
@@ -33,5 +36,6 @@ export const Route = createFileRoute('/workspace/$id')({
     agent: parseIntParam(search.agent),
     w: parseIntParam(search.w),
     showChat: search.showChat === true || undefined,
+    call: search.call === 'join' ? 'join' : undefined,
   }),
 })

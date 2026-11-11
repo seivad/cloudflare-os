@@ -8,17 +8,21 @@ import type {
   AiChatMetadata,
   WorkspaceMetadata,
   GadgetSummary,
+  ServerConfig,
   WorkpieceId,
   WorkpieceSummary,
   WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
+import type { LiveCallGadgetView } from './features/live-call/liveCallContext'
+import { ServerConfigContext } from './ServerConfigContext'
 
 // Covers which gadgets the editor offers "Update from blueprint" for, how the editor brings a
 // chat into view (the one a blueprint update was proposed in, the one a notification opens, or
 // the one a gadget's UI names), how a spawned agent's chat is shown over the chat the gadget pane
 // follows,
-// which gadget stub a use-only collaborator's view is given while gadgets are admitted, and which
-// workspace a gadget's deletion is confirmed in.
+// which gadget stub a use-only collaborator's view is given while gadgets are admitted, which
+// workspace a gadget's deletion is confirmed in, and what it lends the live call, including when a
+// call invitation asks it to join.
 // Everything the editor composes is stubbed down to the callbacks that drive its layout.
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -67,6 +71,12 @@ const mocks = vi.hoisted(() => {
     codeView: null as null | { selectedChatId?: number | null },
     connections: null as null | { chatId?: number },
     gadgetUi: null as null | { onConsoleLog?: (log: unknown) => void },
+    serverConfig: null as ServerConfig | null,
+    // What the editor last registered with the live call.
+    liveCall: null as null | {
+      view: LiveCallGadgetView | null
+      joinRequest: { onJoinRequested: () => void } | null
+    },
     // The props the use-only view was last rendered with.
     useView: null as null | {
       gadget: unknown
@@ -237,6 +247,12 @@ vi.mock('./features/gadget-deletion/DeleteGadgetDialog', () => ({
     onDelete: (id: WorkpieceId) => Promise<boolean>
   }) => <button type="button" onClick={() => void onDelete(gadget.id)}>confirm deleting {gadget.title}</button>,
 }))
+vi.mock('./features/live-call/liveCallContext', () => ({
+  useLiveCallGadget: (view: LiveCallGadgetView | null, joinRequest: { onJoinRequested: () => void } | null) => {
+    mocks.liveCall = { view, joinRequest }
+  },
+}))
+vi.mock('./features/live-call/LiveCallToggle', () => ({ LiveCallToggle: () => null }))
 
 import GadgetEditor from './GadgetEditor'
 import { isChatVisible } from './features/notifications/visibleChat'
@@ -251,7 +267,13 @@ async function openEditor(screen: 'phone' | 'desktop') {
     configurable: true,
     value: (query: string) => ({ matches: screen === 'phone' && query === '(width < 48rem)' }),
   })
-  await act(async () => { root.render(<GadgetEditor />) })
+  await act(async () => {
+    root.render(
+      <ServerConfigContext.Provider value={mocks.serverConfig}>
+        <GadgetEditor />
+      </ServerConfigContext.Provider>,
+    )
+  })
 }
 
 function button(name: string): HTMLButtonElement {
@@ -288,6 +310,8 @@ beforeEach(() => {
   mocks.navigate.mockReset()
   mocks.search = {}
   mocks.workspaceId = 'workspace'
+  mocks.serverConfig = null
+  mocks.liveCall = null
   localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
@@ -667,6 +691,48 @@ describe("GadgetEditor, showing a spawned agent's chat over the working chat", (
     mocks.search = { chat: WORKING_CHAT }
     await openEditor('desktop')
     expect(mocks.chatPane!.pendingConsoleLogCount).toBe(1)
+  })
+})
+
+/** Whether the editor has replaced the address with one that no longer asks to join a call. */
+const dropsTheCallRequest = () => mocks.navigate.mock.calls.some(([{ search, replace }]) =>
+  replace === true && (search({ w: 1, call: 'join' }) as { call?: string }).call === undefined)
+
+// A call invitation's Join arrives as ?call=join, with the gadget as ?w.
+describe('GadgetEditor, joining a live call from an invitation', () => {
+  beforeEach(() => {
+    mocks.serverConfig = { liveCallsEnabled: true } as ServerConfig
+  })
+
+  it('lends the call the open gadget, asks to join it, and drops the request once joined', async () => {
+    mocks.search = { w: GADGET.id, call: 'join' }
+    await openEditor('desktop')
+
+    expect(mocks.liveCall?.view).toMatchObject({ workspaceId: 'workspace', gadgetId: GADGET.id, gadgetTitle: 'Itinerary' })
+    // A "build" session may share the gadget, so it may invite people to its call.
+    expect(mocks.liveCall?.view?.onInvite).toBeTypeOf('function')
+    expect(mocks.liveCall?.joinRequest).not.toBeNull()
+    expect(dropsTheCallRequest()).toBe(false)
+
+    act(() => mocks.liveCall!.joinRequest!.onJoinRequested())
+    expect(dropsTheCallRequest()).toBe(true)
+  })
+
+  it('drops a request naming a gadget the workspace does not have, joining nothing', async () => {
+    mocks.search = { w: 9, call: 'join' }
+    await openEditor('desktop')
+
+    expect(mocks.liveCall?.joinRequest).toBeNull()
+    expect(dropsTheCallRequest()).toBe(true)
+  })
+
+  it('lends nothing, and drops the request, where the deployment has no live calls', async () => {
+    mocks.serverConfig = {} as ServerConfig
+    mocks.search = { w: GADGET.id, call: 'join' }
+    await openEditor('desktop')
+
+    expect(mocks.liveCall?.view).toBeNull()
+    expect(dropsTheCallRequest()).toBe(true)
   })
 })
 

@@ -6,6 +6,7 @@ import { RpcStub } from 'capnweb'
 import {
   Overseer,
   AuthenticatedApi,
+  GadgetClient,
   CollaboratorInfo,
   AffectedCollaborator,
   ShareLinkInfo,
@@ -28,11 +29,14 @@ import { useVendorBranding, type VendorBranding } from './useVendorBranding'
 
 /**
  * What a share dialog hands out: the workspace, whose members edit every gadget and use chat
- * ("build"), or one gadget's deployed UI.
+ * ("build"), or one gadget's deployed UI. An invitation to a gadget's live call ("call") gives
+ * the gadget to anyone who lacks it, since only its holders may join, then invites them through
+ * `gadget`; it offers no share links.
  */
 export type ShareTarget =
   | { kind: 'workspace' }
   | { kind: 'gadget'; gadgetId: WorkpieceId; title: string }
+  | { kind: 'call'; gadgetId: WorkpieceId; title: string; gadget: RpcStub<GadgetClient> }
 
 function grantFor(gadgetId: WorkpieceId | undefined): CollaboratorGrant {
   return gadgetId === undefined ? 'workspace' : { gadgetId }
@@ -283,26 +287,31 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
   const wasOpenRef = useRef(false)
   const userSearchEnabled = useServerConfig()?.userSearchEnabled ?? false
   const isOwner = !metadata.owner
-  const gadgetId = target.kind === 'gadget' ? target.gadgetId : undefined
+  const gadgetId = target.kind === 'workspace' ? undefined : target.gadgetId
+  const callTarget = target.kind === 'call' ? target : null
   const containsRestrictedData = metadata.containsRestrictedData === true
   // The server refuses share links and non-owner invites once this is set; hide those controls.
   const ownerInvitesOnly = metadata.ownerInvitesOnly === true
   const canInvite = !ownerInvitesOnly || isOwner
-  const canUseShareLinks = !ownerInvitesOnly
+  const canUseShareLinks = !ownerInvitesOnly && callTarget === null
   const directoryQuery = addUsername.trim()
   // Everyone who already holds what this dialog grants -- the caller, the owner (absent from
   // listCollaborators() when the caller is a collaborator), and collaborators with the workspace or
-  // with this gadget -- plus everyone already staged. Anyone else can still be given it, such as a
-  // gadget's recipient being invited to the whole workspace.
-  const directoryExcludeIds = useMemo(() => [
-    ...(currentUser ? [currentUser.id] : []),
-    ...(metadata.owner ? [metadata.owner.id] : []),
+  // with this gadget. A call invites exactly these people (everyone but the caller), so it finds
+  // them; a share leaves them out, though anyone else can still be given it, such as a gadget's
+  // recipient being invited to the whole workspace. Everyone already staged is left out of both.
+  const holders = useMemo(() => new Map<string, AiChatAuthorInfo>([
+    ...(currentUser ? [[currentUser.id, currentUser] as const] : []),
+    ...(metadata.owner ? [[metadata.owner.id, metadata.owner] as const] : []),
     ...collaborators
       .filter(({ access }) => access.role === 'build' ||
         (gadgetId !== undefined && access.gadgetIds.includes(gadgetId)))
-      .map(({ profile }) => profile.id),
+      .map(({ profile }) => [profile.id, profile] as const),
+  ]), [collaborators, currentUser, gadgetId, metadata.owner])
+  const directoryExcludeIds = useMemo(() => [
+    ...(callTarget === null ? holders.keys() : currentUser ? [currentUser.id] : []),
     ...staged.map(recipient => recipient.id),
-  ], [collaborators, currentUser, gadgetId, metadata.owner, staged])
+  ], [callTarget, currentUser, holders, staged])
   const membershipSettled = open && wasOpenRef.current && membershipStatus !== 'loading'
   const membershipReady = membershipSettled && membershipStatus === 'ready'
   const directorySearching = userSearchEnabled && membershipReady && directoryQuery !== ''
@@ -585,7 +594,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
   // Someone who can't invite has no recipient to verify. While loading, show nothing rather than
   // reserve space for an answer we don't have yet.
   const showResourcesPill = canInvite && (requirementsFailed || (requirements?.length ?? 0) > 0)
-  const showAdvancedButton = canUseShareLinks || advancedShareLinks.length > 0
+  // A call's dialog only invites, so it manages no links.
+  const showAdvancedButton = callTarget === null && (canUseShareLinks || advancedShareLinks.length > 0)
   const shownSubpage = subpage === 'resources' && showResourcesPill ? 'resources'
     : subpage === 'advanced' && showAdvancedButton ? 'advanced'
     : null
@@ -599,8 +609,9 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
     ((edge.role ?? 'build') === 'build' ? 'workspace' : edge.gadgetId) === (gadgetId ?? 'workspace'))
 
   // The server lets a non-owner remove only the access they granted directly; see removeCollaborator.
-  const canRemove = (info: CollaboratorInfo): boolean => isOwner || scopedEdges(info).some(edge =>
-    edge.type === 'user' && edge.sharer === currentUser?.id)
+  // A call's dialog only invites: access is managed from the share dialogs.
+  const canRemove = (info: CollaboratorInfo): boolean => callTarget === null && (isOwner ||
+    scopedEdges(info).some(edge => edge.type === 'user' && edge.sharer === currentUser?.id))
   const removableMembers = members.filter(canRemove)
   const otherMembers = members.filter(info => !canRemove(info))
 
@@ -716,6 +727,32 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
     }
   }
 
+  // Invite one person to the gadget's live call, giving them the gadget first unless the membership
+  // list shows they hold it: the server refuses an invitation to anyone who doesn't, and refuses to
+  // add the owner as a collaborator. Resolves to who was invited, or null for an unknown account.
+  const inviteToCall = async (
+    gadget: RpcStub<GadgetClient>,
+    recipient: StagedRecipient,
+  ): Promise<AiChatAuthorInfo | null> => {
+    const holder = membershipReady || recipient.id === currentUser?.id || recipient.id === metadata.owner?.id
+      ? holders.get(recipient.id)
+      : undefined
+    let profile = holder
+    if (!profile) {
+      const info = await overseer.addCollaborator(recipient.id, grantFor(gadgetId), undefined)
+      if (info === null) return null
+      profile = info.profile
+    }
+    try {
+      await gadget.inviteToCall(profile.id)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'The invitation failed.'
+      throw new Error(holder ? reason : `They have the gadget now, but the invitation failed: ${reason}`,
+        { cause: error })
+    }
+    return profile
+  }
+
   // Invite everyone staged, plus whatever the composer still holds. Each addCollaborator() call is
   // independently atomic and idempotent on the server, so they are all issued up front (pipelined
   // over the one connection) and the membership list is refetched once. Failures are not toasted:
@@ -730,8 +767,10 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
     addingRef.current = true
     setAdding(true)
     try {
-      const settled = await Promise.allSettled(
-        recipients.map(recipient => overseer.addCollaborator(recipient.id, grantFor(gadgetId), undefined)))
+      const settled = await Promise.allSettled(recipients.map(recipient => callTarget
+        ? inviteToCall(callTarget.gadget, recipient)
+        : overseer.addCollaborator(recipient.id, grantFor(gadgetId), undefined)
+            .then(info => info?.profile ?? null)))
       const added: AiChatAuthorInfo[] = []
       const failed: StagedRecipient[] = []
       settled.forEach((outcome, index) => {
@@ -745,7 +784,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
         } else if (outcome.value === null) {
           failed.push({ ...recipient, error: 'No account found for that username or email.' })
         } else {
-          added.push(outcome.value.profile)
+          added.push(outcome.value)
         }
       })
       // Touch only the chips this batch sent: drop the added, keep the failed with their reason,
@@ -762,7 +801,9 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
         await loadData()
         showLandedRow('person', added.map(profile => profile.id))
         toasts.add({
-          title: `Added ${NAME_LIST.format(names)} as ${names.length === 1 ? 'a collaborator' : 'collaborators'}.`,
+          title: callTarget
+            ? `Invited ${NAME_LIST.format(names)} to the live call.`
+            : `Added ${NAME_LIST.format(names)} as ${names.length === 1 ? 'a collaborator' : 'collaborators'}.`,
           variant: 'success',
         })
       }
@@ -1046,11 +1087,15 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
           ) : (
           <div className="min-w-0 pt-1">
             <Dialog.Title className="truncate text-[17px] leading-6 font-medium tracking-[-0.3px] text-kumo-default">
-              {target.kind === 'gadget' ? 'Share' : 'Invite to'}{' '}
-              <span className="text-kumo-subtle">“{target.kind === 'gadget' ? target.title : metadata.title}”</span>
+              {target.kind === 'call' ? 'Invite to live call' : <>
+                {target.kind === 'gadget' ? 'Share' : 'Invite to'}{' '}
+                <span className="text-kumo-subtle">“{target.kind === 'gadget' ? target.title : metadata.title}”</span>
+              </>}
             </Dialog.Title>
             <Dialog.Description className="mt-1 text-[13px] leading-[18px] tracking-[-0.15px] text-kumo-subtle">
-              {target.kind === 'gadget'
+              {target.kind === 'call'
+                ? `On “${target.title}”. Anyone who doesn’t have this gadget yet is given it too.`
+                : target.kind === 'gadget'
                 ? 'People you add can use this gadget without seeing anything else in the workspace.'
                 : ownerInvitesOnly
                   ? 'People you add can create chats and edit gadgets.'
@@ -1347,7 +1392,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
             )}
             {/* In the link row's place, sized as it is (an AccessRow: 8px padding around a 32px
                 icon), so the list below doesn't shift when the restriction arrives mid-session. */}
-            {currentUser && !canUseShareLinks && (
+            {currentUser && !canUseShareLinks && callTarget === null && (
               <div role="note" aria-label="Share links are off" className="flex items-center gap-3 rounded-xl bg-kumo-warning-tint px-2 py-2">
                 <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-kumo-warning">
                   <LockSimple size={15} weight="bold" />
@@ -1587,6 +1632,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
               Advanced settings
             </WorkshopButton>
           )}
+          {/* A call's invitation carries the link itself, so its dialog has none to copy. */}
+          {callTarget === null && (
           <WorkshopButton
             tone="primary"
             className="gap-1.5 !rounded-xl"
@@ -1599,6 +1646,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, target, 
               : <Link size={14} />}
             {footerCopiesMyLink && copiedLinkId === myDefaultLink?.linkId ? 'Copied' : 'Copy link'}
           </WorkshopButton>
+          )}
           </div>
         </div>
         <div ref={setDirectoryPortalContainer} className="pointer-events-none absolute inset-0 z-30" />

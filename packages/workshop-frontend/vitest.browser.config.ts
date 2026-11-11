@@ -11,6 +11,10 @@ import tsconfigPaths from 'vite-tsconfig-paths'
  */
 export default defineConfig({
   plugins: [react(), tailwindcss(), tsconfigPaths()],
+  // The live call's tests hand it a fake meeting, so the RealtimeKit SDK behind its lazy import is
+  // never loaded here; discovered mid-run instead, pre-bundling it would reload the page under a
+  // running test.
+  optimizeDeps: { exclude: ['@cloudflare/realtimekit'] },
   test: {
     include: ['src/**/*.browser.test.tsx'],
     // Kept with vitest's other scratch, under node_modules/.vite, out of the source tree and the

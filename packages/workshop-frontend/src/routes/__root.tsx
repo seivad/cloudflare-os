@@ -23,6 +23,8 @@ import {
 } from '../features/native-app/DeviceSessionHandoff'
 import { NativeAppBridge } from '../features/native-app/NativeAppBridge'
 import { PageUpdateNotice } from '../features/stale-session/PageUpdateNotice'
+import { LiveCallProvider } from '../features/live-call/LiveCallProvider'
+import { LiveCallSidebar } from '../features/live-call/LiveCallSidebar'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -136,10 +138,13 @@ function RootComponent() {
               <BrowserPushBridge />
               <NativeAppBridge />
               <PageUpdateNotice />
-              <AuthenticatedShell
-                authenticatedApi={authenticatedApi}
-                isWorkspaceEditor={isWorkspaceEditor}
-              />
+              {/* Above the shell, so a live call outlives navigating between pages. */}
+              <LiveCallProvider>
+                <AuthenticatedShell
+                  authenticatedApi={authenticatedApi}
+                  isWorkspaceEditor={isWorkspaceEditor}
+                />
+              </LiveCallProvider>
             </UnreadStateBridge>
           </Toasty>
         </TooltipProvider>
@@ -192,19 +197,25 @@ function AuthenticatedShell({
   // Normal app shell. The workspace editor is rendered fullscreen (no chrome); everything else
   // gets the persistent left-rail AppShell. Connection loss is surfaced by a chip in whichever of
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
+  // The live call's sidebar sits beside either, taking a column of its own while it shows.
   const fullscreen = isWorkspaceEditor
   return (
     <>
       <AccountSelectionModal />
-      {fullscreen ? (
-        <main className="h-full min-h-0">
-          <Outlet />
-        </main>
-      ) : (
-        <AppShell>
-          <Outlet />
-        </AppShell>
-      )}
+      <div className="flex h-full min-h-0">
+        <div className="h-full min-w-0 flex-1">
+          {fullscreen ? (
+            <main className="h-full min-h-0">
+              <Outlet />
+            </main>
+          ) : (
+            <AppShell>
+              <Outlet />
+            </AppShell>
+          )}
+        </div>
+        <LiveCallSidebar />
+      </div>
     </>
   )
 }

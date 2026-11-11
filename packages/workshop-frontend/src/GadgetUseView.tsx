@@ -17,6 +17,7 @@ import { GadgetPresence } from './components/GadgetPresence'
 import TopBarNotice from './TopBarNotice'
 import SiteLogo from './components/SiteLogo'
 import GadgetExportMenu from './GadgetExportMenu'
+import { LiveCallToggle } from './features/live-call/LiveCallToggle'
 
 // The minimal, "use"-only experience: a shared top bar plus the gadget's deployed UI, and nothing
 // else. Collaborators with the "use" role may only render and interact with the gadget's mainline
@@ -121,6 +122,7 @@ export default function GadgetUseView({
             gadget={gadgetOpenFailure === null ? gadget : null}
             gadgetTitle={gadgets.find(g => g.id === selectedGadgetId)?.title ?? 'Gadget'}
           />
+          <LiveCallToggle />
           <span className="hidden md:inline-flex">
             <GadgetPresence
               overseer={overseer}
