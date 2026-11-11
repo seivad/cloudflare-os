@@ -101,6 +101,8 @@ import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker"
 import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, accessCovers, accessIncludesGadget } from "./sharing";
+import { LiveCalls, type CallCaller } from "./live-calls";
+import { RealtimeKitApi, realtimeKitConfig } from "./realtime-kit";
 import {
   MAX_VERIFICATION_PASSES, ObserverLedger, requireVerifier, sameObserverScope, type ObserverScope,
 } from "./observer-ledger";
@@ -110,7 +112,7 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { isLoopLimitError, retryOnDoReset, shouldRetryAfterReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { CreationApproval, GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { CallInvite, CallRosterEntry, CallTicket, CreationApproval, GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSize,
   decodeChatAttachmentText,
@@ -907,6 +909,9 @@ class OverseerImpl implements AgentHooks {
   // below.
   readonly observerLedger: ObserverLedger;
 
+  // Gadgets' live calls (see live-calls.ts). Not readonly so tests can point it at a fake API.
+  liveCalls: LiveCalls;
+
   // Per-chat in-memory state for running agents.
   #liveChats = new Map<number, LiveChatContext>();
   #chatSubscribers: Set<RpcStub<AiChatSubscriber>> = new Set();
@@ -1196,6 +1201,8 @@ class OverseerImpl implements AgentHooks {
     if ([...this.storage.pendingUserUpdates.list({limit: 1})].length) {
       times.push(this.#userUpdatesRetryAt || Date.now() + 1_000);
     }
+    let liveCallCleanup = this.liveCalls.cleanupDue();
+    if (liveCallCleanup !== null) times.push(liveCallCleanup);
     if ([...this.storage.dirtyChats.list({limit: 1})].length) {
       times.push(this.#unreadRetryAt || Date.now() + 1_000);
     }
@@ -1282,6 +1289,7 @@ class OverseerImpl implements AgentHooks {
     let failed = false;
     try {
       if (this.storage.deleting.get()) {
+        await this.liveCalls.deliverCleanup();
         await this.deliverUserUpdates();
         return;
       }
@@ -1293,6 +1301,7 @@ class OverseerImpl implements AgentHooks {
           this.deliverReadyExternalMessageResponses(),
           this.deliverDirtyChats(),
           this.deliverUserUpdates(),
+          this.liveCalls.deliverCleanup(),
         ]);
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
@@ -1324,9 +1333,20 @@ class OverseerImpl implements AgentHooks {
       for (let pending of this.storage.pendingUserUpdates.list()) userIds.add(pending.userId);
       for (let userId of userIds) this.storage.pendingUserUpdates.put({userId, role: null});
     });
+    this.liveCalls.forgetAll();
     this.ownerId = undefined;
     this.#userUpdatesRetryAt = 0;
     this.#updateAlarm();
+  }
+
+  // LiveCallsHost: owed RealtimeKit cleanup changed, so recompute the alarm that retries it.
+  scheduleLiveCallCleanup(): void {
+    this.#updateAlarm();
+  }
+
+  // LiveCallsHost: tell `profileId`'s open tabs about a call invitation.
+  async deliverCallInvite(profileId: string, invite: CallInvite): Promise<void> {
+    await this.wrapUserDo(this.users.get(this.users.idFromName(profileId))).notifyCallInvite(invite);
   }
 
   deliverUserUpdates(): Promise<void> {
@@ -1368,7 +1388,8 @@ class OverseerImpl implements AgentHooks {
           });
         }
       }));
-      if (this.storage.deleting.get() && ![...this.storage.pendingUserUpdates.list({limit: 1})].length) {
+      if (this.storage.deleting.get() && ![...this.storage.pendingUserUpdates.list({limit: 1})].length &&
+          !this.liveCalls.hasPendingCleanup()) {
         await this.ctx.storage.deleteAll();
         this.#scheduledAlarm = undefined;
       }
@@ -1860,6 +1881,8 @@ class OverseerImpl implements AgentHooks {
     this.directories = this.ctx.exports.UserDirectoryDurableObject;
     this.ownerId = this.storage.deleting.get() ? undefined : this.storage.ownerId.get();
     this.observerLedger = new ObserverLedger(this);
+    let realtimeKit = realtimeKitConfig(env);
+    this.liveCalls = new LiveCalls(this, realtimeKit && new RealtimeKitApi(realtimeKit));
 
     // Run any pending storage migration (see storage-schema/overseer-migrations.ts) before
     // anything else can touch storage. This must happen in the constructor (not just open())
@@ -1927,6 +1950,8 @@ class OverseerImpl implements AgentHooks {
       if (this.storage.deleting.get() || [...this.storage.pendingUserUpdates.list({limit: 1})].length) {
         this.ctx.waitUntil(this.deliverUserUpdates());
       }
+      // Typically the revocation restart's own cleanup: kick the revoked from their call now.
+      if (this.liveCalls.hasPendingCleanup()) this.ctx.waitUntil(this.liveCalls.deliverCleanup());
     }, () => {});
   }
 
@@ -2478,6 +2503,7 @@ class OverseerImpl implements AgentHooks {
     let affectedChats = this.#chatsProposing(id);
     let facetName = this.gadgetFacetName(id);
     this.storage.gadgets.delete(id);  // notifies workpiece subscribers
+    this.liveCalls.forgetGadget(id);
     this.#runningChatIds.delete(id);
     this.ctx.facets.delete(facetName);
     // An agent spawner may bind the gadget (see GatekeeperRecord.bindings).
@@ -11197,8 +11223,11 @@ class OverseerImpl implements AgentHooks {
   // Reconcile this workspace's cached listing for collaborators whose access changed: remove it
   // for those who lost access entirely, and for those who kept some, refresh the
   // presentation-only role and their Outputs index, which may list gadgets they no longer hold.
+  // Their tickets to the calls of gadgets they lost are revoked here too, the restart alone
+  // being no help: a live call is not a session of this Overseer.
   async refreshAffectedCollaboratorListings(affected: AffectedCollaborator[]): Promise<void> {
     if (!affected.length || this.storage.deleting.get()) return;
+    this.liveCalls.revokeLostAccess(affected);
     // Persist in the sharing mutation's synchronous continuation, before a session restart or
     // gatekeeper teardown can interrupt it. Retries use this same source alarm after eviction.
     this.ctx.storage.transactionSync(() => {
@@ -15214,6 +15243,27 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     return await this.impl.applyBlueprint(
         this.id, blueprintId, options, userMeta, this.clientUserId);
   }
+
+  async joinCall(): Promise<CallTicket> {
+    return this.impl.liveCalls.join(this.id, callCaller(this.impl, this.clientUserId));
+  }
+
+  async getCallRoster(): Promise<CallRosterEntry[]> {
+    return this.impl.liveCalls.roster(this.id);
+  }
+
+  async inviteToCall(profileId: string): Promise<void> {
+    return this.impl.liveCalls.invite(this.id, callCaller(this.impl, this.clientUserId), profileId);
+  }
+}
+
+// Who holds a gadget capability, for LiveCalls: their User DO, and their profile read from it.
+function callCaller(impl: OverseerImpl, clientUserId: string): CallCaller {
+  return {
+    userId: clientUserId,
+    profile: () => retryOnDoReset(() => impl.wrapUserDo(
+        impl.users.get(impl.users.idFromString(clientUserId))).whoami(), impl.logger),
+  };
 }
 
 // Restricted GadgetClient handed to "use"-role collaborators: it permits only what is needed to
@@ -15290,7 +15340,19 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     return this.impl.exportGadget(this.id, id);
   }
 
+  // Holding this gadget is what admits someone to its call (see docs/live-calls.md).
+  async joinCall(): Promise<CallTicket> {
+    return this.impl.liveCalls.join(this.id, callCaller(this.impl, this.clientUserId));
+  }
+
+  async getCallRoster(): Promise<CallRosterEntry[]> {
+    return this.impl.liveCalls.roster(this.id);
+  }
+
   // --- Denied methods (build-only) ---
+
+  // Inviting is sharing's companion, and only the owner and "build" collaborators share.
+  async inviteToCall(_profileId: string): Promise<void> { this.#deny(); }
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
   async remove(): Promise<void> { this.#deny(); }
