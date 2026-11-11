@@ -56,6 +56,10 @@ export class LiveCalls {
   #invitesSent = new Map<string, number>();
   #cleanupRetryAt = 0;
   #cleanupDrain?: Promise<void>;
+  // The callCleanup keys a RealtimeKit request is in flight for, by a cleanup pass or by a join
+  // deleting the caller's own owed participants first (#deleteOwedParticipants), so neither sends
+  // one the other is already sending.
+  #sending = new Set<string>();
 
   #logger: typeof logger;
 
@@ -101,6 +105,7 @@ export class LiveCalls {
     let key = participantKey(gadgetId, caller.userId);
 
     return await this.#withLock(`participant:${key}`, async () => {
+      await this.#deleteOwedParticipants(api, meetingId, caller.userId);
       let existing = this.host.storage.callParticipants.get(key);
       if (existing && existing.meetingId !== meetingId) {
         this.#retire([existing]);
@@ -154,6 +159,34 @@ export class LiveCalls {
     });
   }
 
+  // Delete the caller's participants in this meeting that are still owed deletion -- they lost
+  // the gadget and have it again -- before issuing them a ticket. RealtimeKit may hand back the
+  // same participant for their custom_participant_id, which the late deletion would then revoke
+  // and kick from the call. A cleanup pass already sending one is waited out, so none lands after
+  // the new ticket; one that fails refuses the join, to be retried.
+  async #deleteOwedParticipants(api: RealtimeKitApi, meetingId: string, userId: string): Promise<void> {
+    let owed = () => Array.from(this.host.storage.callCleanup.list()).filter(entry =>
+        entry.participantId && entry.meetingId === meetingId && entry.userId === userId);
+    while (this.#cleanupDrain && owed().some(entry => this.#sending.has(entry.key))) {
+      await this.#cleanupDrain;
+    }
+    let entries = owed();
+    if (!entries.length) return;
+    for (let entry of entries) this.#sending.add(entry.key);
+    try {
+      let results = await Promise.allSettled(
+          entries.map(entry => api.deleteParticipant(meetingId, entry.participantId!)));
+      entries.forEach((entry, i) => {
+        if (results[i].status === "fulfilled") this.host.storage.callCleanup.deleteRecord(entry);
+      });
+      if (results.some(result => result.status === "rejected")) {
+        throw new Error("Your earlier place in this call is still being removed. Try again in a moment.");
+      }
+    } finally {
+      for (let entry of entries) this.#sending.delete(entry.key);
+    }
+  }
+
   /**
    * Who is in `gadgetId`'s call now, in join order. The lookup is shared for CALL_ROSTER_CACHE_MS,
    * but each person is matched against the participants stored now, so someone whose ticket was
@@ -183,15 +216,20 @@ export class LiveCalls {
   }
 
   /**
-   * Invite `inviteeProfileId` to `gadgetId`'s call on behalf of `inviter`, who must hold it
-   * themselves. Refused unless the invitee holds the gadget too: an invitation grants nothing.
+   * Invite `inviteeProfileId` to `gadgetId`'s call on behalf of `inviter`, who must still hold it
+   * and be able to share it (the owner or "build", by live access). Refused unless the invitee
+   * holds the gadget too: an invitation grants nothing.
    * Titles are withheld once the workspace holds restricted data, as for a share notification.
    */
   async invite(gadgetId: WorkpieceId, inviter: CallCaller, inviteeProfileId: string): Promise<void> {
     this.#requireApi();
     let [sharing, profile] = await Promise.all([this.host.getSharingManager(), inviter.profile()]);
-    if (!this.#holds(sharing.getEffectiveAccess(profile.id), gadgetId)) {
-      throw new Error(`No such gadget: ${gadgetId}`);
+    let access = sharing.getEffectiveAccess(profile.id);
+    if (!this.#holds(access, gadgetId)) throw new Error(`No such gadget: ${gadgetId}`);
+    // The capability was minted for "build", but they may have been demoted since: until the
+    // restart that follows, only their live access says whether they may still share.
+    if (access?.role !== "build") {
+      throw new Error("Unauthorized: only the owner and people who can edit the workspace can invite.");
     }
     if (inviteeProfileId === profile.id) throw new Error("You can't invite yourself.");
     if (!this.#holds(sharing.getEffectiveAccess(inviteeProfileId), gadgetId)) {
@@ -276,13 +314,14 @@ export class LiveCalls {
 
   // Record RealtimeKit cleanup still owed -- a participant to delete, or else a meeting to close --
   // and start delivering it. The alarm retries what fails.
-  #journal(entries: {meetingId: string, participantId?: string}[]): void {
+  #journal(entries: {meetingId: string, participantId?: string, userId?: string}[]): void {
     if (!entries.length) return;
     let since = Date.now();
-    for (let {meetingId, participantId} of entries) {
+    for (let {meetingId, participantId, userId} of entries) {
       let key = participantId ? `participant:${participantId}` : `meeting:${meetingId}`;
       if (this.host.storage.callCleanup.get(key)) continue;
-      this.host.storage.callCleanup.put({key, meetingId, ...(participantId ? {participantId} : {}), since});
+      this.host.storage.callCleanup.put(
+          participantId ? {key, meetingId, participantId, userId, since} : {key, meetingId, since});
     }
     this.#cleanupRetryAt = 0;
     this.host.scheduleLiveCallCleanup();
@@ -307,14 +346,19 @@ export class LiveCalls {
    */
   deliverCleanup(): Promise<void> {
     if (this.#cleanupDrain) return this.#cleanupDrain;
-    if (!this.hasPendingCleanup()) return Promise.resolve();
+    let entries = Array.from(this.host.storage.callCleanup.list())
+        .filter(entry => !this.#sending.has(entry.key));
+    if (!entries.length) return Promise.resolve();
     this.#cleanupRetryAt = Date.now() + 30_000;
     this.host.scheduleLiveCallCleanup();
-    let entries = Array.from(this.host.storage.callCleanup.list());
+    for (let entry of entries) this.#sending.add(entry.key);
     return this.#cleanupDrain = (async () => {
       let api = this.api;
       if (!api) {
-        for (let entry of entries) this.host.storage.callCleanup.deleteRecord(entry);
+        for (let entry of entries) {
+          this.host.storage.callCleanup.deleteRecord(entry);
+          this.#sending.delete(entry.key);
+        }
         this.#logger.warn("dropped live call cleanup: live calls are no longer configured", {
           event: "live_call.cleanup.dropped", failureCount: entries.length,
         });
@@ -332,14 +376,17 @@ export class LiveCalls {
           } else {
             this.#logger.warn("live call cleanup deferred", {event: "live_call.cleanup.deferred", error});
           }
+        } finally {
+          this.#sending.delete(entry.key);
         }
       }));
     })().finally(() => {
       this.#cleanupDrain = undefined;
       // Cleanup journaled during this pass gets a pass of its own now; what failed in this one
-      // waits for the alarm.
+      // waits for the alarm, and what a join is sending is the join's.
       let attempted = new Set(entries.map(entry => entry.key));
-      if ([...this.host.storage.callCleanup.list()].some(entry => !attempted.has(entry.key))) {
+      if ([...this.host.storage.callCleanup.list()].some(entry =>
+          !attempted.has(entry.key) && !this.#sending.has(entry.key))) {
         this.#cleanupRetryAt = 0;
         this.host.ctx.waitUntil(this.deliverCleanup());
       }

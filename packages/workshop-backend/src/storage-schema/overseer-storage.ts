@@ -1487,13 +1487,15 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // RealtimeKit cleanup still owed: a participant to delete, which revokes every ticket it was
       // issued and removes it from the call, or else a meeting to close for good. Written in the
       // same synchronous step as the change that calls for it, so it survives the restart a
-      // revocation schedules, and retried from the alarm until RealtimeKit confirms. A deleted
-      // workspace's storage is wiped only once none remains.
+      // revocation schedules, and retried from the alarm until RealtimeKit confirms. It is all a
+      // deleted workspace keeps through its wipe, so RealtimeKit can't hold up the rest.
       callCleanup: collection<{
         /** `participant:<participantId>` or `meeting:<meetingId>`. */
         key: string;
         meetingId: string;
         participantId?: string;
+        /** The participant's person (their User DO ID), so their next join can settle it first. */
+        userId?: string;
         /** When it was first owed (ms since the epoch). */
         since: number;
       }>()({primaryKey: "key"}),

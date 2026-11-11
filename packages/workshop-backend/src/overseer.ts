@@ -1123,8 +1123,7 @@ class OverseerImpl implements AgentHooks {
     let failed = false;
     try {
       if (this.storage.deleting.get()) {
-        await this.liveCalls.deliverCleanup();
-        await this.deliverUserUpdates();
+        await Promise.all([this.deliverUserUpdates(), this.liveCalls.deliverCleanup()]);
         return;
       }
       do {
@@ -1224,10 +1223,14 @@ class OverseerImpl implements AgentHooks {
           });
         }
       }));
-      if (this.storage.deleting.get() && ![...this.storage.pendingUserUpdates.list({limit: 1})].length &&
-          !this.liveCalls.hasPendingCleanup()) {
+      if (this.storage.deleting.get() && ![...this.storage.pendingUserUpdates.list({limit: 1})].length) {
+        // RealtimeKit cleanup still owed outlives the wipe, alone, so an outage there (or a revoked
+        // token) can't hold up the rest. What remains opens as not found, like any wiped workspace,
+        // and the alarm the recompute below arms keeps delivering it, then stops.
+        let owedCalls = Array.from(this.storage.callCleanup.list());
         await this.ctx.storage.deleteAll();
         this.#scheduledAlarm = undefined;
+        for (let entry of owedCalls) this.storage.callCleanup.put(entry);
       }
     })().finally(() => {
       this.#userUpdateDrain = undefined;
