@@ -8,6 +8,7 @@ import { RpcPromise, type RpcStub } from 'capnweb'
 import type {
   AiChatAuthorInfo,
   AuthenticatedApi,
+  GadgetClient,
   CollaboratorAccess,
   CollaboratorGrant,
   CollaboratorInfo,
@@ -222,6 +223,22 @@ async function invite(rendered: HTMLElement, username: string) {
 async function createLink(rendered: HTMLElement) {
   await click(button(rendered, 'Create a share link'))
   await click(button(rendered, 'Create link'))
+}
+
+// The dialog inviting people to gadget 0's live call.
+function callTarget(inviteToCall: GadgetClient['inviteToCall']): ShareTarget {
+  return {
+    kind: 'call', gadgetId: 0, title: 'Itinerary',
+    gadget: { inviteToCall } as unknown as RpcStub<GadgetClient>,
+  }
+}
+
+// Stages the directory's first result for `query` as a chip, without inviting yet.
+async function stage(rendered: HTMLElement, query: string) {
+  await typeDirectorySearch(rendered, query)
+  const option = rendered.querySelector<HTMLButtonElement>('[role="option"]')
+  if (!option) throw new Error(`Expected a directory result for “${query}”.`)
+  await click(option)
 }
 
 function peopleInput(rendered: HTMLElement): HTMLInputElement {
@@ -1472,6 +1489,73 @@ describe('ShareModal', () => {
       expect(links.querySelector('button[aria-label="Copy Team link"]')).not.toBeNull()
       expect(links.querySelector('button[aria-label="Copy Old link"]')).not.toBeNull()
       expect(links.querySelector('button[aria-label="Revoke Old link"]')).not.toBeNull()
+    })
+  })
+  describe('live call invitations', () => {
+    const OWNER: AiChatAuthorInfo = { type: 'user', id: 'olive@example.com', name: 'Olive' }
+    // The caller is a "build" collaborator, so the owner is someone they can invite too.
+    const COLLABORATOR_METADATA = { ...METADATA, owner: OWNER, role: 'build' } as WorkspaceMetadata
+
+    it('gives the gadget to whoever lacks it, then invites everyone, holders included', async () => {
+      const addCollaborator = vi.fn<Overseer['addCollaborator']>(
+        async (userId, grant) => profileFor(userId, grant, 'Hal'))
+      const inviteToCall = vi.fn<GadgetClient['inviteToCall']>(async () => {})
+      const searchUsers = vi.fn<NonNullable<AuthenticatedApiOverrides['searchUsers']>>(
+        async query => [{ id: `${query}@example.com`, name: query }])
+      const rendered = await render(
+        fakeOverseer({ addCollaborator, collaborators: [BUILD_MEMBER, GADGET_RECIPIENT, OTHER_GADGET_RECIPIENT] }),
+        fakeAuthenticatedApi({ searchUsers }), COLLABORATOR_METADATA, { target: callTarget(inviteToCall) })
+
+      expect(rendered.querySelector('h2')?.textContent).toBe('Invite to live call')
+      // Everyone who holds the gadget can be found: they are who a call invites.
+      await typeDirectorySearch(rendered, 'x')
+      expect(searchUsers).toHaveBeenLastCalledWith('x', [CURRENT_USER.id])
+
+      await stage(rendered, 'hal')
+      await stage(rendered, 'bea')
+      await stage(rendered, 'olive')
+      await click(button(rendered, 'Invite 3 people'))
+
+      // Only Hal lacks the gadget; adding the owner as a collaborator would be refused.
+      expect(addCollaborator).toHaveBeenCalledExactlyOnceWith('hal@example.com', { gadgetId: 0 }, undefined)
+      expect(inviteToCall.mock.calls.map(([id]) => id).toSorted())
+        .toEqual(['bea@example.com', 'hal@example.com', 'olive@example.com'])
+      const halInvited = inviteToCall.mock.calls.findIndex(([id]) => id === 'hal@example.com')
+      expect(addCollaborator.mock.invocationCallOrder[0])
+        .toBeLessThan(inviteToCall.mock.invocationCallOrder[halInvited])
+      expect(toastAdd).toHaveBeenCalledWith({
+        title: 'Invited Hal, Bea, and Olive to the live call.', variant: 'success',
+      })
+      expect(stagedNames(rendered)).toEqual([])
+    })
+
+    it('offers no share links and no link to copy', async () => {
+      const ITINERARY_LINK: ShareLinkInfo = {
+        linkId: 'link-itinerary', note: 'Itinerary link', created: CREATED, createdBy: CURRENT_USER,
+        role: 'use', gadgetId: 0,
+      }
+      const rendered = await render(fakeOverseer({ shareLinks: [ITINERARY_LINK] }), fakeAuthenticatedApi(),
+        METADATA, { target: callTarget(async () => {}) })
+
+      await invite(rendered, 'ada')
+      expect(rendered.querySelector('#links-heading')).toBeNull()
+      expect(() => button(rendered, 'Create a share link')).toThrow('No button labelled')
+      expect(() => button(rendered, 'Copy link')).toThrow('No button labelled')
+      expect(rendered.textContent).not.toContain(GADGET_URL)
+    })
+
+    it('keeps someone whose invitation failed on their chip, saying they have the gadget now', async () => {
+      const inviteToCall = vi.fn<GadgetClient['inviteToCall']>(async () => {
+        throw new Error('You invited them a moment ago.')
+      })
+      const rendered = await render(fakeOverseer(), fakeAuthenticatedApi(), METADATA,
+        { target: callTarget(inviteToCall) })
+
+      await invite(rendered, 'ada')
+      expect(stagedNames(rendered)).toEqual(['Ada (ada@example.com)'])
+      expect(rendered.querySelector('[role="alert"]')?.textContent).toBe(
+        'Ada (ada@example.com): They have the gadget now, but the invitation failed: You invited them a moment ago.')
+      expect(toastAdd).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }))
     })
   })
 })

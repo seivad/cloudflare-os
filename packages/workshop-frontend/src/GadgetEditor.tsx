@@ -75,6 +75,9 @@ import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
 import { isImeComposing } from './keyboardEvent'
+import { useServerConfig } from './ServerConfigContext'
+import { useLiveCallGadget } from './features/live-call/liveCallContext'
+import { LiveCallToggle } from './features/live-call/LiveCallToggle'
 
 const NO_GADGETS: ReadonlySet<WorkpieceId> = new Set()
 
@@ -469,8 +472,8 @@ export default function GadgetEditor() {
   const { authenticatedApi } = useAuthenticatedApi()
   const publicApi = useRpcStub()
 
-  const { chat: chatParam, w: workpieceParam, showChat: showChatParam } =
-    useSearch({ strict: false }) as { chat?: number; w?: number; showChat?: true }
+  const { chat: chatParam, w: workpieceParam, showChat: showChatParam, call: callParam } =
+    useSearch({ strict: false }) as { chat?: number; w?: number; showChat?: true; call?: 'join' }
   const urlChatId = chatParam !== undefined ? chatParam : null
   const urlWorkpieceId = workpieceParam !== undefined ? workpieceParam : null
 
@@ -557,6 +560,8 @@ export default function GadgetEditor() {
     setSharedGadgetId(gadgetId)
     setShareModalOpen(true)
   }
+  // The share dialog in call mode, inviting people to the selected gadget's live call.
+  const [callInviteOpen, setCallInviteOpen] = useState(false)
   const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
   const [blueprintUpdateDialogOpen, setBlueprintUpdateDialogOpen] = useState(false)
   const [previewMode, _setPreviewMode] = useState(false)
@@ -1385,6 +1390,44 @@ export default function GadgetEditor() {
   }, [overseer, metadataLoaded, selectedGadgetId, isUseOnly, createObserverConfigCallback,
       gadgetOpenAttempt])
 
+  // ── live call ───────────────────────────────────────────────────────────────────
+  // The selected gadget's capability is lent to the live call while it is on screen, so its call
+  // can be joined from here (in either layout), and invited to by whoever may share it.
+  const serverConfig = useServerConfig()
+  const canShare = !isUseOnly && (metadata?.ownerInvitesOnly !== true || !metadata.owner)
+  const liveCallView = serverConfig?.liveCallsEnabled === true && id && metadata &&
+      selectedGadgetSummary?.chatId === undefined && selectedGadgetSummary && selectedGadgetStub
+    ? {
+        workspaceId: id,
+        gadgetId: selectedGadgetSummary.id,
+        gadgetTitle: selectedGadgetSummary.title,
+        client: selectedGadgetStub,
+        onInvite: canShare ? () => setCallInviteOpen(true) : null,
+      }
+    : null
+  const dropCallParam = useCallback(() => {
+    navigate({
+      to: '/workspace/$id',
+      params: { id: id! },
+      search: (prev: Record<string, unknown>) => ({ ...prev, call: undefined }),
+      replace: true,
+    })
+  }, [id, navigate])
+  // ?call=join (a call invitation's Join) joins the gadget it names once that gadget is open here,
+  // and is dropped then -- or at once when it can't be honoured: calls are off, or the gadget isn't
+  // in the workspace (any more), or wouldn't open.
+  useLiveCallGadget(
+    liveCallView,
+    callParam === 'join' && liveCallView?.gadgetId === urlWorkpieceId ? { onJoinRequested: dropCallParam } : null,
+  )
+  const callParamUnhonourable = callParam === 'join' && (
+    (serverConfig !== null && serverConfig.liveCallsEnabled !== true) ||
+    (workpiecesReady && !visibleGadgets.some(g => g.id === urlWorkpieceId && g.chatId === undefined)) ||
+    (gadgetOpenFailure !== null && gadgetOpenFailure.id === urlWorkpieceId))
+  useEffect(() => {
+    if (callParamUnhonourable) dropCallParam()
+  }, [callParamUnhonourable, dropCallParam])
+
   // ── follow the agent across gadgets ─────────────────────────────────────────────
   // When the agent starts editing a gadget other than the selected one, switch the picker to it,
   // unless the user picked a workpiece themselves during this turn. A worktree is followed only
@@ -1729,6 +1772,8 @@ export default function GadgetEditor() {
 
           {showReconnecting && <ReconnectingChip />}
 
+          <LiveCallToggle />
+
           <WorkshopIconButton
             onClick={() => openShareModal(null)}
             title="Invite to workspace"
@@ -1786,6 +1831,7 @@ export default function GadgetEditor() {
         </div>
         <div className="ml-1 flex shrink-0 items-center gap-2">
           <span className="md:hidden">{showReconnecting && <ReconnectingChip />}</span>
+          <span className="md:hidden"><LiveCallToggle /></span>
           {/* Desktop reaches Export from the gadget pane's tab bar, which is hidden on phones. */}
           <span className="md:hidden">
             <GadgetExportMenu
@@ -2310,6 +2356,23 @@ export default function GadgetEditor() {
               target={sharedGadget
                 ? { kind: 'gadget', gadgetId: sharedGadget.id, title: sharedGadget.title }
                 : { kind: 'workspace' }}
+              currentUser={userInfo}
+              authenticatedApi={authenticatedApi}
+            />
+          )}
+          {liveCallView?.onInvite && (
+            <ShareModal
+              key={`${metadata.id}:call:${liveCallView.gadgetId}`}
+              open={callInviteOpen}
+              onClose={() => setCallInviteOpen(false)}
+              overseer={overseer.stub}
+              metadata={metadata}
+              target={{
+                kind: 'call',
+                gadgetId: liveCallView.gadgetId,
+                title: liveCallView.gadgetTitle,
+                gadget: liveCallView.client,
+              }}
               currentUser={userInfo}
               authenticatedApi={authenticatedApi}
             />

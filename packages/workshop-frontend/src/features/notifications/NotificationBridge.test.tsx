@@ -6,7 +6,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { RpcStub } from "capnweb";
 import type {
-  AuthenticatedApi, NotificationSubscriber, UserNotification, WorkspaceMetadataWithTimestamps,
+  AuthenticatedApi, CallInvite, NotificationSubscriber, UserNotification,
+  WorkspaceMetadataWithTimestamps,
 } from "@gadgets/workshop-shared/api";
 import { onWorkspaceShared } from "../shared-workspaces/newShares";
 import { NotificationBridge } from "./NotificationBridge";
@@ -14,9 +15,12 @@ import { disconnectNativeNotificationEnrollment } from "./nativeNotificationEnro
 import { reportVisibleChat } from "./visibleChat";
 
 const addToast = vi.fn<(options: { actions: { onClick: () => void }[] }) => void>();
+const closeToast = vi.fn<(id?: string) => void>();
 const router = { navigate: vi.fn<(options: object) => void>() };
 
-vi.mock("@cloudflare/kumo", () => ({ useKumoToastManager: () => ({ add: addToast }) }));
+vi.mock("@cloudflare/kumo", () => ({
+  useKumoToastManager: () => ({ add: addToast, close: closeToast }),
+}));
 vi.mock("@tanstack/react-router", () => ({ useRouter: () => router }));
 
 const notification: UserNotification = {
@@ -56,6 +60,7 @@ describe("NotificationBridge", () => {
 
   beforeEach(() => {
     addToast.mockClear();
+    closeToast.mockClear();
     router.navigate.mockClear();
     setVisibility("visible");
     subscribers = [];
@@ -422,6 +427,45 @@ describe("NotificationBridge", () => {
     expect(router.navigate).toHaveBeenCalledWith({
       to: "/workspace/$id", params: { id: "workspace-2" }, search: {},
     });
+  });
+
+  it("offers to join a live call the user is invited to, opening its gadget to join", async () => {
+    const invite: CallInvite = {
+      workspaceId: "workspace-3", gadgetId: 0, gadgetTitle: "Canaries",
+      inviter: { type: "user", id: "sam@example.com", name: "Sam" },
+    };
+    await render();
+    await act(() => subscribers[0].callInvite(invite));
+
+    expect(addToast).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      title: "Sam invited you to a live call on “Canaries”",
+    }));
+    const [join, dismiss] = addToast.mock.calls[0][0].actions;
+    join.onClick();
+    expect(router.navigate).toHaveBeenCalledExactlyOnceWith({
+      to: "/workspace/$id", params: { id: "workspace-3" }, search: { w: 0, call: "join" },
+    });
+    dismiss.onClick();
+    expect(router.navigate).toHaveBeenCalledOnce();
+    expect(closeToast).toHaveBeenCalledTimes(2);
+  });
+
+  it("names no gadget in an invitation whose title is withheld", async () => {
+    await render();
+    await act(() => subscribers[0].callInvite({
+      workspaceId: "workspace-3", gadgetId: 2, gadgetTitle: "",
+      inviter: { type: "user", id: "sam@example.com", name: "Sam" },
+    }));
+    expect(addToast).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Sam invited you to a live call",
+    }));
+
+    await act(async () => setVisibility("hidden"));
+    await expect(subscribers[0].callInvite({
+      workspaceId: "workspace-3", gadgetId: 2, gadgetTitle: "",
+      inviter: { type: "user", id: "sam@example.com", name: "Sam" },
+    })).rejects.toThrow("not visible");
+    expect(addToast).toHaveBeenCalledOnce();
   });
 
   it("does not announce a task whose chat is on screen", async () => {

@@ -4,6 +4,7 @@ import { useRouter } from "@tanstack/react-router";
 import { RpcStub, RpcTarget } from "capnweb";
 import type {
   AuthenticatedApi,
+  CallInvite,
   NotificationSubscriber,
   UserNotification,
   WorkspaceMetadataWithTimestamps,
@@ -15,6 +16,7 @@ import { registerNativeNotificationEnrollment } from "./nativeNotificationEnroll
 import { isChatVisible } from "./visibleChat";
 
 const DEVICE_REGISTRATION_EVENT = "cloudflare-os:notification-device-registration";
+const CALL_INVITE_TOAST_MS = 30_000;
 const NOTIFICATION_AUTHORIZATION_REQUEST_EVENT =
   "cloudflare-os:notification-authorization-request";
 
@@ -30,6 +32,7 @@ class NotificationSubscriberImpl extends RpcTarget implements NotificationSubscr
   constructor(
     private readonly present: (notification: UserNotification) => void,
     private readonly presentShare: (workspace: WorkspaceMetadataWithTimestamps) => void,
+    private readonly presentCallInvite: (invite: CallInvite) => void,
     private readonly onReleased: () => void,
   ) {
     super();
@@ -47,6 +50,13 @@ class NotificationSubscriberImpl extends RpcTarget implements NotificationSubscr
       throw new Error("notification client is not visible");
     }
     this.presentShare(workspace);
+  }
+
+  async callInvite(invite: CallInvite): Promise<void> {
+    if (document.visibilityState !== "visible") {
+      throw new Error("notification client is not visible");
+    }
+    this.presentCallInvite(invite);
   }
 
   // capnweb calls this once the server drops its last reference to the subscriber.
@@ -70,6 +80,8 @@ export const NotificationBridge = ({
   const toasts = useKumoToastManager();
   const addToast = useRef(toasts.add);
   addToast.current = toasts.add;
+  const closeToast = useRef(toasts.close);
+  closeToast.current = toasts.close;
   const router = useRouter();
   const currentApi = useRef(authenticatedApi);
   currentApi.current = authenticatedApi;
@@ -249,6 +261,32 @@ export const NotificationBridge = ({
             onClick: () => router.navigate({
               to: "/workspace/$id", params: { id: workspace.id }, search: {},
             }),
+          }],
+        });
+      }, ({ workspaceId, gadgetId, gadgetTitle, inviter }) => {
+        const id = `call:${workspaceId}:${gadgetId}:${inviter.id}`;
+        // Invitations wait longer than other notices: someone is waiting in the call.
+        addToast.current({
+          id,
+          title: gadgetTitle
+            ? `${inviter.name} invited you to a live call on “${gadgetTitle}”`
+            : `${inviter.name} invited you to a live call`,
+          variant: "info",
+          timeout: CALL_INVITE_TOAST_MS,
+          actions: [{
+            children: "Join",
+            onClick: () => {
+              closeToast.current(id);
+              void router.navigate({
+                to: "/workspace/$id",
+                params: { id: workspaceId },
+                search: { w: gadgetId, call: "join" },
+              });
+            },
+          }, {
+            children: "Dismiss",
+            variant: "secondary",
+            onClick: () => closeToast.current(id),
           }],
         });
       }, () => {
