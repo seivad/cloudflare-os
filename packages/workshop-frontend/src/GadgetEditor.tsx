@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
-import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
+import { useParams, useNavigate, useSearch, useRouterState, Link } from '@tanstack/react-router'
 import { DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import {
   ShareNetwork,
@@ -1413,12 +1413,16 @@ export default function GadgetEditor() {
       replace: true,
     })
   }, [id, navigate])
-  // ?call=join (a call invitation's Join) joins the gadget it names once that gadget is open here,
-  // and is dropped then -- or at once when it can't be honoured: calls are off, or the gadget isn't
-  // in the workspace (any more), or wouldn't open.
+  // ?call=join opens the sidebar on the gadget it names once that gadget is open here, and is
+  // dropped then -- or at once when it can't be honoured: calls are off, or the gadget isn't in the
+  // workspace (any more), or wouldn't open. It joins the call only with the navigation state a call
+  // invitation's Join sets: a pasted link can't carry that, so it can't turn on anyone's camera.
+  const joinFromInvitation = useRouterState({ select: state => state.location.state.liveCallJoin === true })
   useLiveCallGadget(
     liveCallView,
-    callParam === 'join' && liveCallView?.gadgetId === urlWorkpieceId ? { onJoinRequested: dropCallParam } : null,
+    callParam === 'join' && liveCallView?.gadgetId === urlWorkpieceId
+      ? { join: joinFromInvitation, onHonoured: dropCallParam }
+      : null,
   )
   const callParamUnhonourable = callParam === 'join' && (
     (serverConfig !== null && serverConfig.liveCallsEnabled !== true) ||

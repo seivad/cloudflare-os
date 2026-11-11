@@ -11,7 +11,7 @@ import type {
   WorkpieceId,
   WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
-import type { LiveCallGadgetView } from './features/live-call/liveCallContext'
+import type { LiveCallGadgetView, LiveCallRequest } from './features/live-call/liveCallContext'
 import { ServerConfigContext } from './ServerConfigContext'
 
 // Covers which gadgets the editor offers "Update from blueprint" for, how the editor brings a
@@ -40,11 +40,13 @@ const mocks = vi.hoisted(() => {
       replace?: boolean
     }) => void>(),
     search: {} as Record<string, unknown>,
+    // The current history entry's navigation state.
+    historyState: {} as { liveCallJoin?: true },
     serverConfig: null as ServerConfig | null,
     // What the editor last registered with the live call.
     liveCall: null as null | {
       view: LiveCallGadgetView | null
-      joinRequest: { onJoinRequested: () => void } | null
+      request: LiveCallRequest | null
     },
     // The props the use-only view was last rendered with.
     useView: null as null | {
@@ -85,6 +87,8 @@ vi.mock('@tanstack/react-router', () => ({
   useParams: () => ({ id: 'workspace' }),
   useNavigate: () => mocks.navigate,
   useSearch: () => mocks.search,
+  useRouterState: ({ select }: { select: (state: { location: { state: object } }) => unknown }) =>
+    select({ location: { state: mocks.historyState } }),
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
 }))
 
@@ -178,8 +182,8 @@ vi.mock('./components/UserMenu', () => ({ default: () => null }))
 vi.mock('./components/WorkspaceOpenErrorPage', () => ({ default: () => null }))
 vi.mock('./features/notifications/WorkspaceNotificationsMenu', () => ({ WorkspaceNotificationsMenu: () => null }))
 vi.mock('./features/live-call/liveCallContext', () => ({
-  useLiveCallGadget: (view: LiveCallGadgetView | null, joinRequest: { onJoinRequested: () => void } | null) => {
-    mocks.liveCall = { view, joinRequest }
+  useLiveCallGadget: (view: LiveCallGadgetView | null, request: LiveCallRequest | null) => {
+    mocks.liveCall = { view, request }
   },
 }))
 vi.mock('./features/live-call/LiveCallToggle', () => ({ LiveCallToggle: () => null }))
@@ -229,6 +233,7 @@ async function proposeUpdate() {
 beforeEach(() => {
   mocks.navigate.mockReset()
   mocks.search = {}
+  mocks.historyState = {}
   mocks.serverConfig = null
   mocks.liveCall = null
   localStorage.clear()
@@ -384,31 +389,48 @@ describe('GadgetEditor, opening a chat from a notification', () => {
 const dropsTheCallRequest = () => mocks.navigate.mock.calls.some(([{ search, replace }]) =>
   replace === true && (search({ w: 1, call: 'join' }) as { call?: string }).call === undefined)
 
-// A call invitation's Join arrives as ?call=join, with the gadget as ?w.
-describe('GadgetEditor, joining a live call from an invitation', () => {
+// ?call=join, with the gadget as ?w, opens the sidebar on that gadget's call. A call invitation's
+// Join adds navigation state asking to join it, which a pasted link can't.
+describe('GadgetEditor, a live call from the address or an invitation', () => {
   beforeEach(() => {
     mocks.serverConfig = { liveCallsEnabled: true } as ServerConfig
   })
 
-  it('lends the call the open gadget, asks to join it, and drops the request once joined', async () => {
+  it("opens a pasted link's call without joining it, and drops the request once shown", async () => {
     mocks.search = { w: GADGET.id, call: 'join' }
     await openEditor('desktop')
 
     expect(mocks.liveCall?.view).toMatchObject({ workspaceId: 'workspace', gadgetId: GADGET.id, gadgetTitle: 'Itinerary' })
     // A "build" session may share the gadget, so it may invite people to its call.
     expect(mocks.liveCall?.view?.onInvite).toBeTypeOf('function')
-    expect(mocks.liveCall?.joinRequest).not.toBeNull()
+    expect(mocks.liveCall?.request).toMatchObject({ join: false })
     expect(dropsTheCallRequest()).toBe(false)
 
-    act(() => mocks.liveCall!.joinRequest!.onJoinRequested())
+    act(() => mocks.liveCall!.request!.onHonoured())
     expect(dropsTheCallRequest()).toBe(true)
+  })
+
+  it("joins only when an invitation's Join carried the navigation state", async () => {
+    mocks.search = { w: GADGET.id, call: 'join' }
+    mocks.historyState = { liveCallJoin: true }
+    await openEditor('desktop')
+
+    expect(mocks.liveCall?.request).toMatchObject({ join: true })
+  })
+
+  it('asks nothing of the call without ?call=join, whatever the state', async () => {
+    mocks.search = { w: GADGET.id }
+    mocks.historyState = { liveCallJoin: true }
+    await openEditor('desktop')
+
+    expect(mocks.liveCall?.request).toBeNull()
   })
 
   it('drops a request naming a gadget the workspace does not have, joining nothing', async () => {
     mocks.search = { w: 9, call: 'join' }
     await openEditor('desktop')
 
-    expect(mocks.liveCall?.joinRequest).toBeNull()
+    expect(mocks.liveCall?.request).toBeNull()
     expect(dropsTheCallRequest()).toBe(true)
   })
 

@@ -8,7 +8,7 @@ import type { RpcStub } from 'capnweb'
 import type { CallRosterEntry, CallTicket, GadgetClient, ServerConfig } from '@gadgets/workshop-shared/api'
 import { ServerConfigContext } from '../../ServerConfigContext'
 import type { OpenCallMeeting } from './callMeeting'
-import { useLiveCallGadget, type LiveCallGadgetView } from './liveCallContext'
+import { useLiveCallGadget, type LiveCallGadgetView, type LiveCallRequest } from './liveCallContext'
 import { LiveCallProvider } from './LiveCallProvider'
 import { LiveCallSidebar } from './LiveCallSidebar'
 import { LiveCallToggle } from './LiveCallToggle'
@@ -76,11 +76,11 @@ const viewOf = (client: FakeClient, overrides: Partial<LiveCallGadgetView> = {})
 })
 
 // A gadget view on screen: what GadgetEditor does, minus the editor.
-const GadgetView = ({ view, joinRequest = null }: {
+const GadgetView = ({ view, request = null }: {
   view: LiveCallGadgetView
-  joinRequest?: { onJoinRequested: () => void } | null
+  request?: LiveCallRequest | null
 }) => {
-  useLiveCallGadget(view, joinRequest)
+  useLiveCallGadget(view, request)
   return <LiveCallToggle />
 }
 
@@ -367,18 +367,35 @@ describe('live call sidebar', () => {
     expect(() => button('Click to enable sound')).toThrow('No button labelled')
   })
 
-  it('joins once when asked to, as soon as the gadget is registered', async () => {
+  it("joins once when an invitation's Join asks to, as soon as the gadget is registered", async () => {
     meetings.push(new FakeMeeting())
-    const onJoinRequested = vi.fn<() => void>()
+    const onHonoured = vi.fn<() => void>()
     const client = fakeClient()
-    await render(<GadgetView view={viewOf(client)} joinRequest={{ onJoinRequested }} />)
+    await render(<GadgetView view={viewOf(client)} request={{ join: true, onHonoured }} />)
     await flush()
-    await render(<GadgetView view={viewOf(client)} joinRequest={{ onJoinRequested }} />)
+    await render(<GadgetView view={viewOf(client)} request={{ join: true, onHonoured }} />)
     await flush()
 
     expect(client.joinCall).toHaveBeenCalledOnce()
-    expect(onJoinRequested).toHaveBeenCalledOnce()
+    expect(openMeeting).toHaveBeenCalledOnce()
+    expect(onHonoured).toHaveBeenCalledOnce()
     expect(tileLabels()).toEqual(['You'])
+  })
+
+  it('only opens the sidebar for a request from the address, loading no SDK and no media', async () => {
+    const onHonoured = vi.fn<() => void>()
+    const client = fakeClient(ROSTER)
+    await render(<GadgetView view={viewOf(client)} request={{ join: false, onHonoured }} />)
+    await flush()
+
+    expect(sidebar()).not.toBeNull()
+    expect(onHonoured).toHaveBeenCalledOnce()
+    expect(sidebar()?.textContent).toContain('Sam and Ann are live')
+    expect(button('Join call')).toBeTruthy()
+    // openMeeting is the only way to the SDK's dynamic import and the camera.
+    expect(openMeeting).not.toHaveBeenCalled()
+    expect(client.joinCall).not.toHaveBeenCalled()
+    expect(tileLabels()).toEqual([])
   })
 
   it('shows nothing when the deployment has no live calls', async () => {

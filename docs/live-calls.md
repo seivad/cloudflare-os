@@ -155,8 +155,12 @@ to it, and offers Switch call while another gadget is on screen.
   people who hold the gadget as well as everyone else, gives the gadget with `addCollaborator()` to
   anyone the dialog doesn't list as holding it, and then invites each of them. It has no share
   links.
-- An invitation shows a notice whose Join opens the workspace on the gadget with `call=join`, which
-  joins once that gadget is open and is dropped then, or as soon as it can't be honoured.
+- `call=join` in a workspace's address opens the sidebar on the gadget `w` names, once it is open,
+  and is dropped then, or as soon as it can't be honoured. It never joins by itself: anyone holding
+  the gadget can send that link to anyone else, and opening it must not turn on their camera
+  without a click in the app. An invitation's notice has a Join that does join at once: it
+  navigates there with navigation state (`HistoryState.liveCallJoin`), which a pasted link can't
+  carry.
 
 The call runs in the Workshop page, never inside the gadget's sandboxed iframe, so gadget code has
 no access to the camera, the microphone or the ticket. The page's only Content-Security-Policy

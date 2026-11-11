@@ -9,8 +9,9 @@ type GadgetSearch = {
   // Show the chat even where the workspace pane hides it (a notification's "Open task" asks for
   // this). The editor drops it once honoured.
   showChat?: true
-  // Join the selected gadget's live call (a call invitation's Join asks for this). The editor drops
-  // it once honoured, or once it can't be.
+  // Open the live call sidebar on the selected gadget's call. It joins only when a call
+  // invitation's Join also set HistoryState.liveCallJoin, which a pasted link can't. The editor
+  // drops it once honoured, or once it can't be.
   call?: 'join'
 }
 

@@ -277,10 +277,12 @@ export const NotificationBridge = ({
             children: "Join",
             onClick: () => {
               closeToast.current(id);
+              // The state, which a pasted link can't carry, is what lets this click join at once.
               void router.navigate({
                 to: "/workspace/$id",
                 params: { id: workspaceId },
                 search: { w: gadgetId, call: "join" },
+                state: prev => ({ ...prev, liveCallJoin: true }),
               });
             },
           }, {
