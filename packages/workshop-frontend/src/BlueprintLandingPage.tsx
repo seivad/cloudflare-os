@@ -501,7 +501,11 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       for (let [name, binding] of Object.entries(blueprint.metadata.bindings)) {
         if (next[name]) continue
 
-        if (binding.type === 'aiModel') {
+        if (binding.type === 'modelCatalog') {
+          // The deployment's own catalog: there is nothing for the user to choose.
+          next[name] = { type: 'modelCatalog' }
+          changed = true
+        } else if (binding.type === 'aiModel') {
           if (!binding.suggestedModel) continue
           const modelId = findSuggestedModelId(modelsFor(binding), binding.suggestedModel)
           if (modelId) {
@@ -569,7 +573,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     } else if (binding.type === 'agentSpawner') {
       return (assignment as any).modelId !== undefined
     }
-    return false
+    return binding.type === 'modelCatalog'
   }, [activeBindingName, blueprint, bindingForm, gatekeeperReady])
 
   const handleSaveActiveBinding = async () => {
@@ -596,6 +600,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           type: 'aiModel',
           modelId: (form as any).modelId,
         }
+      } else if (binding.type === 'modelCatalog') {
+        assignment = { type: 'modelCatalog' }
       } else {
         assignment = {
           type: 'agentSpawner',
@@ -1277,7 +1283,7 @@ function BindingIconTile({
     ) : (
       <span className="text-[13px] font-semibold text-kumo-subtle">{fallback}</span>
     )
-  } else if (binding.type === 'aiModel') {
+  } else if (binding.type === 'aiModel' || binding.type === 'modelCatalog') {
     icon = <Robot size={16} className="text-kumo-subtle" />
   } else {
     icon = <Lightning size={16} className="text-kumo-subtle" />
@@ -1310,7 +1316,9 @@ function BlueprintBindingSummaryCard({
     ? (vendor?.description.displayName ?? binding.gatekeeperName)
     : binding.type === 'aiModel'
       ? 'AI Model'
-      : 'Agent'
+      : binding.type === 'modelCatalog'
+        ? 'Model catalog'
+        : 'Agent'
   const resource = binding.type === 'gatekeeper'
     ? vendor?.supportedResources.find(r => r.urlPattern === binding.typeUrlPattern)
     : null
@@ -1338,6 +1346,7 @@ function BlueprintBindingSummaryCard({
     if (assignment.type === 'aiModel') {
       return modelsByIdLabel(assignment.modelId)
     }
+    if (assignment.type === 'modelCatalog') return 'The deployment\'s models'
     if (assignment.modelId === null) return 'No agent'
     return modelsByIdLabel(assignment.modelId)
   })()

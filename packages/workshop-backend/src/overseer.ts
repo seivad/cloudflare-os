@@ -409,6 +409,7 @@ function connectionTypeFromCreationSpec(
     case "gatekeeper": return "gatekeeper";
     case "aiModel": return "ai_model";
     case "agentSpawner": return "agent_spawner";
+    case "modelCatalog": return undefined;   // a read-only view of the admin's catalog
     case "ambient": return undefined;   // auto-provided, not a user-initiated connection
     case undefined: return undefined;
   }
@@ -429,6 +430,7 @@ function describeBindingKind(binding: BlueprintBinding): string {
     case "gatekeeper": return `external resource: ${binding.gatekeeperName}`;
     case "aiModel": return binding.modelKind === "decision" ? `AI decision model` : `AI model`;
     case "agentSpawner": return `agent spawner`;
+    case "modelCatalog": return `model catalog`;
     default: return binding satisfies never;
   }
 }
@@ -9014,6 +9016,8 @@ class OverseerImpl implements AgentHooks {
           ...(modelKind(spec.provider, spec.modelName) === "decision"
               ? {modelKind: "decision"} : {}),
         };
+      } else if (spec.type === "modelCatalog") {
+        bindings[bindingName] = {...base, type: "modelCatalog"};
       } else if (spec.type === "agentSpawner") {
         // Only the spawner's permanent bindings, like the gadget's own edges above.
         let spawnerBindings = this.visibleBindings({bindings: gk.bindings ?? {}});
@@ -12353,6 +12357,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return result;
   }
 
+  async newModelCatalogGatekeeper(): Promise<GatekeeperClient<any>> {
+    return await this.impl.addGatekeeper(
+        this.impl.ctx.exports.ModelCatalogGatekeeper({props: {}}), {type: "modelCatalog"},
+        this.clientUserId, this.#mintedCapabilityKind());
+  }
+
   async newAgentSpawnerGatekeeper({env, ...config}: AgentSpawnerConfig)
       : Promise<GatekeeperClient<any>> {
     for (let [name, target] of Object.entries(env)) {
@@ -13701,6 +13711,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async newGatekeeper(_accountId: number, _resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async newModelCatalogGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
   async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     this.#deny();
   }

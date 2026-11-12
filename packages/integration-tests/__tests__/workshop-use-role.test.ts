@@ -96,6 +96,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   getGatekeeperById: ws => ws.getGatekeeperById(1),
   newGatekeeper: ws => ws.newGatekeeper(1, "https://gadgets-test.example/things/use-denied"),
   newAiModelGatekeeper: ws => ws.newAiModelGatekeeper("model"),
+  newModelCatalogGatekeeper: ws => ws.newModelCatalogGatekeeper(),
   newAgentSpawnerGatekeeper: ws =>
     ws.newAgentSpawnerGatekeeper({ displayName: "Spawner", modelId: null, env: {} }),
   approveAction: ws => ws.approveAction(0),

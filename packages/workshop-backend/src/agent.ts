@@ -1018,6 +1018,9 @@ export function formatMissingBlueprintBindings(
         details = binding.modelKind === "decision"
             ? `an AI decision model binding` : `an AI model binding`;
         break;
+      case "modelCatalog":
+        details = `a model catalog binding, the models the deployment's admin offers`;
+        break;
       case "agentSpawner": {
         let env = Object.entries(binding.env).map(([envName, target]) =>
             `${envName} = ${target.type === "gadget" ? gadget : `binding ${target.name}`}`);

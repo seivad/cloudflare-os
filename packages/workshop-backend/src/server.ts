@@ -17,6 +17,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 export { PendingLogin, LoginConnectCallbackImpl };
 import { GatekeeperUiFrame, GatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { DecisionModelGatekeeper, LanguageModelGatekeeper } from "./ai-models";
+import { ModelCatalogGatekeeper } from "./model-catalog";
 import { getGatewayModels } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { blueprintContentKey, buildBlueprintArchiveStream, sanitizeBlueprintOutput, parseBlueprintArchive, randomBlueprintId } from "./blueprint-archive.js";
@@ -62,7 +63,7 @@ function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata
 }
 
 // Re-export entrypoint types from ai-models.ts.
-export { DecisionModelGatekeeper, LanguageModelGatekeeper };
+export { DecisionModelGatekeeper, LanguageModelGatekeeper, ModelCatalogGatekeeper };
 
 // Re-export entrypoint types from admin-settings.ts.
 export { AdminSettings };
@@ -589,6 +590,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
           }
         } else if (assignment.type === "aiModel") {
           gk = await overseerResult.newAiModelGatekeeper(assignment.modelId);
+        } else if (assignment.type === "modelCatalog") {
+          gk = await overseerResult.newModelCatalogGatekeeper();
         } else {
           return;  // agent spawners are created in phase two
         }
