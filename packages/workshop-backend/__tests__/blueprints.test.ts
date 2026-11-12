@@ -1852,6 +1852,72 @@ describe("applying a blueprint to a gadget", () => {
   });
 });
 
+// Whether a gadget opts into viewer sessions (docs/viewer-sessions.md) is what the release it runs
+// said, recorded with that release when the gadget takes it -- never the blueprint as it is
+// published now, which may be a release the gadget has not taken.
+describe("recording whether a release opts into viewer sessions", () => {
+  it("records it with the release a gadget is instantiated from", async () => {
+    let release = await publishUnchained(1, V1, { viewerSessions: true });
+    await withWorkspace(async ({ instance, impl }) => {
+      await instantiate(instance, "unchained");
+      expect(theGadget(impl).upstream)
+          .toEqual({ blueprintId: "unchained", commitId: release, viewerSessions: true });
+    });
+
+    // Archive metadata is whatever JSON an upload held: anything but `true` opts nothing in.
+    await publishUnchained(1, V1, { viewerSessions: "yes" as unknown as boolean });
+    await withWorkspace(async ({ instance, impl }) => {
+      await instantiate(instance, "unchained");
+      expect(theGadget(impl).upstream).toEqual({ blueprintId: "unchained", commitId: release });
+    });
+  });
+
+  it("records it with each release a gadget accepts, so one without it turns it off", async () => {
+    await publishUnchained(1, V1);
+    await withWorkspace(async workspace => {
+      let { instance, impl } = workspace;
+      await instantiate(instance, "unchained");
+      expect(theGadget(impl).upstream.viewerSessions).toBeUndefined();
+
+      let r2 = await publishUnchained(2, V2, { viewerSessions: true });
+      let chatId = await propose(workspace, "unchained");
+      expect(proposal(impl, chatId).merge).toMatchObject({ commitId: r2, viewerSessions: true });
+      // Until the proposal is accepted, the gadget runs the release it has.
+      expect(theGadget(impl).upstream.viewerSessions).toBeUndefined();
+      expect((await accept(workspace, chatId)).upstream)
+          .toEqual({ blueprintId: "unchained", commitId: r2, viewerSessions: true });
+
+      let r3 = await publishUnchained(3, V3);
+      chatId = await propose(workspace, "unchained");
+      expect(proposal(impl, chatId).merge.viewerSessions).toBeUndefined();
+      expect((await accept(workspace, chatId)).upstream)
+          .toEqual({ blueprintId: "unchained", commitId: r3 });
+    });
+  });
+
+  it("records it for a gadget the agent creates from a release, on its first accept", async () => {
+    let alice = await publishVersions("Alice's", [V1]);
+    alice.published[0].viewerSessions = true;
+    let a1 = republish(alice, 0);
+
+    await withWorkspace(async ({ impl, client }) => {
+      addUserChat(impl, 1);
+      await runScriptedTurn(impl, 1, [
+        fauxAssistantMessage([fauxToolCall("createGadget",
+            { title: "Made", bindingName: "MADE", blueprintId: alice.blueprintId })],
+            { stopReason: "toolUse" }),
+        fauxAssistantMessage(fauxText("Done.")),
+      ]);
+      expect(theGadget(impl).upstream).toBeUndefined();
+      expect(proposal(impl, 1).merge.viewerSessions).toBe(true);
+
+      expect(await client.mergeChanges(1)).toEqual({ outcome: "merged" });
+      expect(theGadget(impl).upstream)
+          .toEqual({ blueprintId: alice.blueprintId, commitId: a1, viewerSessions: true });
+    });
+  });
+});
+
 describe("bringing a chat up to date with its gadget", () => {
   it("keeps a blueprint proposal in the chat's history", async () => {
     let alice = await publishVersions("Alice's", [V1, V2]);

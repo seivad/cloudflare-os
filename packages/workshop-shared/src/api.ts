@@ -5803,6 +5803,13 @@ export type GadgetUpstream = {
    * proposal records the release.
    */
   commitId?: string;
+
+  /**
+   * Present if that release opts into viewer sessions (BlueprintMetadata.viewerSessions),
+   * recorded with it when the gadget takes it, so that it follows the code the gadget runs rather
+   * than whatever the blueprint has published since.
+   */
+  viewerSessions?: true;
 };
 
 /**
@@ -5825,6 +5832,12 @@ export type BlueprintMerge = {
 
   /** The release: the commit that the gadget's history gains as a parent, if it lacks it. */
   commitId: string;
+
+  /**
+   * Present if the release opts into viewer sessions (BlueprintMetadata.viewerSessions). Accepting
+   * the proposal records it with the release (GadgetUpstream.viewerSessions).
+   */
+  viewerSessions?: true;
 
   /**
    * What the proposal does to the gadget's files, as the result of the merge decides it:
@@ -6223,8 +6236,8 @@ export type BlueprintMetadata = {
    * Opts the blueprint's gadgets into viewer sessions (see docs/viewer-sessions.md): the gadget's
    * Durable Object implements `openViewerSession(viewer: GadgetViewer): RpcTarget`, and
    * GadgetClient.connectToGadget() returns the target it returns for whoever is connecting,
-   * instead of the facet stub. Read, at each connect, from the blueprint a gadget follows
-   * (`GadgetUpstream.blueprintId`).
+   * instead of the facet stub. Only `true` opts in. A gadget records it with each release it
+   * takes (GadgetUpstream.viewerSessions), and that record is what a connect reads.
    */
   viewerSessions?: boolean;
 
@@ -6392,9 +6405,10 @@ export interface GadgetClient extends WorkpieceClient {
    * and server.js say what they are, readable through Overseer.listTree() and
    * Overseer.readFilesAtCommit() at its head commit (GadgetSummary.commitId).
    *
-   * A gadget whose blueprint opts into viewer sessions (BlueprintMetadata.viewerSessions) is the
-   * exception: the stub is instead the RpcTarget the gadget's `openViewerSession()` returned for
-   * the caller (see GadgetViewer), and calls go to its methods.
+   * A gadget running a blueprint release that opts into viewer sessions
+   * (GadgetUpstream.viewerSessions) is the exception: the stub is instead the RpcTarget the
+   * gadget's `openViewerSession()` returned for the caller (see GadgetViewer), and calls go to its
+   * methods. With `chatId`, that is decided by the release the gadget runs on mainline.
    *
    * If `chatId` is specified, then the gadget will include changes currently proposed in the given
    * chat.

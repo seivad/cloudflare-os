@@ -4,16 +4,19 @@
 // stub. Only the Workshop may make that call: the facet stub refuses it, so a client cannot claim
 // to be someone else. The session is counted and severed exactly as the facet stub is.
 //
+// Whether a gadget opts in is recorded with the release it runs (GadgetUpstream.viewerSessions;
+// blueprints.test.ts covers the recording), so the records are seeded here directly.
+//
 // Runs against real Overseer and User DOs (the TEST_OVERSEER and TEST_USER bindings), opening the
 // workspace through OverseerDurableObject.open() as live-calls.test.ts does, with a real gadget
 // facet loaded from a real commit as gadget-restore.test.ts does. The BLUEPRINTS namespace, which
-// the suites' Worker does not bind, is a map.
+// the suites' Worker does not bind, holds the one blueprint the gadgets follow.
 
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type {
-  AiChatAuthorInfo, BlueprintMetadata, CollaboratorGrant, GadgetClient, GadgetViewer, Overseer,
+  AiChatAuthorInfo, CollaboratorGrant, GadgetClient, GadgetViewer, Overseer,
 } from "@gadgets/workshop-shared/api";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import type { UserDurableObject } from "../src/user.js";
@@ -32,7 +35,8 @@ type Impl = OverseerDurableObject["impl"];
 type UserStub = DurableObjectStub<UserDurableObject>;
 
 // A gadget that implements openViewerSession(): each session answers with the viewer it was
-// opened for, so a test reads back exactly what the gadget received, and counts its disposal.
+// opened for, so a test reads back exactly what the gadget received, holds a call open until the
+// session dies, and counts its disposal.
 const SERVER_JS = `
 import { DurableObject, RpcTarget } from "cloudflare:workers";
 
@@ -63,34 +67,42 @@ class ViewerSession extends RpcTarget {
   viewer() {
     return this.#viewer;
   }
+  hold() {
+    return new Promise(() => {});
+  }
   [Symbol.dispose]() {
     this.#gadget.closedSessions++;
   }
 }
 `;
 
-// Gadget 100 follows a blueprint that opts into viewer sessions; gadget 101 runs the same code
-// but follows one that does not.
+// A gadget whose openViewerSession() returns nothing at all.
+const BROKEN_SERVER_JS = `
+import { DurableObject } from "cloudflare:workers";
+
+export class Gadget extends DurableObject {
+  openViewerSession(viewer) {}
+}
+`;
+
+// All three gadgets follow one blueprint, which as now published opts into viewer sessions. Gadget
+// 100 runs a release of it recorded as opting in, and 102 a broken one recorded the same way.
+// Gadget 101 runs the same code as 100, but from a release recorded without the flag: what the
+// blueprint says now must not matter to it.
 const VIEWER_GADGET = 100;
 const PLAIN_GADGET = 101;
-const VIEWER_BLUEPRINT = "viewer-sessions-blueprint";
-const PLAIN_BLUEPRINT = "plain-blueprint";
+const BROKEN_GADGET = 102;
+const BLUEPRINT = "viewer-sessions-blueprint";
 
-function blueprintRecord(extra: Partial<BlueprintMetadata>): string {
-  let record: BlueprintKvRecord = {
-    metadata: {
-      title: "Swarm", description: "", author: {type: "user", id: "author@example.com", name: "Author"},
-      created: new Date(0), version: 1, lastUpdated: new Date(0), bindings: {}, ...extra,
-    },
-  };
-  return JSON.stringify(record);
-}
-
-const kv = new Map<string, string>([
-  [VIEWER_BLUEPRINT, blueprintRecord({viewerSessions: true})],
-  [PLAIN_BLUEPRINT, blueprintRecord({})],
-]);
-const BLUEPRINTS = {get: async (key: string) => kv.get(key) ?? null} as unknown as KVNamespace;
+const BLUEPRINT_RECORD: BlueprintKvRecord = {
+  metadata: {
+    title: "Swarm", description: "", author: {type: "user", id: "author@example.com", name: "Author"},
+    created: new Date(0), version: 2, lastUpdated: new Date(0), bindings: {}, viewerSessions: true,
+  },
+};
+const BLUEPRINTS = {
+  get: async (key: string) => key === BLUEPRINT ? JSON.stringify(BLUEPRINT_RECORD) : null,
+} as unknown as KVNamespace;
 
 const person = (name: string): AiChatAuthorInfo =>
   ({type: "user", id: `${name.trim().toLowerCase() || "nameless"}-${crypto.randomUUID()}@example.com`, name});
@@ -109,7 +121,7 @@ function withImpl<T>(workspace: DurableObjectStub<OverseerDurableObject>, fn: (i
   return runInDurableObject(workspace, async (instance: OverseerDurableObject) => fn(instance["impl"]));
 }
 
-// An owner and their workspace, holding gadgets 100 and 101.
+// An owner and their workspace, holding gadgets 100, 101 and 102.
 async function setup() {
   let owner = person("Owner");
   let ownerUser = await signedUp(owner);
@@ -122,15 +134,21 @@ async function setup() {
     impl.storage.title.put("Swarm");
     impl.storage.ownerId.put(ownerUser.id.toString());
     impl.ownerId = ownerUser.id.toString();
-    let commitId = await impl.gitCache.writeFilesAsCommit(new Map([["server.js", SERVER_JS]]), {
+    let commit = (serverJs: string) => impl.gitCache.writeFilesAsCommit(new Map([["server.js", serverJs]]), {
       parents: [],
       author: {name: "Owner", email: "owner@example.com"},
       message: "Instantiate blueprint: Swarm",
       timestamp: new Date(1700000000_000),
     });
-    for (let [id, blueprintId] of [[VIEWER_GADGET, VIEWER_BLUEPRINT], [PLAIN_GADGET, PLAIN_BLUEPRINT]] as const) {
+    let gadgets = [
+      [VIEWER_GADGET, await commit(SERVER_JS), true],
+      [PLAIN_GADGET, await commit(SERVER_JS), false],
+      [BROKEN_GADGET, await commit(BROKEN_SERVER_JS), true],
+    ] as const;
+    for (let [id, commitId, viewerSessions] of gadgets) {
       impl.storage.gadgets.put({type: "gadget", id, title: `Gadget ${id}`, created: new Date(0),
-        bindingName: `G${id}`, bindings: {}, commitId, upstream: {blueprintId, commitId}});
+        bindingName: `G${id}`, bindings: {}, commitId,
+        upstream: {blueprintId: BLUEPRINT, commitId, ...(viewerSessions ? {viewerSessions} : {})}});
     }
   });
   return {owner, ownerUser, workspace};
@@ -166,7 +184,7 @@ const gadget = (session: Overseer, id: number) =>
   session.getGadget(id) as unknown as Promise<GadgetClient>;
 
 // What a gadget's viewer session answers with: the viewer it was opened for.
-type ViewerSession = { viewer(): Promise<GadgetViewer> } & Disposable;
+type ViewerSession = { viewer(): Promise<GadgetViewer>, hold(): Promise<never> } & Disposable;
 type Facet = { hello(): Promise<string>, openViewerSession(viewer: GadgetViewer): Promise<unknown> };
 
 const connect = async <T>(session: Overseer, id: number) =>
@@ -182,6 +200,43 @@ async function rejection(call: Promise<unknown>): Promise<string> {
     return String(err);
   }
   throw new Error("expected the call to reject");
+}
+
+function dispose(value: unknown): void {
+  (value as Disposable)[Symbol.dispose]();
+}
+
+// Replaces the restart that severs sessions with a recorder of its reasons: a real one would abort
+// the workspace, and the test running inside it.
+function recordRestarts(impl: Impl): string[] {
+  let restarts: string[] = [];
+  impl.scheduleAccessRestart = async (reason: string) => { restarts.push(reason); };
+  return restarts;
+}
+
+// A connection that collaborators are verified against, so binding it widens a gadget's scope.
+function seedGatekeeper(impl: Impl, id: number): void {
+  impl.storage.gatekeepers.put({
+    id, resourceTitle: `Connection ${id}`, class: {} as never,
+    creationSpec: {type: "gatekeeper", vendorId: "testvendor",
+      resourceUrl: `https://example.com/${id}`, typeUrlPattern: "https://*"},
+  });
+}
+
+// Opens the workspace as `user` from outside it, as a browser does, through a fresh stub (one held
+// across a restart is broken): the restart that severs sessions aborts the workspace, and with it
+// any code running inside.
+function openOutside(fixture: Fixture, user: UserStub, profile: AiChatAuthorInfo): Promise<Overseer> {
+  return env.TEST_OVERSEER.get(fixture.workspace.id).open(
+      user.id.toString(), profile.id, new NativeRpcStub(() => {})) as unknown as Promise<Overseer>;
+}
+
+// Waits for a viewer session to be severed by the restart that revokes access, which lands once
+// the response to the change has had time to reach whoever made it: `held`, the rejection of a
+// call it held open, is the restart's, and its next call fails too.
+async function severed(viewerSession: ViewerSession, held: Promise<string>): Promise<void> {
+  expect(await held).toMatch(/Gadget restarted to revoke access/);
+  await rejection(viewerSession.viewer());
 }
 
 describe("viewer sessions", () => {
@@ -232,6 +287,7 @@ describe("viewer sessions", () => {
   });
 
   it("gadget without viewerSessions keeps the facet stub", async () => {
+    // Gadget 101's release was recorded without the flag, though its blueprint now has it.
     let fixture = await setup();
     let user = await collaborator(fixture, person("Viewer"), {gadgetId: PLAIN_GADGET});
     await asUser(fixture, user.user, user.profile, async session => {
@@ -259,22 +315,16 @@ describe("viewer sessions", () => {
     let user = await collaborator(fixture, person("Viewer"), {gadgetId: VIEWER_GADGET});
     await runInDurableObject(fixture.workspace, async (instance: OverseerDurableObject) => {
       let impl = instance["impl"];
-      let restarts: string[] = [];
-      impl.scheduleAccessRestart = async (reason: string) => { restarts.push(reason); };
-      let seedGatekeeper = (id: number) => impl.storage.gatekeepers.put({
-        id, resourceTitle: `Connection ${id}`, class: {} as never,
-        creationSpec: {type: "gatekeeper", vendorId: "testvendor",
-          resourceUrl: `https://example.com/${id}`, typeUrlPattern: "https://*"},
-      });
-      seedGatekeeper(1);
+      let restarts = recordRestarts(impl);
+      seedGatekeeper(impl, 1);
       let session = await instance.open(user.user.id.toString(), user.profile.id, new NativeRpcStub(() => {}));
       let client = await gadget(session, VIEWER_GADGET);
       let viewerSession = await client.connectToGadget() as ViewerSession;
 
       // With every wrapper disposed, the retained viewer session must keep counting on its own, or
       // a widening would find no session to sever while it kept reading gadget state.
-      (session as unknown as Disposable)[Symbol.dispose]();
-      (client as unknown as Disposable)[Symbol.dispose]();
+      dispose(session);
+      dispose(client);
       impl.bindWorkpiece(VIEWER_GADGET, "DB", 1);
       expect(restarts).toHaveLength(1);
 
@@ -282,9 +332,30 @@ describe("viewer sessions", () => {
       // target's disposer asynchronously, so let it settle.)
       viewerSession[Symbol.dispose]();
       await new Promise(resolve => setTimeout(resolve, 0));
-      seedGatekeeper(2);
+      seedGatekeeper(impl, 2);
       impl.bindWorkpiece(VIEWER_GADGET, "DB2", 2);
       expect(restarts).toHaveLength(1);
+    });
+  });
+
+  it("a gadget that returns no session is refused, and leaves nothing counted", async () => {
+    let fixture = await setup();
+    let user = await collaborator(fixture, person("Viewer"), {gadgetId: BROKEN_GADGET});
+    await runInDurableObject(fixture.workspace, async (instance: OverseerDurableObject) => {
+      let impl = instance["impl"];
+      let restarts = recordRestarts(impl);
+      seedGatekeeper(impl, 1);
+      let session = await instance.open(user.user.id.toString(), user.profile.id, new NativeRpcStub(() => {}));
+      let client = await gadget(session, BROKEN_GADGET);
+      expect(await rejection(client.connectToGadget()))
+          .toMatch(/openViewerSession\(\) must return an RpcTarget, not undefined/);
+
+      // The failed connect released what it counted, so with the session and the gadget's
+      // capability disposed, a widening finds nothing to sever.
+      dispose(session);
+      dispose(client);
+      impl.bindWorkpiece(BROKEN_GADGET, "DB", 1);
+      expect(restarts).toEqual([]);
     });
   });
 
@@ -292,18 +363,36 @@ describe("viewer sessions", () => {
     let fixture = await setup();
     let user = await collaborator(fixture, person("Viewer"),
         {gadgetId: VIEWER_GADGET}, {gadgetId: PLAIN_GADGET});
-    // Held from outside the workspace, as a browser holds it: the restart that severs the session
-    // aborts the workspace, and with it any code running inside.
-    let open = (userStub: UserStub, profile: AiChatAuthorInfo) => fixture.workspace.open(
-        userStub.id.toString(), profile.id, new NativeRpcStub(() => {})) as unknown as Promise<Overseer>;
-    let session = await open(user.user, user.profile);
+    let session = await openOutside(fixture, user.user, user.profile);
     let viewerSession = await connect<ViewerSession>(session, VIEWER_GADGET);
     expect(await viewerSession.viewer()).toMatchObject({role: "use"});
+    let held = rejection(viewerSession.hold());
 
-    let owner = await open(fixture.ownerUser, fixture.owner);
+    let owner = await openOutside(fixture, fixture.ownerUser, fixture.owner);
     await owner.removeCollaborator(user.profile.id, [], VIEWER_GADGET);
+    await severed(viewerSession, held);
+  });
 
-    // The restart lands once the owner's response has had time to reach them.
-    await vi.waitFor(() => rejection(viewerSession.viewer()), {timeout: 5_000});
+  it("narrowing a build collaborator to use severs their build session; a new one is use", async () => {
+    let fixture = await setup();
+    let sharer = await collaborator(fixture, person("Sharer"), "workspace");
+    let user = await collaborator(fixture, person("Viewer"), {gadgetId: VIEWER_GADGET});
+    // The sharer's grant of the whole workspace makes the viewer a build collaborator.
+    let bySharer = await openOutside(fixture, sharer.user, sharer.profile);
+    await bySharer.addCollaborator(user.profile.id, "workspace");
+    let viewerSession = await connect<ViewerSession>(
+        await openOutside(fixture, user.user, user.profile), VIEWER_GADGET);
+    expect(await viewerSession.viewer()).toMatchObject({role: "build"});
+    let held = rejection(viewerSession.hold());
+
+    // Withdrawing it leaves the owner's grant of the one gadget. The session that said "build"
+    // must not outlive that...
+    await bySharer.removeCollaborator(user.profile.id, []);
+    await severed(viewerSession, held);
+
+    // ...and reconnecting opens a session with the role they hold now.
+    let reopened = await openOutside(fixture, user.user, user.profile);
+    expect(await (await connect<ViewerSession>(reopened, VIEWER_GADGET)).viewer())
+        .toEqual({profileId: user.profile.id, name: "Viewer", role: "use"});
   });
 });

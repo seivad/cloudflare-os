@@ -4032,7 +4032,7 @@ class OverseerImpl implements AgentHooks {
 
     let merge: BlueprintMerge = {
       gadgetId, blueprintId, title: metadata.title, version: metadata.version, commitId: release,
-      kind: "follow", conflictPaths: [],
+      ...releaseViewerSessions(metadata), kind: "follow", conflictPaths: [],
       ...this.#missingBlueprintBindings(metadata, record),
     };
     // The pin the chat is created with, if any: at the merge commit, with the head it merged.
@@ -4562,11 +4562,12 @@ class OverseerImpl implements AgentHooks {
 
     // Each gadget the chat proposed merging a blueprint release into now follows that
     // blueprint, at that release, which its head's history holds: from just above, or from
-    // before. (A gadget whose creation this merge did not cover is no part of it.)
-    for (let [gadgetId, {blueprintId, commitId}] of blueprintMerges) {
+    // before. (A gadget whose creation this merge did not cover is no part of it.) Whether the
+    // release opts into viewer sessions goes with it.
+    for (let [gadgetId, {blueprintId, commitId, viewerSessions}] of blueprintMerges) {
       let record = this.storage.gadgets.get(gadgetId);
       if (record?.type !== "gadget" || record.pending) continue;
-      record.upstream = {blueprintId, commitId};
+      record.upstream = {blueprintId, commitId, ...(viewerSessions ? {viewerSessions} : {})};
       this.storage.gadgets.put(record);
     }
 
@@ -5092,7 +5093,9 @@ class OverseerImpl implements AgentHooks {
   // inside a counted session).
   //
   // The stub refuses `openViewerSession`, whoever holds it: only connectGadgetClient() may tell a
-  // gadget who is acting, so nobody holding the facet can claim to be someone else.
+  // gadget who is acting, so nobody holding a stub the Workshop minted can claim to be someone
+  // else. (A gadget that hands out its Durable Object itself undoes this; see
+  // docs/viewer-sessions.md.)
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind)
       : Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
@@ -5101,15 +5104,19 @@ class OverseerImpl implements AgentHooks {
   }
 
   // What GadgetClient.connectToGadget() hands a client: the facet stub (getGadgetFacet), or, for
-  // a gadget that opts into viewer sessions (BlueprintMetadata.viewerSessions; see
-  // docs/viewer-sessions.md), the RpcTarget its `openViewerSession(viewer)` returns for the
-  // `viewer` the caller mints from its own session. The session is counted exactly as the facet
-  // stub is (`joinAs`, released when it is disposed), from before the gadget is asked, and dies
-  // with the facet when a restart severs sessions. A rejection is the gadget's, so it is reported
-  // to the console logs as its methods' are.
+  // a gadget running a blueprint release that opts into viewer sessions
+  // (GadgetUpstream.viewerSessions; see docs/viewer-sessions.md), the RpcTarget its
+  // `openViewerSession(viewer)` returns for the `viewer` the caller mints from its own session.
+  // A chat's preview goes by the release the gadget runs on mainline. The session is counted
+  // exactly as the facet stub is (`joinAs`, released when it is disposed), from before the gadget
+  // is asked, and dies with the facet when a restart severs sessions. A failure to open one is
+  // the gadget's, so it is reported to the console logs as its methods' failures are.
   async connectGadgetClient(gadgetId: WorkpieceId, chatId: number | undefined,
       joinAs: SessionKind | undefined, viewer: () => Promise<GadgetViewer>): Promise<RpcStub<any>> {
-    if (!await this.#gadgetUsesViewerSessions(gadgetId)) {
+    // Read straight from storage, not through getGadgetRecord(), which throws: a gadget not found
+    // here gets the facet stub, which reports why.
+    let record = this.storage.gadgets.get(gadgetId);
+    if (record?.type !== "gadget" || !record.upstream?.viewerSessions) {
       return this.getGadgetFacet(gadgetId, chatId, joinAs);
     }
     let who = await viewer();
@@ -5117,25 +5124,18 @@ class OverseerImpl implements AgentHooks {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId) as
         Fetcher<DurableObject & {openViewerSession(viewer: GadgetViewer): RpcTarget}>;
     let leaveSession = joinAs ? this.joinSession(joinAs, gadgetId) : undefined;
-    let session;
     try {
-      session = await facet.openViewerSession(who);
+      let session: unknown = await facet.openViewerSession(who);
+      if (session === null || (typeof session !== "object" && typeof session !== "function")) {
+        throw new TypeError("openViewerSession() must return an RpcTarget, not " +
+            `${session === null ? "null" : typeof session}.`);
+      }
+      return this.#gadgetStubForClient(session, chatId, {onDispose: () => leaveSession?.()});
     } catch (err) {
       leaveSession?.();
       this.#deliverGadgetError(chatId, err, "openViewerSession");
       throw err;
     }
-    return this.#gadgetStubForClient(session, chatId, {onDispose: () => leaveSession?.()});
-  }
-
-  // Whether a gadget opts into viewer sessions: what the blueprint it follows says, as currently
-  // published. A gadget that follows none (built from scratch, of unknown origin, or provisional
-  // to a chat) or whose blueprint is gone does not.
-  async #gadgetUsesViewerSessions(gadgetId: WorkpieceId): Promise<boolean> {
-    let blueprintId = this.getGadgetRecord(gadgetId).upstream?.blueprintId;
-    if (blueprintId === undefined) return false;
-    let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
-    return kvRecord?.metadata.viewerSessions === true;
   }
 
   // Report an exception a gadget's method threw to the console log subscribers. In theory we
@@ -10255,7 +10255,7 @@ class OverseerImpl implements AgentHooks {
     // nothing to merge them against.
     let merge: Omit<BlueprintMerge, "gadgetId"> = {
       blueprintId, title: kvRecord.metadata.title, version: kvRecord.metadata.version, commitId,
-      kind: "fastForward", conflictPaths: [],
+      ...releaseViewerSessions(kvRecord.metadata), kind: "fastForward", conflictPaths: [],
       ...this.#missingBlueprintBindings(kvRecord.metadata),
     };
 
@@ -11525,11 +11525,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       source: "blueprint",
     });
 
-    // The gadget follows the blueprint, from the release it was built from. It also inherits the
-    // blueprint's declared format, so it is named and drawn as a Document (or whatever it
-    // produces) rather than a generic app.
+    // The gadget follows the blueprint, from the release it was built from (and whether that
+    // release opts into viewer sessions). It also inherits the blueprint's declared format, so it
+    // is named and drawn as a Document (or whatever it produces) rather than a generic app.
     let record = this.impl.getGadgetRecord(gadgetId);
-    record.upstream = { blueprintId, commitId: release };
+    record.upstream = { blueprintId, commitId: release, ...releaseViewerSessions(metadata) };
     if (output) {
       record.output = output;
     }
@@ -14122,6 +14122,13 @@ function callCaller(impl: OverseerImpl, clientUserId: string): CallCaller {
     profile: () => retryOnDoReset(() => impl.wrapUserDo(
         impl.users.get(impl.users.idFromString(clientUserId))).whoami(), impl.logger),
   };
+}
+
+// What a gadget records with a blueprint release it takes of whether the release opts into viewer
+// sessions (GadgetUpstream.viewerSessions, BlueprintMerge.viewerSessions). Metadata can come from
+// an uploaded archive, so only `true` opts in.
+function releaseViewerSessions(metadata: BlueprintMetadata): {viewerSessions?: true} {
+  return metadata.viewerSessions === true ? {viewerSessions: true} : {};
 }
 
 // Who holds a gadget capability, for a gadget's viewer session (see docs/viewer-sessions.md):

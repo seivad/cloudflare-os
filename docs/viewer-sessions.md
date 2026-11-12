@@ -11,16 +11,21 @@ gadget made for that one person.
 
 Two things, both on the gadget's side:
 
-- Its blueprint's metadata sets `"viewerSessions": true` (`BlueprintMetadata.viewerSessions`), for
-  example in the metadata of the `.gadget` archive it is imported from.
-- Its `Gadget` Durable Object implements `openViewerSession(viewer: GadgetViewer): RpcTarget`.
+- Its blueprint release's metadata sets `"viewerSessions": true` (`BlueprintMetadata.viewerSessions`;
+  only `true` counts), for example in the metadata of the `.gadget` archive it is imported from.
+- Its `Gadget` Durable Object implements `openViewerSession(viewer: GadgetViewer): RpcTarget`, and
+  follows the rules under "Who can open a session" below.
 
-The Workshop reads the flag at every connect, from the blueprint the gadget follows
-(`GadgetRecord.upstream.blueprintId`) as that blueprint is currently published in KV. A gadget that
-follows no blueprint (built from scratch, of unknown origin, or still provisional to a chat) or whose
-blueprint has been deleted gets the facet stub. A blueprint published from a workspace never carries
-the flag (`createBlueprint` writes only the metadata it derives), so a gadget republished as a new
-blueprint loses it.
+The flag follows the code the gadget runs. A gadget records it with each blueprint release it takes
+(`GadgetUpstream.viewerSessions`, beside the release's `commitId`): when it is instantiated from a
+release, when the agent's creation of it from a release is accepted, and when a proposal to merge a
+release into it is accepted (`BlueprintMerge.viewerSessions` carries the flag until then). A connect
+reads that record and nothing else, so republishing the blueprint changes nothing until the gadget
+takes the new release, and deleting the blueprint changes nothing at all. A gadget that has taken no
+release (built from scratch, of unknown origin, or still provisional to a chat) gets the facet stub.
+A blueprint published from a workspace never carries the flag (`createBlueprint` writes only the
+metadata it derives), so a gadget republished as a new blueprint, and gadgets made from that, lose
+it.
 
 ## The viewer
 
@@ -37,14 +42,28 @@ collaborator's access restarts the workspace (below).
 ## What the client gets
 
 `connectToGadget()` returns the RpcTarget `openViewerSession()` returned, and the client's calls go
-to its methods. Exceptions they throw reach the console logs, as the facet's do. The same applies to
-the owner's and `build` collaborators' previews of a chat's proposed changes (`connectToGadget(chatId)`).
+to its methods. Exceptions they throw reach the console logs, as the facet's do. If
+`openViewerSession()` throws, or returns something that is not an object, the connect fails and is
+reported the same way. The owner's and `build` collaborators' previews of a chat's proposed changes
+(`connectToGadget(chatId)`) open sessions on the chat's code too, but whether they do is decided by
+the release the gadget runs on mainline: a chat proposing to take a release that adds or drops the
+flag previews with the gadget's current setting until it is accepted.
 
-Only the Workshop calls `openViewerSession()`. The facet stub refuses it whoever holds it: a client of
-any role, an agent, or another gadget through a binding. So nobody can open a session as someone
-else. That stub still reaches the gadget's other methods (bindings always get it, and every client
-does if the flag cannot be read), so a gadget that opts in should keep anything a viewer's role must
-gate off its Durable Object's own methods and expose it only through its viewer sessions.
+## Who can open a session
+
+The Workshop calls `openViewerSession()` itself, and every stub to the gadget it hands out refuses
+the call, whoever holds it: a client of any role, an agent, or another gadget through a binding. So
+no stub the Workshop mints can open a session as someone else.
+
+The gadget's own code can still undo that. Whoever holds a reference to its Durable Object itself
+can call `openViewerSession({role: "owner", ...})` directly. A method that returns `this`, or a
+`[restore]()` that returns `this` for an agent or a hook, hands one out. And the facet stub, which
+bindings always get, reaches every other method of the Durable Object. So a gadget that opts in
+must:
+
+- never hand out its Durable Object itself, only RpcTargets built for the purpose, and
+- keep every action a viewer's role gates on its session objects, never on the Durable Object's own
+  methods.
 
 ## Lifetime
 
