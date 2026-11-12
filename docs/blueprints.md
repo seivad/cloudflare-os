@@ -43,13 +43,15 @@ All named bindings are included in the blueprint. Annotations are configured in 
 
 ## Binding Types
 
-Blueprints support three types of bindings, matching the three types of gatekeepers:
+Blueprints support four types of bindings, matching the types of gatekeepers:
 
 1. **Gatekeeper** (`type: "gatekeeper"`) -- an external resource connection (e.g. Google Drive, a REST API). The blueprint records the gatekeeper adapter name and a URL pattern describing what kind of resource is expected. When instantiating, the user picks a connected account and configures a matching resource.
 
 2. **AI Model** (`type: "aiModel"`) -- a language model binding, or a decision model binding when `modelKind: "decision"` (see `ModelKind`). The blueprint may suggest a specific provider/model. When instantiating, the user picks from their own configured models of the same kind.
 
 3. **Agent Spawner** (`type: "agentSpawner"`) -- an agent spawner binding. The blueprint carries over the spawner configuration (prompt types, env restrictions) from the source gadget. The user only needs to choose which model the spawner should use (or no model).
+
+4. **Model Catalog** (`type: "modelCatalog"`) -- gives the gadget `env.<NAME>.list()`, the models the deployment's admin offers in **/admin -> AI models**: the language models set to enabled, in the admin's order, each as `{id, name, provider, contextWindow, description?}` (`CatalogModel`) and nothing else. It is read at each call, so an admin's change shows without a redeploy; with no AI Gateway it lists nothing. Instantiating assigns it with no input from the user (`{type: "modelCatalog"}`).
 
 ## Releases
 

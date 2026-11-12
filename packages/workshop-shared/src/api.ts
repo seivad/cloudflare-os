@@ -2460,6 +2460,32 @@ export type GatewayModel = {
   capabilities?: GatewayModelCapabilities;
 };
 
+/**
+ * A model of the deployment's catalog, as a gadget's `modelCatalog` binding lists it: what is
+ * needed to choose and describe a model, and nothing about how the deployment runs it.
+ */
+export type CatalogModel = {
+  /** The ID the model is referred to by. */
+  id: string;
+  /** Display name. */
+  name: string;
+  /** Which AI provider hosts the model. */
+  provider: string;
+  /** The maximum tokens one request may total. */
+  contextWindow: number;
+  /** The line the pickers show under the name, when the model has one. */
+  description?: string;
+};
+
+/** The binding a blueprint's `modelCatalog` binding gives a gadget. */
+export interface ModelCatalog {
+  /**
+   * The models the deployment's admin offers for use, in the admin's order. Read at each call, so
+   * it follows the admin's changes. Empty on a deployment with no AI Gateway.
+   */
+  list(): Promise<CatalogModel[]>;
+}
+
 /** A model a deployment provides through AI Gateway, as its admin sees it. */
 export type AdminModel = GatewayModel & {
   /** How the deployment offers the model. */
@@ -3534,6 +3560,12 @@ export interface Overseer extends RpcTarget {
    * `LanguageModelBinding`, a decision model's a `DecisionModelBinding`.
    */
   newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>>;
+
+  /**
+   * Create a new gatekeeper for a model catalog binding, which provides a `ModelCatalog`: the
+   * models the deployment's admin offers.
+   */
+  newModelCatalogGatekeeper(): Promise<GatekeeperClient<any>>;
 
   /**
    * Create a new gatekeeper for an agent spawner binding. This allows the gadget to
@@ -6055,6 +6087,8 @@ export type GatekeeperCreationSpec = {
   provider: string;        // provider name (e.g. "anthropic")
   modelName: string;       // model name on the provider's API (e.g. "claude-sonnet-4-6")
 } | {
+  type: "modelCatalog";
+} | {
   type: "agentSpawner";
   /**
    * The spawner's config, less `env`: its bindings change after creation, so they are binding
@@ -6166,6 +6200,12 @@ export type BlueprintBinding = {
 
   /** The source binding's model kind, so installers pick one of that kind; absent: `"language"`. */
   modelKind?: ModelKind;
+} | {
+  /**
+   * A binding to the deployment's model catalog: the models its admin offers. It takes no
+   * assignment from the user instantiating the blueprint; the catalog is the deployment's.
+   */
+  type: "modelCatalog";
 } | {
   /** An agent spawner binding. */
   type: "agentSpawner";
@@ -6320,6 +6360,8 @@ export type BlueprintBindingAssignment = {
 } | {
   type: "aiModel";
   modelId: string;        // one of the user's configured models
+} | {
+  type: "modelCatalog";
 } | {
   type: "agentSpawner";
   modelId: string | null; // model to run, or null for no agent
