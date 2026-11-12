@@ -1188,8 +1188,7 @@ describe("gadget facet stubs count as sessions", () => {
       joinSession: (kind: string, gadgetId?: number) => impl.joinSession(kind, gadgetId),
       authorizeGadget: async () => true,
       getGadgetRecord: (id: number) => impl.getGadgetRecord(id),
-      getGadgetFacet: (id: number, chatId?: number, joinAs?: string) =>
-          impl.getGadgetFacet(id, chatId, joinAs),
+      connectGadgetClient: (...args: unknown[]) => impl.connectGadgetClient(...args),
       recordGadgetAnalytics: () => {},
       users: { idFromString: (id: string) => id,
                get: () => ({
