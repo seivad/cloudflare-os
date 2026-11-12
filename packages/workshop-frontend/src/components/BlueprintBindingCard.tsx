@@ -21,6 +21,8 @@ export function suggestValueLabel(spec: GatekeeperCreationSpec, title?: string):
       return displayTitle ? `Suggest "${displayTitle}" by default` : 'Suggest this model by default'
     case 'agentSpawner':
       return displayTitle ? `Suggest "${displayTitle}" by default` : 'Suggest this agent setup by default'
+    case 'modelCatalog':
+      return displayTitle ? `Suggest "${displayTitle}" by default` : 'Suggest this by default'
     case 'ambient':
       // Ambient resources are auto-provided and excluded from blueprints, so this never renders.
       return 'Suggest this by default'

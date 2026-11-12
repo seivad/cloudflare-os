@@ -52,6 +52,9 @@ export function uniqueBindingBadges(
     } else if (b.type === "aiModel") {
       key = "aiModel";
       label = "AI Model";
+    } else if (b.type === "modelCatalog") {
+      key = "modelCatalog";
+      label = "Model catalog";
     } else {
       key = "agentSpawner";
       label = "Agent";
@@ -84,7 +87,7 @@ export function BindingBadge({
         className="h-3 w-3 object-contain"
       />
     );
-  } else if (badge.type === "aiModel") {
+  } else if (badge.type === "aiModel" || badge.type === "modelCatalog") {
     icon = <Robot size={11} />;
   } else if (badge.type === "agentSpawner") {
     icon = <Lightning size={11} />;
