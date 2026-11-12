@@ -407,7 +407,10 @@ gadget-minted children alike:
   it is the very stub an
   enabled hook's data flows through, and unlike a bind — which aborts gadget facets via
   `bumpVersion` — enabling a hook leaves existing facets running, so an uncounted retained facet
-  would let that widening find no session to sever.
+  would let that widening find no session to sever. A gadget's viewer session, which
+  `connectToGadget()` returns instead for a gadget that opts into them (`connectGadgetClient`; see
+  [viewer-sessions.md](viewer-sessions.md)), counts the same way: the Workshop wraps it as it wraps
+  the facet stub, so it is overseer-minted, not a gadget-minted child.
 - **Known gap — `enableHook` neither counts nor aborts gadget-minted children.** The facet-stub
   lease above covers only the stub the overseer minted; a gadget-minted child is independently
   owned (see the preamble) and reachable only by the facet abort — which every binding mutation

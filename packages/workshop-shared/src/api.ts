@@ -6219,6 +6219,15 @@ export type BlueprintMetadata = {
    */
   output?: BlueprintOutput;
 
+  /**
+   * Opts the blueprint's gadgets into viewer sessions (see docs/viewer-sessions.md): the gadget's
+   * Durable Object implements `openViewerSession(viewer: GadgetViewer): RpcTarget`, and
+   * GadgetClient.connectToGadget() returns the target it returns for whoever is connecting,
+   * instead of the facet stub. Read, at each connect, from the blueprint a gadget follows
+   * (`GadgetUpstream.blueprintId`).
+   */
+  viewerSessions?: boolean;
+
   /** Key = binding name. */
   bindings: Record<string, BlueprintBinding>;
 };
@@ -6382,6 +6391,10 @@ export interface GadgetClient extends WorkpieceClient {
    * The methods are the gadget's own code, so this API does not list them: the gadget's README.md
    * and server.js say what they are, readable through Overseer.listTree() and
    * Overseer.readFilesAtCommit() at its head commit (GadgetSummary.commitId).
+   *
+   * A gadget whose blueprint opts into viewer sessions (BlueprintMetadata.viewerSessions) is the
+   * exception: the stub is instead the RpcTarget the gadget's `openViewerSession()` returned for
+   * the caller (see GadgetViewer), and calls go to its methods.
    *
    * If `chatId` is specified, then the gadget will include changes currently proposed in the given
    * chat.
@@ -6632,6 +6645,15 @@ export type CollaboratorGrant = "workspace" | {gadgetId: WorkpieceId};
 export type CollaboratorAccess =
   | {role: "build"}
   | {role: "use", gadgetIds: WorkpieceId[] | "all"};
+
+/**
+ * Who is acting through a client's connection to a gadget, as the Workshop tells a gadget that
+ * opts into viewer sessions (`BlueprintMetadata.viewerSessions`; see docs/viewer-sessions.md). The
+ * Workshop mints it from the session alone, so a gadget can trust it: `profileId` and `name` are
+ * the connecting user's profile id and display name (the id's local part when the name is blank),
+ * and `role` is the owner, or the role of the collaborator's session.
+ */
+export type GadgetViewer = { profileId: string; name: string; role: "owner" | "build" | "use" };
 
 /** One person currently connected to a gadget. */
 export type PresenceParticipant = {

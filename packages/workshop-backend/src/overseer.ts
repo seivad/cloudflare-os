@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import type { ChatTimelineHead } from "@gadgets/workshop-shared/api";
+import type { ChatTimelineHead, GadgetViewer } from "@gadgets/workshop-shared/api";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, WorkspaceMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPinRecord, MainlineMergeGadget, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AGENT_SPAWNER_CONNECTION_ID, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, CollaboratorAccess, CollaboratorGrant, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintMerge, ApplyBlueprintResult, GadgetUpstream, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenWorkspaceError, OPEN_WORKSPACE_ERROR_CODES, createGatekeeperError, GATEKEEPER_ERROR_CODES, resolveSiteName, modelKind } from '@gadgets/workshop-shared/api'
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange,
@@ -5091,26 +5091,100 @@ class OverseerImpl implements AgentHooks {
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
   //
-  // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
-  // look like an RpcTarget instead.
+  // The stub refuses `openViewerSession`, whoever holds it: only connectGadgetClient() may tell a
+  // gadget who is acting, so nobody holding the facet can claim to be someone else.
   async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind)
       : Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
     let leaveSession = joinAs ? this.joinSession(joinAs, gadgetId) : undefined;
+    return this.#gadgetStubForClient(facet, chatId, {onDispose: leaveSession, isFacet: true});
+  }
 
+  // What GadgetClient.connectToGadget() hands a client: the facet stub (getGadgetFacet), or, for
+  // a gadget that opts into viewer sessions (BlueprintMetadata.viewerSessions; see
+  // docs/viewer-sessions.md), the RpcTarget its `openViewerSession(viewer)` returns for the
+  // `viewer` the caller mints from its own session. The session is counted exactly as the facet
+  // stub is (`joinAs`, released when it is disposed), from before the gadget is asked, and dies
+  // with the facet when a restart severs sessions. A rejection is the gadget's, so it is reported
+  // to the console logs as its methods' are.
+  async connectGadgetClient(gadgetId: WorkpieceId, chatId: number | undefined,
+      joinAs: SessionKind | undefined, viewer: () => Promise<GadgetViewer>): Promise<RpcStub<any>> {
+    if (!await this.#gadgetUsesViewerSessions(gadgetId)) {
+      return this.getGadgetFacet(gadgetId, chatId, joinAs);
+    }
+    let who = await viewer();
+    // Asked through the bare fetcher, not the client stub, which refuses this one call.
+    let facet = await this.getGadgetFacetFetcher(gadgetId, chatId) as
+        Fetcher<DurableObject & {openViewerSession(viewer: GadgetViewer): RpcTarget}>;
+    let leaveSession = joinAs ? this.joinSession(joinAs, gadgetId) : undefined;
+    let session;
+    try {
+      session = await facet.openViewerSession(who);
+    } catch (err) {
+      leaveSession?.();
+      this.#deliverGadgetError(chatId, err, "openViewerSession");
+      throw err;
+    }
+    return this.#gadgetStubForClient(session, chatId, {onDispose: () => leaveSession?.()});
+  }
+
+  // Whether a gadget opts into viewer sessions: what the blueprint it follows says, as currently
+  // published. A gadget that follows none (built from scratch, of unknown origin, or provisional
+  // to a chat) or whose blueprint is gone does not.
+  async #gadgetUsesViewerSessions(gadgetId: WorkpieceId): Promise<boolean> {
+    let blueprintId = this.getGadgetRecord(gadgetId).upstream?.blueprintId;
+    if (blueprintId === undefined) return false;
+    let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
+    return kvRecord?.metadata.viewerSessions === true;
+  }
+
+  // Report an exception a gadget's method threw to the console log subscribers. In theory we
+  // shouldn't have to, because these exceptions should be reported to the tail worker. However,
+  // for some reason, that isn't working -- possibly a runtime bug which needs investigation.
+  // TODO: Fix exception reporting it tail workers so we can remove this hack.
+  #deliverGadgetError(chatId: number | undefined, err: unknown, method: string) {
+    let msg = err;
+    if (err instanceof Error) {
+      // Sadly the caught errors are missing any useful stack at the moment. Perhaps if
+      // we at least specify the method that was called it's somewhat useful to the agent.
+      msg = `${err}\n    at ${method}()`;
+    }
+
+    let event: ConsoleLogEvent = {
+      timestamp: new Date(),
+      level: "error",
+      message: [msg],
+    };
+    this.deliverGadgetLogs(chatId ?? null, [event]);
+  }
+
+  // Wrap a stub into a gadget facet -- the facet itself, or a viewer session it returned -- so it
+  // can be returned to a client. `onDispose` runs when the client disposes it (the session lease;
+  // the DO reset that severs sessions releases it implicitly, by discarding this object -- and
+  // joinSession's leave is idempotent, so a double dispose is harmless). `isFacet` refuses
+  // `openViewerSession` (see getGadgetFacet).
+  //
+  // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
+  // look like an RpcTarget instead.
+  #gadgetStubForClient(stub: object, chatId: number | undefined,
+      {onDispose, isFacet = false}: {onDispose?: () => void, isFacet?: boolean}): RpcStub<any> {
     let self = this;
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
-    let proxy = new Proxy(facet, {
+    let proxy = new Proxy(stub, {
       get(target, prop, receiver) {
-        // The lease ends when the client disposes the stub. (The DO reset that severs sessions
-        // releases it implicitly, by discarding this object -- and joinSession's leave is
-        // idempotent, so a double dispose is harmless.)
-        if (prop === Symbol.dispose && leaveSession) {
+        if (prop === Symbol.dispose && onDispose) {
           let inner = Reflect.get(target, prop, target);
           return () => {
-            leaveSession!();
+            onDispose();
             if (typeof inner === "function") Reflect.apply(inner, target, []);
+          };
+        }
+
+        if (isFacet && prop === "openViewerSession") {
+          return async () => {
+            throw new Error("openViewerSession() is reserved for the Workshop, which calls it " +
+                "with the connecting viewer; it cannot be called through this stub.");
           };
         }
 
@@ -5126,26 +5200,11 @@ class OverseerImpl implements AgentHooks {
 
         // HACK: We're going to assume all top-level properties are methods, and we are going to
         //   intercept exceptions thrown by these methods and deliver them to the console log
-        //   subscriber. In theory we shouldn't have to do this, because these exceptions should
-        //   be reported to the tail worker. However, for some reason, that isn't working --
-        //   possibly a runtime bug which needs investigation.
-        // TODO: Fix exception reporting it tail workers so we can remove this hack.
+        //   subscriber (see #deliverGadgetError).
         return (...args: any[]) => {
           let result: Promise<any> = Reflect.apply(method, target, args);
           return result.catch((err: any) => {
-            let msg = err;
-            if (err instanceof Error) {
-              // Sadly the caught errors are missing any useful stack at the moment. Perhaps if
-              // we at least specify the method that was called it's somewhat useful to the agent.
-              msg = `${err}\n    at ${prop}()`;
-            }
-
-            let event: ConsoleLogEvent = {
-              timestamp: new Date(),
-              level: "error",
-              message: [msg],
-            };
-            self.deliverGadgetLogs(chatId ?? null, [event]);
+            self.#deliverGadgetError(chatId, err, prop);
             throw err;
           });
         }
@@ -13820,9 +13879,12 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
       chat_id: chatId,
       interaction_type: "gadget_ui_connected",
     });
-    // The facet stub counts exactly as this capability does (joinedAs): it can outlive this
-    // object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs);
+    // The facet stub (or viewer session) counts exactly as this capability does (joinedAs): it
+    // can outlive this object, and it is the very stub a hook-enable widening's data flows
+    // through. Only the owner and "build" sessions mint this class, so anyone else is "build".
+    let role: GadgetViewer["role"] = this.clientUserId === this.impl.ownerId ? "owner" : "build";
+    return this.impl.connectGadgetClient(this.id, chatId, this.joinedAs,
+        () => gadgetViewer(this.impl, this.clientUserId, role));
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -14062,6 +14124,15 @@ function callCaller(impl: OverseerImpl, clientUserId: string): CallCaller {
   };
 }
 
+// Who holds a gadget capability, for a gadget's viewer session (see docs/viewer-sessions.md):
+// their profile, read from their own User DO, named as live calls name them (LiveCalls.join), and
+// `role`, that of the session the capability was minted into.
+async function gadgetViewer(impl: OverseerImpl, clientUserId: string, role: GadgetViewer["role"])
+    : Promise<GadgetViewer> {
+  let profile = await callCaller(impl, clientUserId).profile();
+  return {profileId: profile.id, name: profile.name.trim() || profile.id.split("@")[0], role};
+}
+
 // Restricted GadgetClient handed to "use"-role collaborators: it permits only what is needed to
 // render and interact with the gadget's deployed UI, mainline-only. Like UseOverseerInterface,
 // `implements GadgetClient` enforces default-deny at compile time: any new GadgetClient method
@@ -14121,9 +14192,11 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
       user_id: this.#clientUser.id.toString(),
       interaction_type: "gadget_ui_connected",
     });
-    // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
-    // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, "use");
+    // The facet stub (or viewer session) counts as a "use" session for its own lifetime, like
+    // this interface: it can outlive this object, and it is the very stub a hook-enable
+    // widening's data flows through.
+    return this.impl.connectGadgetClient(this.id, undefined, "use",
+        () => gadgetViewer(this.impl, this.clientUserId, "use"));
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
