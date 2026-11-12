@@ -9054,7 +9054,8 @@ class OverseerImpl implements AgentHooks {
               `Remove it from the spawner's configuration first.`);
         }
         let targetSpec = targetGk.creationSpec;
-        if (targetSpec?.type === "gatekeeper" || targetSpec?.type === "aiModel") {
+        if (targetSpec?.type === "gatekeeper" || targetSpec?.type === "aiModel" ||
+            targetSpec?.type === "modelCatalog") {
           // Synthesize a spawner-only binding, named after the spawner env name (suffixed if an
           // edge already claims it), described from the target's own creation spec.
           let synthName = envName;
@@ -9072,6 +9073,8 @@ class OverseerImpl implements AgentHooks {
                   gatekeeperName: targetSpec.vendorId,
                   typeUrlPattern: targetSpec.typeUrlPattern || targetSpec.resourceUrl!,
                 }
+              : targetSpec.type === "modelCatalog"
+              ? {...synthBase, type: "modelCatalog"}
               : {
                   ...synthBase,
                   type: "aiModel",
