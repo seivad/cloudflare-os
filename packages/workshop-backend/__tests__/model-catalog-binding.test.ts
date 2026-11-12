@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SUGGESTED_MODELS } from "@gadgets/workshop-shared/api";
 import { serializeAdminConfig } from "../src/admin-config.js";
 import { DEFAULT_ADMIN_CONFIG, type AdminConfig } from "../src/storage-schema/admin-settings-storage.js";
 import { ModelCatalogGatekeeper } from "../src/model-catalog.js";
@@ -86,6 +87,16 @@ describe("ModelCatalogGatekeeper", () => {
       id: "cloudflare/auto", name: "Auto", provider: "cloudflare-auto-router", contextWindow: 128_000,
       description: "Best model for each request",
     });
+  });
+
+  it("leaves out decision models, which a gadget cannot run as language models", async () => {
+    const env = { ...GATEWAY_ENV, CF_AI_GATEWAY_PROVIDERS: "cloudflare,anthropic" };
+    const decisionIds = Object.entries(SUGGESTED_MODELS.cloudflare)
+        .filter(([, model]) => model.kind === "decision").map(([id]) => id);
+    expect(decisionIds.length).toBeGreaterThan(0);
+    const models = await (await startCatalog(() => ({}), env)).list();
+    expect(models.some(model => model.provider === "cloudflare")).toBe(true);
+    for (const id of decisionIds) expect(models.map(model => model.id)).not.toContain(id);
   });
 
   it("empty list when AI Gateway mode is off", async () => {
