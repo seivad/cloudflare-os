@@ -22,20 +22,32 @@ export interface ContextLibrary extends RpcTarget {
   list(opts?: { collectionId?: string; path?: string }): Promise<ContextListing>;
   /** Read a document by its catalog/list/search ID, or return null when it is unavailable. */
   read(docId: string): Promise<ContextReadResult | null>;
-  /** Every valid skill in the collections this session can read. */
-  listSkills(): Promise<LibrarySkill[]>;
+  /** The collections this session can read that hold at least one skill, with who else can read each. */
+  listSkillCollections(): Promise<SkillCollection[]>;
+  /** The valid skills of one collection this session can read; none for any other. */
+  listSkills(collectionId: string): Promise<LibrarySkill[]>;
   /** The text files of a skill listed by listSkills(); throws a sentence when it cannot be read. */
   readSkill(collectionId: string, manifestPath: string): Promise<SkillFiles>;
-  /** Search the skills.sh directory; `query` needs at least two characters. */
-  searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]>;
-  /** Read a listed skills.sh skill from its public GitHub repository. Nothing is stored. */
-  previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview>;
-  /**
-   * The text files of a previewed skills.sh skill at the preview's commit. Throws when the
-   * repository's default branch has moved past `commitSha` (preview again).
-   */
-  readDirectorySkill(source: string, skillId: string, commitSha: string): Promise<SkillFiles>;
 }
+
+/** A collection of the library that holds skills. */
+export type SkillCollection = {
+  collectionId: string;
+  name: string;
+  /**
+   * Who can read it: "public" for a public collection or a private one everyone in the sharing
+   * domain can view; "shared" for a private one with other members; "private" for one only the
+   * session's own account can read.
+   */
+  audience: "private" | "shared" | "public";
+  /**
+   * How many of the collaborators this binding already answers for could not read the collection,
+   * so would be refused entry to the workspace once a skill from it is read. Null when that cannot
+   * be answered without recording an observation (the binding retains no collaborator list, or a
+   * check failed).
+   */
+  excludes: number | null;
+};
 
 /** A skill in a collection the session can read. */
 export type LibrarySkill = {
@@ -56,11 +68,11 @@ export type LibrarySkill = {
 export type SkillFiles = {
   name: string;
   description: string;
-  /** A library skill's revision; a skills.sh skill's commit. */
+  /** Differs when any file of the skill changed. */
   revision: string;
   /** SKILL.md first, then the rest by path; paths are relative to the skill's directory. */
   files: { path: string; text: string }[];
-  /** Files not returned, and why: binary, over the file cap, or not installed with the skill. */
+  /** Files not returned, and why: binary or over the file cap. */
   leftOut: { path: string; reason: string }[];
 };
 

@@ -77,6 +77,11 @@ type ObserverStrategyBase = {
   /** @returns Retained observer IDs without fencing concurrent admission. */
   observerIds?(): string[];
   /**
+   * @returns Retained observers' verifier capabilities, for questions that record nothing. Absent
+   * on a strategy that does not retain them.
+   */
+  observerVerifiers?(): [string, Fetcher<GatekeeperUserVerifier>][];
+  /**
    * Reserves a read hidden from every observer.
    * @returns A check that fences admission until settled.
    */
@@ -173,6 +178,7 @@ export function trackedCollectionObservers<V>(options: ObserverTrackerOptions<V>
     removeObserver: async id => tracker.removeObserver(id),
     prepare: collectionIds => tracker.prepareObservation(collectionIds),
     observerIds: () => tracker.observerIds(),
+    observerVerifiers: () => tracker.observerVerifiers() as [string, Fetcher<GatekeeperUserVerifier>][],
     prepareWithheld: () => tracker.prepareWithheld(),
   };
 }

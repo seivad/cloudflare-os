@@ -1,17 +1,13 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ObservationGate, type ObserverKv } from "@gadgets/gatekeeper-kit/observers";
-import type { ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { GatekeeperUserVerifier, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { contextObserverStrategy } from "../src/context-observers.js";
 import type { ContextCollectionDurableObject } from "../src/context-collection.js";
 import { LibraryReadSession } from "../src/library-read.js";
 import type { UserLibraryDurableObject } from "../src/user-library.js";
 import { domainName } from "../src/domain.js";
-import { SkillDirectoryClient } from "../src/skill-directory/index.js";
-import {
-  archiveResponse, codeloadUrl, COMMIT, fakeFetch, manifest, OTHER_COMMIT, repositoryArchive,
-  type ArchiveEntry,
-} from "./skill-directory-fixtures.js";
+import { manifest } from "./skill-directory-fixtures.js";
 
 type TestEnv = { COLLECTIONS: DurableObjectNamespace<ContextCollectionDurableObject> };
 const testEnv = env as unknown as TestEnv & Cloudflare.Env;
@@ -26,13 +22,13 @@ beforeEach(() => {
 const collection = (id: string) =>
   testEnv.COLLECTIONS.get(testEnv.COLLECTIONS.idFromName(domainName(domain, id)));
 
-async function createCollection(title: string): Promise<string> {
+async function createCollection(title: string, visibility: "private" | "public" = "private"): Promise<string> {
   let id = `collection-${nextId++}`;
   let now = new Date();
   await collection(id).initialize({
-    id, title, description: "", visibility: "private",
+    id, title, description: "", visibility,
     created: now, lastUpdated: now, documentCount: 0, content: { source: "web" },
-  }, domain, "owner");
+  }, domain, visibility === "private" ? "owner" : "");
   return id;
 }
 
@@ -62,11 +58,21 @@ function makeKv(): ObserverKv {
   };
 }
 
+/** A collaborator the binding answers for, who can read exactly the collections in `readable`. */
+function collaborator(readable: string[]): Fetcher<GatekeeperUserVerifier> {
+  return {
+    async hasCollectionsAccess(_domain: string, ids: string[]) { return ids.map(id => readable.includes(id)); },
+  } as unknown as Fetcher<GatekeeperUserVerifier>;
+}
+
 /** A session over real collections; `library` is the owner's private library, and no collection is public. */
-function makeSession(library: string[], directory?: SkillDirectoryClient) {
+function makeSession(library: string[], options: { refusal?: Error } = {}) {
   let authorized: ObservationDescription[] = [];
   let authorizer = {
-    async authorizeObservation(description: ObservationDescription) { authorized.push(description); },
+    async authorizeObservation(description: ObservationDescription) {
+      if (options.refusal) throw options.refusal;
+      authorized.push(description);
+    },
     [Symbol.dispose]() {},
   };
   let userLibraries = {
@@ -81,14 +87,94 @@ function makeSession(library: string[], directory?: SkillDirectoryClient) {
   let kvEnv = {
     CONTEXT_COLLECTIONS: { async get() { return "[]"; } },
   } as unknown as Pick<Cloudflare.Env, "CONTEXT_COLLECTIONS">;
+  let strategy = contextObserverStrategy(makeKv(), domain);
   let session = new LibraryReadSession(
     kvEnv, testEnv.COLLECTIONS, userLibraries, domain, "owner",
     new ObservationGate(
-      authorizer as unknown as ConstructorParameters<typeof ObservationGate>[0],
-      contextObserverStrategy(makeKv(), domain)),
-    directory);
-  return { session, authorized };
+      authorizer as unknown as ConstructorParameters<typeof ObservationGate>[0], strategy),
+    strategy);
+  return { session, authorized, strategy };
 }
+
+describe("LibraryReadSession.listSkillCollections", () => {
+  it("lists the collections that hold skills, not those that do not or cannot be read", async () => {
+    let withSkills = await createCollection("Skills");
+    let docsOnly = await createCollection("Docs");
+    let unreadable = await createCollection("Theirs");
+    await addSkill(withSkills, "triage", "triage");
+    await collection(docsOnly).putContextDocument("plan.md", { description: "", body: "Plan.\n" });
+    await addSkill(unreadable, "secret", "secret");
+    let { session, authorized } = makeSession([withSkills, docsOnly]);
+
+    let collections = await session.listSkillCollections();
+
+    expect(collections).toEqual([{
+      collectionId: withSkills, name: "Skills", audience: "private", excludes: 0,
+    }]);
+    // Discovery metadata, as list() with no collection: nothing is observed.
+    expect(authorized).toEqual([]);
+  });
+
+  it("says who else can read each collection", async () => {
+    let alone = await createCollection("Alone");
+    let shared = await createCollection("Shared");
+    let everyone = await createCollection("Everyone");
+    for (let id of [alone, shared, everyone]) await addSkill(id, "triage", "triage");
+    await collection(shared).share("owner", [{ accountId: "bob", displayName: "Bob" }], "viewer");
+    await collection(everyone).setEveryoneCanView("owner", true);
+    let { session } = makeSession([alone, shared, everyone]);
+
+    let audiences = Object.fromEntries(
+      (await session.listSkillCollections()).map(entry => [entry.name, entry.audience]));
+
+    expect(audiences).toEqual({ Alone: "private", Shared: "shared", Everyone: "public" });
+  });
+
+  it("counts the collaborators the binding answers for who could not read each collection", async () => {
+    let open = await createCollection("Open");
+    let closed = await createCollection("Closed");
+    await addSkill(open, "triage", "triage");
+    await addSkill(closed, "other", "other");
+    let { session, strategy, authorized } = makeSession([open, closed]);
+    await strategy.addObserver("bob", collaborator([open]));
+    await strategy.addObserver("carol", collaborator([open, closed]));
+
+    let collections = await session.listSkillCollections();
+
+    expect(collections.map(({ name, excludes }) => [name, excludes]))
+      .toEqual([["Closed", 1], ["Open", 0]]);
+    expect(authorized).toEqual([]);
+  });
+
+  it("reports excludes as null when a collaborator's check fails", async () => {
+    let id = await createCollection("Open");
+    await addSkill(id, "triage", "triage");
+    let { session, strategy } = makeSession([id]);
+    await strategy.addObserver("bob", {
+      async hasCollectionsAccess() { throw new Error("unavailable"); },
+    } as unknown as Fetcher<GatekeeperUserVerifier>);
+
+    expect((await session.listSkillCollections()).map(entry => entry.excludes)).toEqual([null]);
+  });
+
+  it("lists a public collection as public", async () => {
+    let id = await createCollection("Everyone's", "public");
+    await addSkill(id, "triage", "triage");
+    let kvEnv = { CONTEXT_COLLECTIONS: { async get() { return JSON.stringify([{ id, lastUpdated: new Date() }]); } } };
+    let strategy = contextObserverStrategy(makeKv(), domain);
+    let userLibraries = {
+      idFromName: (name: string) => name,
+      get: () => ({ async listPrivateLibrary() { return []; } }),
+    } as unknown as DurableObjectNamespace<UserLibraryDurableObject>;
+    let session = new LibraryReadSession(
+      kvEnv as unknown as Pick<Cloudflare.Env, "CONTEXT_COLLECTIONS">, testEnv.COLLECTIONS, userLibraries,
+      domain, "owner",
+      new ObservationGate({ async authorizeObservation() {}, [Symbol.dispose]() {} } as never, strategy), strategy);
+
+    expect(await session.listSkillCollections()).toEqual([
+      { collectionId: id, name: "Everyone's", audience: "public", excludes: 0 }]);
+  });
+});
 
 describe("LibraryReadSession.listSkills", () => {
   it("lists a skill from a readable collection and none from an unreadable one", async () => {
@@ -98,8 +184,9 @@ describe("LibraryReadSession.listSkills", () => {
     await addSkill(unreadable, "secret", "secret");
     let { session, authorized } = makeSession([readable]);
 
-    let skills = await session.listSkills();
+    let skills = await session.listSkills(readable);
 
+    expect(await session.listSkills(unreadable)).toEqual([]);
     expect(skills).toEqual([{
       collectionId: readable,
       collectionName: "Mine",
@@ -110,7 +197,8 @@ describe("LibraryReadSession.listSkills", () => {
       totalBytes: new TextEncoder().encode(manifest("triage")).byteLength + 7,
       revision: expect.stringMatching(/^[0-9a-f]{64}$/),
     }]);
-    // Reading the index reveals the collection's contents, so the Workshop checks it for each viewer.
+    // Reading the index reveals this collection's contents, so the Workshop checks it for each
+    // viewer, and only this collection: the unreadable one is not even asked about.
     expect(authorized).toEqual([expect.objectContaining({ subresources: [readable] })]);
   });
 
@@ -119,10 +207,10 @@ describe("LibraryReadSession.listSkills", () => {
     await addSkill(id, "triage", "triage");
     await addSkill(id, "other", "other");
     let { session } = makeSession([id]);
-    let before = new Map((await session.listSkills()).map(skill => [skill.name, skill.revision]));
+    let before = new Map((await session.listSkills(id)).map(skill => [skill.name, skill.revision]));
 
     await collection(id).putContextDocument("triage/notes.md", { description: "", body: "More.\n" });
-    let after = new Map((await session.listSkills()).map(skill => [skill.name, skill.revision]));
+    let after = new Map((await session.listSkills(id)).map(skill => [skill.name, skill.revision]));
 
     expect(after.get("triage")).not.toBe(before.get("triage"));
     expect(after.get("other")).toBe(before.get("other"));
@@ -133,8 +221,17 @@ describe("LibraryReadSession.listSkills", () => {
     await collection(id).putContextDocument("plan.md", { description: "", body: "Plan.\n" });
     let { session, authorized } = makeSession([id]);
 
-    expect(await session.listSkills()).toEqual([]);
+    expect(await session.listSkills(id)).toEqual([]);
     expect(authorized).toEqual([]);
+  });
+
+  it("returns no data when the Workshop refuses the observation", async () => {
+    let id = await createCollection("Mine");
+    await addSkill(id, "triage", "triage");
+    let { session } = makeSession([id], { refusal: new Error("A collaborator cannot read this.") });
+
+    await expect(session.listSkills(id)).rejects.toThrow("A collaborator cannot read this.");
+    await expect(session.readSkill(id, "triage/SKILL.md")).rejects.toThrow("A collaborator cannot read this.");
   });
 });
 
@@ -177,24 +274,25 @@ describe("LibraryReadSession.readSkill", () => {
     ]);
   });
 
-  it("refuses a skill of more than 100 files with a sentence", async () => {
+  it("refuses a skill of more than 100 files with a sentence that gives no count", async () => {
     let id = await createCollection("Mine");
     await addSkill(id, "triage", "triage", Array.from({ length: 100 }, (_, index) =>
       ({ path: `f${index}.md`, body: "x" })));
     let { session } = makeSession([id]);
 
     await expect(session.readSkill(id, "triage/SKILL.md"))
-      .rejects.toThrow("This skill has 101 files; at most 100 are allowed.");
+      .rejects.toThrow("This skill has too many files to add.");
   });
 
-  it("refuses a skill whose text totals more than 1 MB", async () => {
+  it("refuses a skill whose text totals more than 1 MB, authorizing nothing", async () => {
     let id = await createCollection("Mine");
     await addSkill(id, "triage", "triage", Array.from({ length: 5 }, (_, index) =>
       ({ path: `f${index}.txt`, body: "x".repeat(250 * 1024), contentType: "text/plain" })));
-    let { session } = makeSession([id]);
+    let { session, authorized } = makeSession([id]);
 
     await expect(session.readSkill(id, "triage/SKILL.md"))
-      .rejects.toThrow("This skill's text totals more than 1 MB.");
+      .rejects.toThrow("This skill has too much text to add.");
+    expect(authorized).toEqual([]);
   });
 
   it("refuses a collection the session cannot read, and a path that is not a skill", async () => {
@@ -224,122 +322,15 @@ describe("LibraryReadSession.readSkill", () => {
     let skill = await session.readSkill(id, "triage/SKILL.md");
 
     expect(skill.files.map(file => file.path)).toEqual(["SKILL.md", "notes.md"]);
-    let listed = (await session.listSkills()).find(entry => entry.name === "triage");
+    let listed = (await session.listSkills(id)).find(entry => entry.name === "triage");
     expect(listed?.fileCount).toBe(2);
   });
 });
 
-const FRONTEND = "skills/frontend-design";
-const ENTRIES: ArchiveEntry[] = [
-  { path: `${FRONTEND}/SKILL.md`, body: manifest("frontend-design") },
-  { path: `${FRONTEND}/reference/palette.md`, body: "Colours.\n" },
-  { path: `${FRONTEND}/assets/font.ttf`, body: new Uint8Array([0, 1, 0, 0, 0xff]) },
-];
-
-async function directoryFor(entries: ArchiveEntry[] = ENTRIES, commit: string = COMMIT) {
-  let archive = await repositoryArchive(entries, { commit });
-  let fake = fakeFetch({ [codeloadUrl("anthropics/skills")]: archiveResponse(archive) });
-  return { directory: new SkillDirectoryClient({ fetch: fake.fetch }), requests: fake.requests };
-}
-
-describe("LibraryReadSession directory calls", () => {
-  it("searches skills.sh through the directory client", async () => {
-    let fake = fakeFetch(url => url.startsWith("https://skills.sh/api/search")
-      ? Response.json({ skills: [{
-        id: "anthropics/skills/frontend-design", skillId: "frontend-design", name: "frontend-design",
-        installs: 7, source: "anthropics/skills",
-      }] })
-      : undefined);
-    let { session, authorized } = makeSession([], new SkillDirectoryClient({ fetch: fake.fetch }));
-
-    let results = await session.searchSkillDirectory("frontend");
-
-    expect(results).toEqual([expect.objectContaining({
-      source: "anthropics/skills", skillId: "frontend-design", importable: true,
-    })]);
-    expect(fake.requests).toHaveLength(1);
-    // Not library data: nothing is observed.
-    expect(authorized).toEqual([]);
-  });
-
-  it("previews a skill as the management API does", async () => {
-    let { directory } = await directoryFor();
-    let { session } = makeSession([], directory);
-
-    let preview = await session.previewDirectorySkill("anthropics/skills", "frontend-design");
-
-    expect(preview).toMatchObject({
-      source: "anthropics/skills", skillId: "frontend-design", commitSha: COMMIT, blockers: [],
-      files: [
-        { path: "SKILL.md", size: expect.any(Number) },
-        { path: "reference/palette.md", size: 9 },
-        { path: "assets/font.ttf", size: 5 },
-      ],
-    });
-  });
-
-  it("reads the files a preview lists, with their text, at the previewed commit", async () => {
-    let { directory } = await directoryFor();
-    let { session } = makeSession([], directory);
-    let preview = await session.previewDirectorySkill("anthropics/skills", "frontend-design");
-
-    let skill = await session.readDirectorySkill("anthropics/skills", "frontend-design", preview.commitSha);
-
-    expect(skill.name).toBe("frontend-design");
-    expect(skill.description).toBe("Use frontend-design.");
-    expect(skill.revision).toBe(COMMIT);
-    expect(skill.files).toEqual([
-      { path: "SKILL.md", text: manifest("frontend-design") },
-      { path: "reference/palette.md", text: "Colours.\n" },
-    ]);
-    // The font is in the preview's list but is not text.
-    expect(skill.leftOut).toEqual([{ path: "assets/font.ttf", reason: "Not UTF-8 text." }]);
-  });
-
-  it("refuses when the repository has moved past the previewed commit", async () => {
-    let { directory } = await directoryFor(ENTRIES, OTHER_COMMIT);
-    let { session } = makeSession([], directory);
-
-    await expect(session.readDirectorySkill("anthropics/skills", "frontend-design", COMMIT))
-      .rejects.toThrow();
-  });
-
-  it("applies the same caps to a skills.sh skill", async () => {
-    let many: ArchiveEntry[] = [
-      { path: `${FRONTEND}/SKILL.md`, body: manifest("frontend-design") },
-      ...Array.from({ length: 100 }, (_, index) =>
-        ({ path: `${FRONTEND}/f${index}.md`, body: "x" })),
-    ];
-    let { directory } = await directoryFor(many);
-    let { session } = makeSession([], directory);
-
-    await expect(session.readDirectorySkill("anthropics/skills", "frontend-design", COMMIT))
-      .rejects.toThrow("This skill has 101 files; at most 100 are allowed.");
-  });
-
-  it("leaves out a file over 256 KB", async () => {
-    let { directory } = await directoryFor([
-      ...ENTRIES,
-      { path: `${FRONTEND}/big.txt`, body: "x".repeat(256 * 1024 + 1) },
-    ]);
-    let { session } = makeSession([], directory);
-
-    let skill = await session.readDirectorySkill("anthropics/skills", "frontend-design", COMMIT);
-
-    expect(skill.files.map(file => file.path)).toEqual(["SKILL.md", "reference/palette.md"]);
-    expect(skill.leftOut).toContainEqual({ path: "big.txt", reason: "Over 256 KB." });
-  });
-
-  it("carries the client's skipped files (symlinks, nested skills) into leftOut", async () => {
-    let { directory } = await directoryFor([
-      ...ENTRIES,
-      { path: `${FRONTEND}/link.md`, type: "symlink", target: "/etc/passwd" },
-    ]);
-    let { session } = makeSession([], directory);
-
-    let skill = await session.readDirectorySkill("anthropics/skills", "frontend-design", COMMIT);
-
-    expect(skill.files.map(file => file.path)).toEqual(["SKILL.md", "reference/palette.md"]);
-    expect(skill.leftOut).toContainEqual({ path: "link.md", reason: "Symbolic link" });
+describe("LibraryReadSession reach", () => {
+  it("offers no skills.sh or GitHub call to a gadget or an agent", () => {
+    for (let name of ["searchSkillDirectory", "previewDirectorySkill", "readDirectorySkill", "importDirectorySkill"]) {
+      expect(LibraryReadSession.prototype).not.toHaveProperty(name);
+    }
   });
 });

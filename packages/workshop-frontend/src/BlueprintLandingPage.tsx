@@ -25,6 +25,7 @@ import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
 import { openConnectWindow } from './connectHandoff'
 import { requestAccountResources } from './requestAccountResources'
+import { useGatekeeperApps } from './useGatekeeperApps'
 import { AuthPopupCancelledError } from './features/native-app/authPopup'
 
 interface Props {
@@ -109,6 +110,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const [addingToLibrary, setAddingToLibrary] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [removingFromLibrary, setRemovingFromLibrary] = useState(false)
+  // Whether the user has a Skills account: it is opt-in, and an admin can turn it off.
+  const skillsConnected = useGatekeeperApps().some(app => app.id === 'context')
   const vendorById = useMemo(
     () => new Map(vendors.map(v => [v.id.toLowerCase(), v])),
     [vendors],
@@ -823,7 +826,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   let meta = blueprint.metadata
   let bindingEntries = Object.entries(meta.bindings)
   let activeBinding = activeBindingName ? meta.bindings[activeBindingName] : undefined
-  let readyCount = bindingEntries.filter(([name]) => usableDraftAssignments[name]).length
+  let readyCount = bindingEntries.filter(([name, binding]) =>
+    usableDraftAssignments[name] && !(binding.type === 'contextLibrary' && !skillsConnected)).length
   let unresolvedBindingName = getFirstUnresolvedBindingName()
   let remainingCount = bindingEntries.length - readyCount
   let primaryActionLabel: string
@@ -1042,6 +1046,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                     assignment={usableDraftAssignments[name]}
                     vendor={binding.type === 'gatekeeper' ? vendorById.get(binding.gatekeeperName.toLowerCase()) : undefined}
                     models={modelsFor(binding)}
+                    skillsConnected={skillsConnected}
                     onConfigure={() => isAuthenticated ? openBindingConfigurator(name) : setShowLogin(true)}
                   />
                 ))}
@@ -1308,6 +1313,7 @@ function BlueprintBindingSummaryCard({
   assignment,
   vendor,
   models,
+  skillsConnected,
   onConfigure,
 }: {
   name: string
@@ -1315,6 +1321,8 @@ function BlueprintBindingSummaryCard({
   assignment?: BlueprintBindingAssignment
   vendor?: { id: string, description: VendorDescription, supportedResources: SupportedResource[] }
   models: AiChatAuthorInfo[]
+  /** Whether the user has a Skills account, which a Skills library binding needs. */
+  skillsConnected: boolean
   onConfigure: () => void
 }) {
   const title = binding.title || name
@@ -1355,11 +1363,18 @@ function BlueprintBindingSummaryCard({
       return modelsByIdLabel(assignment.modelId)
     }
     if (assignment.type === 'modelCatalog') return 'The deployment\'s models'
-    if (assignment.type === 'contextLibrary') return 'Your Skills library'
+    if (assignment.type === 'contextLibrary') {
+      return skillsConnected ? 'Your Skills library' : null
+    }
     if (assignment.modelId === null) return 'No agent'
     return modelsByIdLabel(assignment.modelId)
   })()
-  const status = assignment ? 'Ready' : suggestion ? 'Suggested' : 'Needs setup'
+  // A Skills binding with no Skills account is left out when optional, and refused when not:
+  // either way it is not "Ready".
+  const skillsMissing = binding.type === 'contextLibrary' && !skillsConnected
+  const status = skillsMissing
+    ? (binding.optional ? 'Not connected' : 'Needs setup')
+    : assignment ? 'Ready' : suggestion ? 'Suggested' : 'Needs setup'
   const actionLabel = assignment ? 'Change' : 'Configure'
 
   function modelsByIdLabel(modelId: string) {
@@ -1375,7 +1390,7 @@ function BlueprintBindingSummaryCard({
             {title}
           </h3>
           <span className={`rounded-full px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.1px] ${
-            assignment
+            assignment && !skillsMissing
               ? 'bg-kumo-success-tint text-kumo-success'
               : suggestion
                 ? 'bg-kumo-tint text-kumo-subtle'
@@ -1385,7 +1400,11 @@ function BlueprintBindingSummaryCard({
           </span>
         </div>
         <p className="mt-0.5 truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-          {usingLabel
+          {skillsMissing
+            ? (binding.optional
+              ? 'Your Skills library is not connected, so the gadget is created without it. Add Skills on the Connectors page first to include it.'
+              : 'Your Skills library is not connected. Add Skills on the Connectors page, or ask an admin to turn it on.')
+            : usingLabel
             ? <>Using: <span>{usingLabel}</span></>
             : suggestion
               ? `Suggested: ${suggestion}`
