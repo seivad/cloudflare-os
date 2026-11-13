@@ -592,6 +592,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
           gk = await overseerResult.newAiModelGatekeeper(assignment.modelId);
         } else if (assignment.type === "modelCatalog") {
           gk = await overseerResult.newModelCatalogGatekeeper();
+        } else if (assignment.type === "contextLibrary") {
+          gk = await overseerResult.newContextLibraryGatekeeper();
         } else {
           return;  // agent spawners are created in phase two
         }

@@ -1021,6 +1021,9 @@ export function formatMissingBlueprintBindings(
       case "modelCatalog":
         details = `a model catalog binding, the models the deployment's admin offers`;
         break;
+      case "contextLibrary":
+        details = `a Skills library binding, the Context Library of whoever instantiates the blueprint`;
+        break;
       case "agentSpawner": {
         let env = Object.entries(binding.env).map(([envName, target]) =>
             `${envName} = ${target.type === "gadget" ? gadget : `binding ${target.name}`}`);

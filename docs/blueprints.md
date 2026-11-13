@@ -43,7 +43,7 @@ All named bindings are included in the blueprint. Annotations are configured in 
 
 ## Binding Types
 
-Blueprints support four types of bindings, matching the types of gatekeepers:
+Blueprints support five types of bindings, matching the types of gatekeepers:
 
 1. **Gatekeeper** (`type: "gatekeeper"`) -- an external resource connection (e.g. Google Drive, a REST API). The blueprint records the gatekeeper adapter name and a URL pattern describing what kind of resource is expected. When instantiating, the user picks a connected account and configures a matching resource.
 
@@ -52,6 +52,8 @@ Blueprints support four types of bindings, matching the types of gatekeepers:
 3. **Agent Spawner** (`type: "agentSpawner"`) -- an agent spawner binding. The blueprint carries over the spawner configuration (prompt types, env restrictions) from the source gadget. The user only needs to choose which model the spawner should use (or no model).
 
 4. **Model Catalog** (`type: "modelCatalog"`) -- gives the gadget `env.<NAME>.list()`, the models the deployment's admin offers in **/admin -> AI models**: the language models set to enabled, in the admin's order, each as `{id, name, provider, contextWindow, description?}` (`CatalogModel`) and nothing else. It is read at each call, so an admin's change shows without a redeploy; with no AI Gateway it lists nothing. Instantiating assigns it with no input from the user (`{type: "modelCatalog"}`).
+
+5. **Skills library** (`type: "contextLibrary"`) -- gives the gadget `env.<NAME>`, the Context Library read session (`ContextLibrary`, the types the Context gatekeeper serves) of whoever instantiates the blueprint: `listSkills()` and `readSkill(collectionId, manifestPath)` over the skills in the collections that user can read (SKILL.md first, then the supporting text files; binary files, files over 256 KB, more than 100 files or more than 1 MB of text are left out or refused), and `searchSkillDirectory()`, `previewDirectorySkill()` and `readDirectorySkill(source, skillId, commitSha)` for skills.sh. Nothing is ever written. Every read of a collection is an observation of it, so a viewer or collaborator who cannot read that collection is refused what the gadget read from it. Instantiating assigns it with no input (`{type: "contextLibrary"}`) and fails with a sentence when the user has no Skills library (an admin can turn Skills off).
 
 ## Releases
 

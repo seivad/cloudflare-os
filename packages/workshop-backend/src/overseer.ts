@@ -410,6 +410,7 @@ function connectionTypeFromCreationSpec(
     case "aiModel": return "ai_model";
     case "agentSpawner": return "agent_spawner";
     case "modelCatalog": return undefined;   // a read-only view of the admin's catalog
+    case "contextLibrary": return undefined;   // a read-only view of the user's own library
     case "ambient": return undefined;   // auto-provided, not a user-initiated connection
     case undefined: return undefined;
   }
@@ -431,6 +432,7 @@ function describeBindingKind(binding: BlueprintBinding): string {
     case "aiModel": return binding.modelKind === "decision" ? `AI decision model` : `AI model`;
     case "agentSpawner": return `agent spawner`;
     case "modelCatalog": return `model catalog`;
+    case "contextLibrary": return `Skills library`;
     default: return binding satisfies never;
   }
 }
@@ -9018,6 +9020,8 @@ class OverseerImpl implements AgentHooks {
         };
       } else if (spec.type === "modelCatalog") {
         bindings[bindingName] = {...base, type: "modelCatalog"};
+      } else if (spec.type === "contextLibrary") {
+        bindings[bindingName] = {...base, type: "contextLibrary"};
       } else if (spec.type === "agentSpawner") {
         // Only the spawner's permanent bindings, like the gadget's own edges above.
         let spawnerBindings = this.visibleBindings({bindings: gk.bindings ?? {}});
@@ -12366,6 +12370,24 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.clientUserId, this.#mintedCapabilityKind());
   }
 
+  // The Skills library of the user calling (the workspace's owner, when a blueprint is
+  // instantiated), installed as a gatekeeper the gadget can bind. It is the same read session
+  // that backs the agents' ambient capsule, so every read is an observation of the collection it
+  // reveals, which the Workshop checks for each collaborator and viewer of the gadget: a person
+  // who cannot read a collection is refused what the gadget read from it, not given the owner's
+  // library.
+  async newContextLibraryGatekeeper(): Promise<GatekeeperClient<any>> {
+    let account = (await this.#clientUser.listProvidedAccounts())
+        .find(account => account.description.singleton?.tsType === "ContextLibrary");
+    let cls = account && await this.#clientUser.getSingletonGatekeeperClass(account.accountId);
+    if (!account || !cls) {
+      throw new Error("You have no Skills library to connect. An admin can turn Skills on.");
+    }
+    return await this.impl.addGatekeeper(
+        cls, {type: "contextLibrary", vendorId: account.vendorId, accountId: account.accountId},
+        this.clientUserId, this.#mintedCapabilityKind());
+  }
+
   async newAgentSpawnerGatekeeper({env, ...config}: AgentSpawnerConfig)
       : Promise<GatekeeperClient<any>> {
     for (let [name, target] of Object.entries(env)) {
@@ -13715,6 +13737,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
   async newModelCatalogGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async newContextLibraryGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
   async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     this.#deny();
   }

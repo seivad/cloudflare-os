@@ -505,6 +505,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           // The deployment's own catalog: there is nothing for the user to choose.
           next[name] = { type: 'modelCatalog' }
           changed = true
+        } else if (binding.type === 'contextLibrary') {
+          // The installer's own Skills library: there is nothing for the user to choose.
+          next[name] = { type: 'contextLibrary' }
+          changed = true
         } else if (binding.type === 'aiModel') {
           if (!binding.suggestedModel) continue
           const modelId = findSuggestedModelId(modelsFor(binding), binding.suggestedModel)
@@ -573,7 +577,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     } else if (binding.type === 'agentSpawner') {
       return (assignment as any).modelId !== undefined
     }
-    return binding.type === 'modelCatalog'
+    return binding.type === 'modelCatalog' || binding.type === 'contextLibrary'
   }, [activeBindingName, blueprint, bindingForm, gatekeeperReady])
 
   const handleSaveActiveBinding = async () => {
@@ -602,6 +606,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         }
       } else if (binding.type === 'modelCatalog') {
         assignment = { type: 'modelCatalog' }
+      } else if (binding.type === 'contextLibrary') {
+        assignment = { type: 'contextLibrary' }
       } else {
         assignment = {
           type: 'agentSpawner',
@@ -1318,7 +1324,9 @@ function BlueprintBindingSummaryCard({
       ? 'AI Model'
       : binding.type === 'modelCatalog'
         ? 'Model catalog'
-        : 'Agent'
+        : binding.type === 'contextLibrary'
+          ? 'Skills library'
+          : 'Agent'
   const resource = binding.type === 'gatekeeper'
     ? vendor?.supportedResources.find(r => r.urlPattern === binding.typeUrlPattern)
     : null
@@ -1347,6 +1355,7 @@ function BlueprintBindingSummaryCard({
       return modelsByIdLabel(assignment.modelId)
     }
     if (assignment.type === 'modelCatalog') return 'The deployment\'s models'
+    if (assignment.type === 'contextLibrary') return 'Your Skills library'
     if (assignment.modelId === null) return 'No agent'
     return modelsByIdLabel(assignment.modelId)
   })()

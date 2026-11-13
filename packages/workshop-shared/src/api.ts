@@ -3568,6 +3568,14 @@ export interface Overseer extends RpcTarget {
   newModelCatalogGatekeeper(): Promise<GatekeeperClient<any>>;
 
   /**
+   * Create a new gatekeeper for a Context Library binding, which provides a `ContextLibrary`: the
+   * Skills library of the user calling this (the workspace's owner, when it instantiates a
+   * blueprint). Rejects with a sentence when that user has no Skills library, which an admin can
+   * turn off.
+   */
+  newContextLibraryGatekeeper(): Promise<GatekeeperClient<any>>;
+
+  /**
    * Create a new gatekeeper for an agent spawner binding. This allows the gadget to
    * programmatically spawn AI agents to complete tasks.
    */
@@ -6089,6 +6097,15 @@ export type GatekeeperCreationSpec = {
 } | {
   type: "modelCatalog";
 } | {
+  /**
+   * The Skills library of the user who made the binding, read through the Context gatekeeper's
+   * session like the agents' ambient capsule, but bound into a gadget. `accountId` is that user's
+   * singleton account for the vendor, so an account removed and re-added is told from the old one.
+   */
+  type: "contextLibrary";
+  vendorId: string;
+  accountId: number;
+} | {
   type: "agentSpawner";
   /**
    * The spawner's config, less `env`: its bindings change after creation, so they are binding
@@ -6206,6 +6223,13 @@ export type BlueprintBinding = {
    * assignment from the user instantiating the blueprint; the catalog is the deployment's.
    */
   type: "modelCatalog";
+} | {
+  /**
+   * A binding to the Skills library (the Context Library) of whoever instantiates the blueprint:
+   * the gadget gets its `ContextLibrary` read session. It takes no assignment beyond the type;
+   * the instantiating user must have a Skills library, which an admin can turn off.
+   */
+  type: "contextLibrary";
 } | {
   /** An agent spawner binding. */
   type: "agentSpawner";
@@ -6362,6 +6386,8 @@ export type BlueprintBindingAssignment = {
   modelId: string;        // one of the user's configured models
 } | {
   type: "modelCatalog";
+} | {
+  type: "contextLibrary";
 } | {
   type: "agentSpawner";
   modelId: string | null; // model to run, or null for no agent

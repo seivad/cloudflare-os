@@ -1,6 +1,7 @@
 // One collection's metadata, documents, and access grants. Metadata changes of a public collection
 // update the domain registry; grant changes update the grantee's library.
 
+import { Buffer } from "node:buffer";
 import { DurableObject } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import {
@@ -114,6 +115,33 @@ function contextRecord(document: ContextDocument): ContextRecord & { body: Uint8
     body: encodeStoredContextBody(document.contentType, document.body),
   };
 }
+
+/** The bytes a document's body holds: the raw bytes of a binary one, the UTF-8 bytes of text. */
+function storedBodyBytes(record: ContextRecord): number {
+  if (record.body instanceof Uint8Array) return record.body.byteLength;
+  return isTextContentType(record.contentType ?? DEFAULT_DOCUMENT_CONTENT_TYPE)
+    ? new TextEncoder().encode(record.body).byteLength
+    : Buffer.from(record.body, "base64").byteLength;
+}
+
+const strictDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** A text document's body as text, or null when it is not valid UTF-8 or holds a NUL byte. */
+function strictRecordText(record: ContextRecord): string | null {
+  let text: string;
+  try {
+    text = typeof record.body === "string" ? record.body : strictDecoder.decode(record.body);
+  } catch {
+    return null;
+  }
+  return text.includes("\u0000") ? null : text;
+}
+
+/** A skill with the size and revision of its files (see listSkillSummaries). */
+export type SkillSummary = SkillIndexEntry & { fileCount: number; totalBytes: number; revision: string };
+
+/** One file of a skill's directory (see readSkillDirectory). */
+export type SkillDirectoryFile = { path: string; size: number; text: string | null };
 
 function contextRecordSize(record: ContextRecord): number {
   let bodyBytes = record.body instanceof Uint8Array
@@ -690,6 +718,76 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
     this.#ensureSkillIndex();
     return [...this.storage.skillIndex.list()];
+  }
+
+  // The documents of the skill whose manifest is `manifestPath`: everything in its directory except
+  // the directories of skills nested below it (a Git-backed collection can hold them). Null when
+  // that path is not a valid skill.
+  #skillRecords(manifestPath: string): ContextRecord[] | null {
+    this.#ensureSkillIndex();
+    if (!this.storage.skillIndex.get(manifestPath)) return null;
+    let directory = manifestPath.slice(0, -"SKILL.md".length);
+    let nested = [...this.storage.skillIndex.list()]
+        .filter(entry => entry.path !== manifestPath && entry.path.startsWith(directory))
+        .map(entry => entry.path.slice(0, -"SKILL.md".length));
+    return [...this.storage.documents.list(directory ? { prefix: directory } : undefined)]
+        .filter(record => !nested.some(prefix => record.path.startsWith(prefix)));
+  }
+
+  async #skillRevision(records: ContextRecord[]): Promise<string> {
+    let lines = records.map(record =>
+        `${record.path}\0${record.lastUpdated.getTime()}\0${storedBodyBytes(record)}`)
+        .toSorted().join("\n");
+    let digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(lines));
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  /** Every valid skill with the size and revision of its files; reads no body. */
+  async listSkillSummaries(): Promise<SkillSummary[]> {
+    if (this.storage.deletionPending.get()) return [];
+    if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
+    this.#ensureSkillIndex();
+    let result: SkillSummary[] = [];
+    // Snapshot: the loop awaits between reads of the same storage.
+    for (let entry of Array.from(this.storage.skillIndex.list())) {
+      let records = this.#skillRecords(entry.path)!;
+      result.push({
+        path: entry.path,
+        skillName: entry.skillName,
+        description: entry.description,
+        fileCount: records.length,
+        totalBytes: records.reduce((total, record) => total + storedBodyBytes(record), 0),
+        revision: await this.#skillRevision(records),
+      });
+    }
+    return result;
+  }
+
+  /**
+   * The files of the skill at `manifestPath`, paths relative to its directory. `text` is set only
+   * for UTF-8 text of at most `maxTextBytes`; a larger or binary file is described by its size
+   * alone. Null when `manifestPath` is not a valid skill.
+   */
+  async readSkillDirectory(manifestPath: string, maxTextBytes: number):
+      Promise<{ name: string; description: string; revision: string; files: SkillDirectoryFile[] } | null> {
+    if (this.storage.deletionPending.get()) return null;
+    if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
+    let records = this.#skillRecords(manifestPath);
+    let entry = this.storage.skillIndex.get(manifestPath);
+    if (!records || !entry) return null;
+    let directoryLength = manifestPath.length - "SKILL.md".length;
+    return {
+      name: entry.skillName,
+      description: entry.description,
+      revision: await this.#skillRevision(records),
+      files: records.map(record => {
+        let size = storedBodyBytes(record);
+        let contentType = record.contentType ?? DEFAULT_DOCUMENT_CONTENT_TYPE;
+        let text = size <= maxTextBytes && isTextContentType(contentType)
+            ? strictRecordText(record) : null;
+        return { path: record.path.slice(directoryLength), size, text };
+      }),
+    };
   }
 
   async updateMetadata(options: {

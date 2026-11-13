@@ -8,8 +8,12 @@ import type { ObservationGate, ObservationInput } from "@gadgets/gatekeeper-kit/
 import {
   ContextSearchResult, ContextListing, ContextListingEntry, ContextReadResult,
   decodeDocId, encodeDocId, isTextContentType, VENDOR_ID,
-  type ContextLibrary,
+  type ContextLibrary, type DirectorySkillPreview, type DirectorySkillSearchResult,
+  type LibrarySkill, type SkillFiles,
 } from "./context-types.js";
+import { directoryPreview, skillDirectoryClient } from "./directory-import.js";
+import { assembleSkillFiles, SKILL_FILE_LIMITS } from "./skill-files.js";
+import type { SkillDirectoryClient } from "./skill-directory/index.js";
 import type { ContextCollectionDurableObject } from "./context-collection.js";
 import type { UserLibraryDurableObject } from "./user-library.js";
 import { listPublicCollectionsFromKv } from "./collection-kv.js";
@@ -35,8 +39,14 @@ export class LibraryReadSession extends RpcTarget implements ContextLibrary {
     private domain: string,
     private accountId: string,
     private gate: ObservationGate,
+    // Tests inject a directory client with a fake fetch; production shares the isolate's.
+    private directory?: SkillDirectoryClient,
   ) {
     super();
+  }
+
+  #directory(): SkillDirectoryClient {
+    return this.directory ?? skillDirectoryClient(this.env as Cloudflare.Env);
   }
 
   /** Release the authorizer owned by this read session's gate. */
@@ -196,6 +206,81 @@ export class LibraryReadSession extends RpcTarget implements ContextLibrary {
       description: doc.description,
       content,
     };
+  }
+
+  async listSkills(): Promise<LibrarySkill[]> {
+    let ids = await this.#libraryIds();
+    let perCollection = await mapWithConcurrency(ids, MAX_COLLECTION_FANOUT, async (collectionId) => {
+      try {
+        let collection = this.#collection(collectionId);
+        let [summaries, meta] = await Promise.all([collection.listSkillSummaries(), collection.getMetadata()]);
+        return summaries.map((skill): LibrarySkill => ({
+          collectionId,
+          collectionName: meta.title,
+          manifestPath: skill.path,
+          name: skill.skillName,
+          description: skill.description,
+          fileCount: skill.fileCount,
+          totalBytes: skill.totalBytes,
+          revision: skill.revision,
+        }));
+      } catch (err) {
+        logger.warn("failed to list skills of collection", {
+          event: "collection.skills.list.failed", collectionId, error: err,
+        });
+        return [];
+      }
+    });
+    let skills = perCollection.flat().toSorted((left, right) =>
+      left.name.localeCompare(right.name) || left.collectionId.localeCompare(right.collectionId) ||
+      left.manifestPath.localeCompare(right.manifestPath));
+    // No skill listed → nothing was observed (mirrors list()).
+    if (skills.length === 0) return skills;
+    let collectionIds = [...new Set(skills.map(skill => skill.collectionId))];
+    await this.#authorize(collectionIds, {
+      title: "Context skills",
+      description: `Listed ${skills.length} skill(s) across ${collectionIds.length} Context Library collection(s).`,
+    });
+    return skills;
+  }
+
+  async readSkill(collectionId: string, manifestPath: string): Promise<SkillFiles> {
+    let notFound = new Error("No such skill in a collection you can read.");
+    if (!await this.#inLibrary(collectionId)) throw notFound;
+    let skill = await this.#collection(collectionId)
+        .readSkillDirectory(manifestPath, SKILL_FILE_LIMITS.maxFileBytes);
+    if (!skill) throw notFound;
+    let { files, ...description } = skill;
+    // Reads past the caps are refused before anything is authorized: no content is revealed.
+    let result = assembleSkillFiles(description, files);
+    await this.#authorize([collectionId], {
+      title: `Context skill: ${skill.name}`,
+      description: `Read the ${result.files.length} file(s) of Context Library skill ` +
+        `\`${collectionId}/${manifestPath}\`.`,
+    });
+    return result;
+  }
+
+  /** The skills.sh directory is not library data: nothing here is observed, and nothing is stored. */
+  searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]> {
+    return this.#directory().search(query);
+  }
+
+  async previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview> {
+    return directoryPreview(await this.#directory().resolve(source, skillId));
+  }
+
+  /**
+   * The client reads the default branch afresh and refuses unless it is still at `commitSha`, so a
+   * skill that changed after its preview is previewed again; it cannot read an older commit.
+   */
+  async readDirectorySkill(source: string, skillId: string, commitSha: string): Promise<SkillFiles> {
+    let bundle = await this.#directory().resolve(source, skillId, commitSha);
+    if (bundle.blockers.length > 0) throw new Error(bundle.blockers[0]);
+    return assembleSkillFiles(
+      { name: bundle.frontmatter.name, description: bundle.frontmatter.description, revision: bundle.commitSha },
+      bundle.contents.map(file => ({ path: file.path, size: file.size, text: file.text })),
+      bundle.skipped);
   }
 
   // Fetch without recording; list() authorizes.
