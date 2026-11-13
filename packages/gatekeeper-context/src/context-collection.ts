@@ -742,7 +742,11 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   }
 
-  /** Every valid skill with the size and revision of its files; reads no body. */
+  /**
+   * Every valid skill with the size and revision of its files. The store has no size-only read, so
+   * each document's value is loaded with its record, but no body is decoded (a legacy string body
+   * is the one exception, sized by encoding it).
+   */
   async listSkillSummaries(): Promise<SkillSummary[]> {
     if (this.storage.deletionPending.get()) return [];
     if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
@@ -750,7 +754,9 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     let result: SkillSummary[] = [];
     // Snapshot: the loop awaits between reads of the same storage.
     for (let entry of Array.from(this.storage.skillIndex.list())) {
-      let records = this.#skillRecords(entry.path)!;
+      let records = this.#skillRecords(entry.path);
+      // Gone since the snapshot was taken.
+      if (!records) continue;
       result.push({
         path: entry.path,
         skillName: entry.skillName,

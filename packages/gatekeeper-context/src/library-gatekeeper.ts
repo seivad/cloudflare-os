@@ -83,18 +83,20 @@ interface ContextLibrary {
   list(opts?: { collectionId?: string; path?: string }): Promise<ContextListing>;
   /** Read a document by an ID from the catalog, search(), or list(). */
   read(docId: string): Promise<ContextDocument | null>;
-  /** Every valid skill in the collections available to you. */
-  listSkills(): Promise<LibrarySkill[]>;
+  /** The collections available to you that hold skills, with who can read each. */
+  listSkillCollections(): Promise<SkillCollection[]>;
+  /** The skills of one collection from listSkillCollections(). */
+  listSkills(collectionId: string): Promise<LibrarySkill[]>;
   /** The text files of a skill from listSkills(): SKILL.md first. Throws a sentence when it cannot
-   *  be read (not available to you, over 100 files, or over 1 MB of text). */
+   *  be read (not available to you, too many files, too much text). */
   readSkill(collectionId: string, manifestPath: string): Promise<SkillFiles>;
-  /** Search the skills.sh directory. query needs at least two characters. */
-  searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]>;
-  /** Read a listed skills.sh skill from its public GitHub repository, at its latest commit. */
-  previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview>;
-  /** The text files of a previewed skills.sh skill at that commit. Throws if the repository has
-   *  moved on since the preview (preview again). */
-  readDirectorySkill(source: string, skillId: string, commitSha: string): Promise<SkillFiles>;
+}
+
+interface SkillCollection {
+  collectionId: string;
+  name: string;
+  audience: "private" | "shared" | "public";   // public: everyone can read it
+  excludes: number | null;   // collaborators who could not read it; null: unknown
 }
 
 interface LibrarySkill {
@@ -111,64 +113,9 @@ interface LibrarySkill {
 interface SkillFiles {
   name: string;
   description: string;
-  revision: string;       // a library skill's revision; a skills.sh skill's commit
+  revision: string;       // differs when any file of the skill changed
   files: { path: string; text: string }[];       // SKILL.md first; paths relative to the skill
-  leftOut: { path: string; reason: string }[];   // binary, over 256 KB, or not installed with it
-}
-
-interface DirectorySkillSearchResult {
-  id: string;
-  source: string;         // "owner/repo"
-  skillId: string;
-  name: string;
-  installs: number;
-  importable: boolean;    // false when not published from a GitHub repository
-}
-
-interface DirectorySkillPreview {
-  source: string;
-  skillId: string;
-  commitSha: string;      // pass to readDirectorySkill()
-  repoPath: string;
-  name: string;
-  suggestedName: string;
-  description: string;
-  body: string;           // the instructions after the frontmatter
-  files: { path: string; size: number }[];
-  skipped: { path: string; reason: string }[];
-  totalBytes: number;
-  blockers: string[];     // why it cannot be used; empty when it can
-}
-
-interface ContextSearchResult {
-  docId: string;          // opaque id to pass to read()
-  collectionId?: string;
-  title: string;
-  path?: string;          // e.g. "billing/revenue.md"
-  description?: string;
-  snippet?: string;       // matched excerpt
-  score?: number;         // higher is more relevant
-}
-
-type ContextListingEntry =
-  // A collection: its id is a collectionId — pass it to list()/search() to see inside, not read().
-  | { type: "collection"; id: string; title: string; description?: string; documentCount: number }
-  | { type: "directory"; path: string; name: string }
-  // A document: its docId is what read() takes.
-  | { type: "document"; docId: string; path: string; name: string; description?: string; contentType?: string };
-
-interface ContextListing {
-  collectionId?: string;
-  path?: string;
-  entries: ContextListingEntry[];
-}
-
-interface ContextDocument {
-  docId: string;
-  title: string;
-  path?: string;
-  description?: string;
-  content: string;        // text (markdown/etc.) or a data: URI for binary content
+  leftOut: { path: string; reason: string }[];   // binary or over 256 KB
 }
 `;
 
@@ -341,7 +288,7 @@ export class ContextGatekeeper
     try {
       return new LibraryReadSession(
         this.env, this.#collections(), this.#userLibraries(),
-        this.ctx.props.sharingDomain, this.ctx.props.accountId, gate);
+        this.ctx.props.sharingDomain, this.ctx.props.accountId, gate, this.#observers);
     } catch (err) {
       gate[Symbol.dispose]();
       throw err;

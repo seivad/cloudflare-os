@@ -24,6 +24,7 @@ import { blueprintContentKey, buildBlueprintArchiveStream, sanitizeBlueprintOutp
 import { BlueprintKvRecord, listFeaturedBlueprintsFromKv, readBlueprintKvRecord } from "./storage-schema/blueprints-kv.js";
 import { GatekeeperConnectCallbackImpl, GatekeeperUserSelectionExchangeImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
+import { skillsBindingsLeftOut } from "./skills-binding";
 import { UserDirectoryDurableObject } from "./user-directory.js";
 import { AdminAuditDurableObject } from "./admin-audit.js";
 import { ExternalMessageGateway } from "./external-message-gateway";
@@ -547,6 +548,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) throw new Error("Blueprint not found.");
 
+    // A Skills library binding needs the user's Skills account, which is opt-in and which an admin
+    // can turn off. Settle it before anything is created: an optional binding is left out for a
+    // user with no account, and a required one refuses the install, so no workspace is ever made
+    // with a binding that cannot work.
+    let leftOut = skillsBindingsLeftOut(
+        bindings, kvRecord.metadata.bindings,
+        (await this.#user.listProvidedAccounts())
+            .some(account => account.description.singleton?.tsType === "ContextLibrary"));
+
     // 2. Create new Overseer DO (same as newWorkspace()).
     let id = this.overseers.newUniqueId().toString();
     await this.#user.newWorkspace(id, kvRecord.metadata.title);
@@ -580,6 +590,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       if (!blueprintBinding) {
         throw new Error(`Unknown binding name: ${bindingName}`);
       }
+      if (leftOut.has(bindingName)) continue;
 
       gkPromises.push((async () => {
         let gk;

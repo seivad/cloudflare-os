@@ -1222,3 +1222,21 @@ describe("observerAccessVerifier", () => {
     expect(peak).toBe(2);
   });
 });
+
+describe("observerVerifiers", () => {
+  it("hands back each admitted observer's verifier, and records nothing by asking", async () => {
+    const kv = makeKv();
+    const strategy = trackedCollectionObservers<V>({
+      kv,
+      hasCollectionAccess: async (value, ids) => ids.map(id => value.allowed.includes(id)),
+    });
+    const first = verifier("a");
+    await strategy.addObserver("first", first as unknown as Fetcher<GatekeeperUserVerifier>);
+    const before = JSON.stringify([...(kv as FakeKv).keys()].toSorted());
+
+    expect(strategy.observerVerifiers!()).toEqual([["first", first]]);
+
+    expect(JSON.stringify([...(kv as FakeKv).keys()].toSorted())).toBe(before);
+    expect(openObservers().observerVerifiers).toBeUndefined();
+  });
+});

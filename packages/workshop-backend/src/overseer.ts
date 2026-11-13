@@ -56,6 +56,7 @@ import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminC
 import { chatChangeStatuses, foldCompactedCode, isTurnPrompt } from "./agent-compaction";
 import type { CachedRequest } from "./ai-models";
 import { ChatCacheWarmer } from "./chat-cache-warming";
+import { NO_SKILLS_ACCOUNT, SKILLS_TURNED_OFF } from "./skills-binding";
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import {
   blueprintContentKey, deleteBlueprintContent, readBlueprintRelease, sanitizeBlueprintOutput,
@@ -5612,7 +5613,11 @@ class OverseerImpl implements AgentHooks {
       let description = await facet.describe();
       gatekeeperRecord.resourceTitle = description.title;
       gatekeeperRecord.resourceUrl = description.url;
-      gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
+      // A gadget's Skills binding is not a second source of the user's slash commands: the agents'
+      // ambient capsule already offers them.
+      if (creationSpec.type !== "contextLibrary") {
+        gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
+      }
       this.storage.gatekeepers.put(gatekeeperRecord);
     } catch (error) {
       // Still the right teardown with nothing published: it deletes the facet we just created, and
@@ -6920,11 +6925,30 @@ class OverseerImpl implements AgentHooks {
       id: number, facet: Fetcher<Gatekeeper<Session>>, caller: GatekeeperCaller,
       executionId?: string): Promise<RpcStub<Session>> {
     this.assertGatekeeperUsable(id);
-    let queue = this.storage.gatekeepers.get(id)?.creationSpec?.type === "agentSpawner"
+    let spec = this.storage.gatekeepers.get(id)?.creationSpec;
+    let queue = spec?.type === "agentSpawner"
         ? new AgentSpawnerQueueImpl(this, id, caller)
         : new ApprovalQueueImpl(this, id, caller, undefined, executionId);
-    // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
-    return facet.startSession(queue);
+    let start = (): Promise<RpcStub<Session>> => {
+      // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
+      return facet.startSession(queue);
+    };
+    // A Skills binding outlives the account it was made from: an admin turning Skills off, or the
+    // user removing it, must stop the gadget reading the library at its next session.
+    return spec?.type === "contextLibrary"
+        ? this.assertSkillsAccountProvided(spec).then(start)
+        : start();
+  }
+
+  // Throws one sentence unless the user's Skills account `spec` names is still provided to them.
+  async assertSkillsAccountProvided(
+      spec: Extract<GatekeeperCreationSpec, {type: "contextLibrary"}>): Promise<void> {
+    let user = this.wrapUserDo(this.users.get(this.users.idFromString(spec.userId)));
+    let accounts = await user.listProvidedAccounts();
+    if (!accounts.some(account =>
+        account.accountId === spec.accountId && account.vendorId === spec.vendorId)) {
+      throw new Error(SKILLS_TURNED_OFF);
+    }
   }
 
   // Sessions are authorized and verified only when they open what they hold (the workspace, or
@@ -9021,7 +9045,9 @@ class OverseerImpl implements AgentHooks {
       } else if (spec.type === "modelCatalog") {
         bindings[bindingName] = {...base, type: "modelCatalog"};
       } else if (spec.type === "contextLibrary") {
-        bindings[bindingName] = {...base, type: "contextLibrary"};
+        // Optional on export: an installer with no Skills account gets the gadget without it,
+        // never a refusal or a broken workspace, so the gadget must cope with its absence.
+        bindings[bindingName] = {...base, type: "contextLibrary", optional: true};
       } else if (spec.type === "agentSpawner") {
         // Only the spawner's permanent bindings, like the gadget's own edges above.
         let spawnerBindings = this.visibleBindings({bindings: gk.bindings ?? {}});
@@ -12380,11 +12406,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let account = (await this.#clientUser.listProvidedAccounts())
         .find(account => account.description.singleton?.tsType === "ContextLibrary");
     let cls = account && await this.#clientUser.getSingletonGatekeeperClass(account.accountId);
-    if (!account || !cls) {
-      throw new Error("You have no Skills library to connect. An admin can turn Skills on.");
-    }
+    if (!account || !cls) throw new Error(NO_SKILLS_ACCOUNT);
     return await this.impl.addGatekeeper(
-        cls, {type: "contextLibrary", vendorId: account.vendorId, accountId: account.accountId},
+        cls, {type: "contextLibrary", vendorId: account.vendorId, userId: this.clientUserId,
+              accountId: account.accountId},
         this.clientUserId, this.#mintedCapabilityKind());
   }
 

@@ -3569,9 +3569,9 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Create a new gatekeeper for a Context Library binding, which provides a `ContextLibrary`: the
-   * Skills library of the user calling this (the workspace's owner, when it instantiates a
-   * blueprint). Rejects with a sentence when that user has no Skills library, which an admin can
-   * turn off.
+   * Skills library of the user calling this (the caller's own, whoever that is). Rejects with a
+   * sentence when that user has no Skills account: Skills is opt-in by default, and an admin can
+   * turn it off.
    */
   newContextLibraryGatekeeper(): Promise<GatekeeperClient<any>>;
 
@@ -6099,11 +6099,14 @@ export type GatekeeperCreationSpec = {
 } | {
   /**
    * The Skills library of the user who made the binding, read through the Context gatekeeper's
-   * session like the agents' ambient capsule, but bound into a gadget. `accountId` is that user's
-   * singleton account for the vendor, so an account removed and re-added is told from the old one.
+   * session like the agents' ambient capsule, but bound into a gadget. `userId` and `accountId`
+   * name that user's singleton account for the vendor, so an account removed and re-added is told
+   * from the old one, and a session is refused once the account is no longer provided (an admin
+   * turned Skills off, or it was removed).
    */
   type: "contextLibrary";
   vendorId: string;
+  userId: string;
   accountId: number;
 } | {
   type: "agentSpawner";
@@ -6226,10 +6229,13 @@ export type BlueprintBinding = {
 } | {
   /**
    * A binding to the Skills library (the Context Library) of whoever instantiates the blueprint:
-   * the gadget gets its `ContextLibrary` read session. It takes no assignment beyond the type;
-   * the instantiating user must have a Skills library, which an admin can turn off.
+   * the gadget gets its `ContextLibrary` read session. It takes no assignment beyond the type.
+   * Skills is opt-in by default and an admin can turn it off, so a user may have no Skills account:
+   * with `optional`, instantiating then makes the workspace without this binding; without it,
+   * instantiating is refused, before anything is created, with a sentence saying why.
    */
   type: "contextLibrary";
+  optional?: true;
 } | {
   /** An agent spawner binding. */
   type: "agentSpawner";
