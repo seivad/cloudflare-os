@@ -423,16 +423,6 @@ export class ObserverTracker<V> {
   }
 
   /**
-   * The verifier of every admitted observer and candidate still being verified, for a read-only
-   * question to the vendor (such as how many of them can read a collection). Asking records and
-   * fences nothing.
-   * @returns Observer ID and verifier pairs.
-   */
-  observerVerifiers(): [string, V][] {
-    return [...this.#observers()];
-  }
-
-  /**
    * Prepares a collection-scoped observation.
    * @param collectionIds Provider collection IDs disclosed by the read.
    * @returns A check naming observers that lack access.

@@ -1025,8 +1025,7 @@ export function formatMissingBlueprintBindings(
         details = `a Skills library binding (the Context Library of whoever instantiates the ` +
             `blueprint${binding.optional ? `; optional, so it is left out for someone with no ` +
             `Skills account` : ``}). In a workspace the agent's ambient Skills capsule is not ` +
-            `re-published with the gadget: bind it with setGadgetBinding, or declare a ` +
-            `{"type":"contextLibrary"} binding in the blueprint metadata`;
+            `re-published with the gadget: bind it with setGadgetBinding`;
         break;
       case "agentSpawner": {
         let env = Object.entries(binding.env).map(([envName, target]) =>
