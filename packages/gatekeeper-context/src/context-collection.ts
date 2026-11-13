@@ -744,8 +744,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   /**
    * Every valid skill with the size and revision of its files. The store has no size-only read, so
-   * each document's value is loaded with its record, but no body is decoded (a legacy string body
-   * is the one exception, sized by encoding it).
+   * each document's value is loaded with its record. Current (byte) bodies are sized without
+   * decoding; a legacy string body is sized by encoding it (text) or by base64-decoding it (binary).
    */
   async listSkillSummaries(): Promise<SkillSummary[]> {
     if (this.storage.deletionPending.get()) return [];

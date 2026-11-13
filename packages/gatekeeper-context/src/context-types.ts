@@ -40,13 +40,6 @@ export type SkillCollection = {
    * session's own account can read.
    */
   audience: "private" | "shared" | "public";
-  /**
-   * How many of the collaborators this binding already answers for could not read the collection,
-   * so would be refused entry to the workspace once a skill from it is read. Null when that cannot
-   * be answered without recording an observation (the binding retains no collaborator list, or a
-   * check failed).
-   */
-  excludes: number | null;
 };
 
 /** A skill in a collection the session can read. */

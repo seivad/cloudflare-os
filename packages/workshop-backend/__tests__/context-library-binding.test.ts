@@ -98,6 +98,19 @@ describe("a bound Skills library session", () => {
         .resolves.toMatchObject({ session: expect.anything() });
   }));
 
+  it("starts no session for a connection blocked while the account was being checked",
+      () => withImpl([SKILLS], async impl => {
+    let started = 0;
+    let checks = 0;
+    // Usable at the first check, blocked by the time the account check returns.
+    impl.assertGatekeeperUsable = () => { if (++checks > 1) throw new Error("restarting"); };
+
+    await expect(impl.openGatekeeperSession(
+        1, { startSession: () => { started++; return {}; } }, { from: "gadget", gadgetId: 100 }))
+        .rejects.toThrow("restarting");
+    expect(started).toBe(0);
+  }));
+
   it("refuses every call once Skills is turned off or the account was replaced",
       async () => {
     for (let accounts of [[], [{ ...SKILLS, accountId: 9 }]]) {

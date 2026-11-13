@@ -7432,6 +7432,8 @@ class OverseerImpl implements AgentHooks {
         ? new AgentSpawnerQueueImpl(this, id, caller, undefined, executionId, leave)
         : new ApprovalQueueImpl(this, id, caller, undefined, executionId, leave);
     let start = (): Promise<RpcStub<Session>> => {
+      // Checked again: the connection may have been blocked while the account check was awaited.
+      this.assertGatekeeperUsable(id);
       // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
       return facet.startSession(queue);
     };

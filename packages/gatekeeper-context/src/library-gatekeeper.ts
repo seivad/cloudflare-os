@@ -96,7 +96,6 @@ interface SkillCollection {
   collectionId: string;
   name: string;
   audience: "private" | "shared" | "public";   // public: everyone can read it
-  excludes: number | null;   // collaborators who could not read it; null: unknown
 }
 
 interface LibrarySkill {
@@ -288,7 +287,7 @@ export class ContextGatekeeper
     try {
       return new LibraryReadSession(
         this.env, this.#collections(), this.#userLibraries(),
-        this.ctx.props.sharingDomain, this.ctx.props.accountId, gate, this.#observers);
+        this.ctx.props.sharingDomain, this.ctx.props.accountId, gate);
     } catch (err) {
       gate[Symbol.dispose]();
       throw err;

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ObservationGate, type ObserverKv } from "@gadgets/gatekeeper-kit/observers";
-import type { GatekeeperUserVerifier, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { contextObserverStrategy } from "../src/context-observers.js";
 import type { ContextCollectionDurableObject } from "../src/context-collection.js";
 import { LibraryReadSession } from "../src/library-read.js";
@@ -58,13 +58,6 @@ function makeKv(): ObserverKv {
   };
 }
 
-/** A collaborator the binding answers for, who can read exactly the collections in `readable`. */
-function collaborator(readable: string[]): Fetcher<GatekeeperUserVerifier> {
-  return {
-    async hasCollectionsAccess(_domain: string, ids: string[]) { return ids.map(id => readable.includes(id)); },
-  } as unknown as Fetcher<GatekeeperUserVerifier>;
-}
-
 /** A session over real collections; `library` is the owner's private library, and no collection is public. */
 function makeSession(library: string[], options: { refusal?: Error } = {}) {
   let authorized: ObservationDescription[] = [];
@@ -91,9 +84,8 @@ function makeSession(library: string[], options: { refusal?: Error } = {}) {
   let session = new LibraryReadSession(
     kvEnv, testEnv.COLLECTIONS, userLibraries, domain, "owner",
     new ObservationGate(
-      authorizer as unknown as ConstructorParameters<typeof ObservationGate>[0], strategy),
-    strategy);
-  return { session, authorized, strategy };
+      authorizer as unknown as ConstructorParameters<typeof ObservationGate>[0], strategy));
+  return { session, authorized };
 }
 
 describe("LibraryReadSession.listSkillCollections", () => {
@@ -109,7 +101,7 @@ describe("LibraryReadSession.listSkillCollections", () => {
     let collections = await session.listSkillCollections();
 
     expect(collections).toEqual([{
-      collectionId: withSkills, name: "Skills", audience: "private", excludes: 0,
+      collectionId: withSkills, name: "Skills", audience: "private",
     }]);
     // Discovery metadata, as list() with no collection: nothing is observed.
     expect(authorized).toEqual([]);
@@ -130,33 +122,6 @@ describe("LibraryReadSession.listSkillCollections", () => {
     expect(audiences).toEqual({ Alone: "private", Shared: "shared", Everyone: "public" });
   });
 
-  it("counts the collaborators the binding answers for who could not read each collection", async () => {
-    let open = await createCollection("Open");
-    let closed = await createCollection("Closed");
-    await addSkill(open, "triage", "triage");
-    await addSkill(closed, "other", "other");
-    let { session, strategy, authorized } = makeSession([open, closed]);
-    await strategy.addObserver("bob", collaborator([open]));
-    await strategy.addObserver("carol", collaborator([open, closed]));
-
-    let collections = await session.listSkillCollections();
-
-    expect(collections.map(({ name, excludes }) => [name, excludes]))
-      .toEqual([["Closed", 1], ["Open", 0]]);
-    expect(authorized).toEqual([]);
-  });
-
-  it("reports excludes as null when a collaborator's check fails", async () => {
-    let id = await createCollection("Open");
-    await addSkill(id, "triage", "triage");
-    let { session, strategy } = makeSession([id]);
-    await strategy.addObserver("bob", {
-      async hasCollectionsAccess() { throw new Error("unavailable"); },
-    } as unknown as Fetcher<GatekeeperUserVerifier>);
-
-    expect((await session.listSkillCollections()).map(entry => entry.excludes)).toEqual([null]);
-  });
-
   it("lists a public collection as public", async () => {
     let id = await createCollection("Everyone's", "public");
     await addSkill(id, "triage", "triage");
@@ -169,10 +134,10 @@ describe("LibraryReadSession.listSkillCollections", () => {
     let session = new LibraryReadSession(
       kvEnv as unknown as Pick<Cloudflare.Env, "CONTEXT_COLLECTIONS">, testEnv.COLLECTIONS, userLibraries,
       domain, "owner",
-      new ObservationGate({ async authorizeObservation() {}, [Symbol.dispose]() {} } as never, strategy), strategy);
+      new ObservationGate({ async authorizeObservation() {}, [Symbol.dispose]() {} } as never, strategy));
 
     expect(await session.listSkillCollections()).toEqual([
-      { collectionId: id, name: "Everyone's", audience: "public", excludes: 0 }]);
+      { collectionId: id, name: "Everyone's", audience: "public" }]);
   });
 });
 
