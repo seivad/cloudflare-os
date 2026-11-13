@@ -217,7 +217,7 @@ export class LibraryReadSession extends RpcTarget implements ContextLibrary {
           ]);
           if (skills.length === 0) return null;
           // A public collection, or a private one everyone in the domain can view, is open to all.
-          let audience = access.visibility === "public" || access.everyoneCanView ? "public"
+          let audience: SkillCollection["audience"] = access.visibility === "public" || access.everyoneCanView ? "public"
               : access.shared ? "shared" : "private";
           return { collectionId, name: meta.title, audience };
         } catch (err) {
