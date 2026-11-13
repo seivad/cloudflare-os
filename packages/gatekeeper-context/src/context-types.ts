@@ -22,7 +22,47 @@ export interface ContextLibrary extends RpcTarget {
   list(opts?: { collectionId?: string; path?: string }): Promise<ContextListing>;
   /** Read a document by its catalog/list/search ID, or return null when it is unavailable. */
   read(docId: string): Promise<ContextReadResult | null>;
+  /** Every valid skill in the collections this session can read. */
+  listSkills(): Promise<LibrarySkill[]>;
+  /** The text files of a skill listed by listSkills(); throws a sentence when it cannot be read. */
+  readSkill(collectionId: string, manifestPath: string): Promise<SkillFiles>;
+  /** Search the skills.sh directory; `query` needs at least two characters. */
+  searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]>;
+  /** Read a listed skills.sh skill from its public GitHub repository. Nothing is stored. */
+  previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview>;
+  /**
+   * The text files of a previewed skills.sh skill at the preview's commit. Throws when the
+   * repository's default branch has moved past `commitSha` (preview again).
+   */
+  readDirectorySkill(source: string, skillId: string, commitSha: string): Promise<SkillFiles>;
 }
+
+/** A skill in a collection the session can read. */
+export type LibrarySkill = {
+  collectionId: string;
+  collectionName: string;
+  /** The skill's SKILL.md within its collection; pass it to readSkill(). */
+  manifestPath: string;
+  name: string;
+  description: string;
+  /** Files in the skill's directory, SKILL.md included. */
+  fileCount: number;
+  totalBytes: number;
+  /** Identifies the skill's current content: it differs when any of its files changed. */
+  revision: string;
+};
+
+/** The text of a skill, under the caps of SKILL_FILE_LIMITS. */
+export type SkillFiles = {
+  name: string;
+  description: string;
+  /** A library skill's revision; a skills.sh skill's commit. */
+  revision: string;
+  /** SKILL.md first, then the rest by path; paths are relative to the skill's directory. */
+  files: { path: string; text: string }[];
+  /** Files not returned, and why: binary, over the file cap, or not installed with the skill. */
+  leftOut: { path: string; reason: string }[];
+};
 
 /** Search result. */
 export type ContextSearchResult = {

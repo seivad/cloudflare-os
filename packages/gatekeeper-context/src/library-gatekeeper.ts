@@ -83,6 +83,61 @@ interface ContextLibrary {
   list(opts?: { collectionId?: string; path?: string }): Promise<ContextListing>;
   /** Read a document by an ID from the catalog, search(), or list(). */
   read(docId: string): Promise<ContextDocument | null>;
+  /** Every valid skill in the collections available to you. */
+  listSkills(): Promise<LibrarySkill[]>;
+  /** The text files of a skill from listSkills(): SKILL.md first. Throws a sentence when it cannot
+   *  be read (not available to you, over 100 files, or over 1 MB of text). */
+  readSkill(collectionId: string, manifestPath: string): Promise<SkillFiles>;
+  /** Search the skills.sh directory. query needs at least two characters. */
+  searchSkillDirectory(query: string): Promise<DirectorySkillSearchResult[]>;
+  /** Read a listed skills.sh skill from its public GitHub repository, at its latest commit. */
+  previewDirectorySkill(source: string, skillId: string): Promise<DirectorySkillPreview>;
+  /** The text files of a previewed skills.sh skill at that commit. Throws if the repository has
+   *  moved on since the preview (preview again). */
+  readDirectorySkill(source: string, skillId: string, commitSha: string): Promise<SkillFiles>;
+}
+
+interface LibrarySkill {
+  collectionId: string;
+  collectionName: string;
+  manifestPath: string;   // pass to readSkill()
+  name: string;
+  description: string;
+  fileCount: number;      // files in the skill's directory, SKILL.md included
+  totalBytes: number;
+  revision: string;       // differs when any file of the skill changed
+}
+
+interface SkillFiles {
+  name: string;
+  description: string;
+  revision: string;       // a library skill's revision; a skills.sh skill's commit
+  files: { path: string; text: string }[];       // SKILL.md first; paths relative to the skill
+  leftOut: { path: string; reason: string }[];   // binary, over 256 KB, or not installed with it
+}
+
+interface DirectorySkillSearchResult {
+  id: string;
+  source: string;         // "owner/repo"
+  skillId: string;
+  name: string;
+  installs: number;
+  importable: boolean;    // false when not published from a GitHub repository
+}
+
+interface DirectorySkillPreview {
+  source: string;
+  skillId: string;
+  commitSha: string;      // pass to readDirectorySkill()
+  repoPath: string;
+  name: string;
+  suggestedName: string;
+  description: string;
+  body: string;           // the instructions after the frontmatter
+  files: { path: string; size: number }[];
+  skipped: { path: string; reason: string }[];
+  totalBytes: number;
+  blockers: string[];     // why it cannot be used; empty when it can
 }
 
 interface ContextSearchResult {

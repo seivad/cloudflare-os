@@ -55,6 +55,9 @@ export function uniqueBindingBadges(
     } else if (b.type === "modelCatalog") {
       key = "modelCatalog";
       label = "Model catalog";
+    } else if (b.type === "contextLibrary") {
+      key = "contextLibrary";
+      label = "Skills library";
     } else {
       key = "agentSpawner";
       label = "Agent";
