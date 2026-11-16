@@ -22,7 +22,7 @@ const ProviderRow = ({ entry, busy, test, move, onEnabledChange, onTest }: {
   const lockedNote = useId()
   const tokenWarning = useId()
   const label = PROVIDER_LABELS[entry.provider]
-  const locked = entry.enabledBy === 'environment'
+  const locked = entry.enabledBy === 'environment' || entry.enabledBy === 'gateway'
   const described = [locked && lockedNote, entry.needsApiToken && tokenWarning].filter(Boolean)
 
   return (
@@ -32,7 +32,9 @@ const ProviderRow = ({ entry, busy, test, move, onEnabledChange, onTest }: {
           <p className="text-sm font-medium text-kumo-default">{label}</p>
           {locked && (
             <p id={lockedNote} className="mt-0.5 text-xs text-kumo-subtle">
-              Set by <code className="font-mono">CF_AI_GATEWAY_PROVIDERS</code>
+              {entry.enabledBy === 'gateway'
+                ? <>On while the AI Gateway holds a key for it, under Provider Keys</>
+                : <>Set by <code className="font-mono">CF_AI_GATEWAY_PROVIDERS</code></>}
             </p>
           )}
         </div>
