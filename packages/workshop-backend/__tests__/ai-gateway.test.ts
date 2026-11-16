@@ -900,17 +900,38 @@ describe("checkGatewayKeys", () => {
     }
   });
 
-  it("asks again only once its answer is ten minutes old, and keeps a key through a failed check", async () => {
+  it("asks again once its answer is ten minutes old, behind it, and keeps a key through a failed check",
+      async () => {
     const first = keyBinding({ "openrouter/v1/key": 200, "openai/models": 200 });
     const gateway = config("keys-b", first.binding);
     expect(await checkGatewayKeys(gateway, 0)).toEqual(new Set(["openai", "openrouter"]));
     expect(await checkGatewayKeys(gateway, 9 * 60_000)).toEqual(new Set(["openai", "openrouter"]));
     expect(first.calls).toHaveLength(3);
-    // Ten minutes on: openai's key is gone (401), openrouter's check fails (500) and keeps its key.
+    // Ten minutes on, the old answer comes back at once while the new check runs: openai's key is
+    // gone (401), and openrouter's check fails (500), which keeps its key.
     const second = keyBinding({ "openai/models": 401 });
-    expect(await checkGatewayKeys(config("keys-b", second.binding), 10 * 60_000))
-        .toEqual(new Set(["openrouter"]));
+    const again = config("keys-b", second.binding);
+    expect(await checkGatewayKeys(again, 10 * 60_000)).toEqual(new Set(["openai", "openrouter"]));
+    await vi.waitFor(() => expect(gatewayKeyedProviders(again)).toEqual(new Set(["openrouter"])));
+    expect(await checkGatewayKeys(again, 11 * 60_000)).toEqual(new Set(["openrouter"]));
+    expect(second.calls).toHaveLength(3);
   });
+
+  it("waits a second at most for a gateway's first check, which finishes behind it", async () => {
+    // OpenAI's check hangs until its own timeout; OpenRouter's key answers at once.
+    const binding = {
+      fetch: vi.fn((url: string, init?: RequestInit) => url.endsWith("/openrouter/v1/key")
+          ? Promise.resolve(new Response("{}", { status: 200 }))
+          : new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort",
+              () => reject(new Error("timed out")), { once: true }))),
+    } as unknown as Ai;
+    const gateway = config("keys-c", binding);
+    const started = Date.now();
+    expect(await checkGatewayKeys(gateway)).toEqual(new Set());
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await vi.waitFor(() => expect(gatewayKeyedProviders(gateway)).toEqual(new Set(["openrouter"])),
+        { timeout: 5_000 });
+  }, 15_000);
 });
 
 describe("getAiGatewayLogCost", () => {

@@ -181,30 +181,67 @@ const KEY_CHECKS: Partial<Record<AiModelProvider, { path: string; headers?: Reco
 /** How long one gateway's key check stands before the next request checks again. */
 const KEY_CHECK_TTL_MS = 10 * 60_000;
 
-/** How long one provider's check may take. A check that times out keeps the last answer. */
+/**
+ * How long one provider's check may take. A provider with no key can take far longer to refuse
+ * (OpenAI and Anthropic took 15 seconds through the binding), and a check that times out keeps the
+ * last answer.
+ */
 const KEY_CHECK_TIMEOUT_MS = 3_000;
 
-/** The providers each gateway (by name) answered a key check for, and when it was asked. */
-const keyChecks = new Map<string, { at: number; keyed: ReadonlySet<string> }>();
+/**
+ * How long a caller waits for a gateway's first key check before going on with none. A provider
+ * whose key the gateway holds answers well within it; the rest of the check finishes on its own
+ * and the next caller has its answer.
+ */
+const FIRST_CHECK_WAIT_MS = 1_000;
+
+/**
+ * Each gateway's (by name) key check: the providers it answered for and when it was asked, and the
+ * check in flight, if one is.
+ */
+const keyChecks = new Map<string, {
+  at: number; keyed: ReadonlySet<string>; pending?: Promise<ReadonlySet<string>>;
+}>();
 
 /**
  * The providers `gateway` holds a working key for, as its last key check found (see
- * checkGatewayKeys): empty until one has run in this isolate.
+ * checkGatewayKeys): empty until one has finished in this isolate.
  */
 export function gatewayKeyedProviders(gateway: AiGatewayConfig): ReadonlySet<string> {
   return keyChecks.get(gateway.gateway)?.keyed ?? new Set();
 }
 
 /**
- * Ask `gateway` which of the providers in KEY_CHECKS it holds a working key for, unless it was
- * asked less than KEY_CHECK_TTL_MS ago, and return the answer. A provider is keyed while its check
- * succeeds; a 401 or 403 says it has no key, and any other failure keeps what the last check found,
- * so a passing outage can't take a provider's models away mid-chat.
+ * The providers `gateway` holds a working key for (see KEY_CHECKS). An answer less than
+ * KEY_CHECK_TTL_MS old is returned as it is; an older one is returned while a new check runs
+ * behind it, so that no request waits on the gateway; and with none yet, the first check is
+ * waited for FIRST_CHECK_WAIT_MS at most. A provider is keyed while its check succeeds; a 401 or
+ * 403 says it has no key, and any other failure keeps what the last check found, so a passing
+ * outage can't take a provider's models away mid-chat.
  */
 export async function checkGatewayKeys(gateway: AiGatewayConfig,
                                        now = Date.now()): Promise<ReadonlySet<string>> {
-  let last = keyChecks.get(gateway.gateway);
-  if (last && now - last.at < KEY_CHECK_TTL_MS) return last.keyed;
+  let entry = keyChecks.get(gateway.gateway);
+  if (entry && (now - entry.at < KEY_CHECK_TTL_MS || entry.pending)) return entry.keyed;
+  let last = entry?.keyed;
+  let pending = askGatewayKeys(gateway, last).then(keyed => {
+    keyChecks.set(gateway.gateway, { at: now, keyed });
+    return keyed;
+  }, () => {
+    // Not expected (each provider's failure is caught), but a check that fails whole is retried.
+    keyChecks.set(gateway.gateway, { at: entry?.at ?? 0, keyed: last ?? new Set() });
+    return last ?? new Set<string>();
+  });
+  keyChecks.set(gateway.gateway, { at: entry?.at ?? 0, keyed: last ?? new Set(), pending });
+  if (last) return last;
+  let waited = new Promise<undefined>(resolve => AbortSignal.timeout(FIRST_CHECK_WAIT_MS)
+      .addEventListener("abort", () => resolve(undefined), { once: true }));
+  return (await Promise.race([pending, waited])) ?? new Set();
+}
+
+/** One key check of `gateway`, each provider's failure keeping what `last` found. */
+async function askGatewayKeys(gateway: AiGatewayConfig,
+                              last: ReadonlySet<string> | undefined): Promise<ReadonlySet<string>> {
   let results = await Promise.all(Object.entries(KEY_CHECKS).map(async ([provider, check]) => {
     let binding = gateway.bindingFor(provider);
     let root = binding
@@ -227,13 +264,11 @@ export async function checkGatewayKeys(gateway: AiGatewayConfig,
       if (response.ok) return [provider, true] as const;
       if (response.status === 401 || response.status === 403) return [provider, false] as const;
     } catch {
-      // A failed check says nothing either way.
+      // A failed or timed-out check says nothing either way.
     }
-    return [provider, last?.keyed.has(provider) ?? false] as const;
+    return [provider, last?.has(provider) ?? false] as const;
   }));
-  let keyed = new Set(results.filter(([, has]) => has).map(([provider]) => provider));
-  keyChecks.set(gateway.gateway, { at: now, keyed });
-  return keyed;
+  return new Set(results.filter(([, has]) => has).map(([provider]) => provider));
 }
 
 /**
