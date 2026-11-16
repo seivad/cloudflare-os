@@ -14,6 +14,8 @@ import type {
   AiModelProvider,
   GatewayModelMode,
   GatewayModelSettings,
+  GatewayProviderModel,
+  GatewayProviderModels,
   ReasoningLevel,
 } from '@gadgets/workshop-shared/api'
 import type { RpcStub } from 'capnweb'
@@ -149,6 +151,10 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
   const [modelsDev, setModelsDev] = useState<{ list: unknown } | null>(null)
   const modelsDevRequest = useRef<AbortController | null>(null)
   useEffect(() => () => modelsDevRequest.current?.abort(), [])
+  // Each provider's own model list, read through the gateway once the add form turns to it.
+  const [providerLists, setProviderLists] =
+    useState<Partial<Record<AiModelProvider, GatewayProviderModels>>>({})
+  const providerListRequests = useRef(new Set<AiModelProvider>())
   // A write disables every control, and a browser takes focus from a control that becomes disabled
   // without giving it back. So the control that had focus when the write began gets it again once
   // the controls are enabled, unless focus has gone elsewhere since. A control that left the
@@ -264,6 +270,25 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
     )
   }
 
+  // Runs when the add form's Model ID field turns to `provider`, and reads that provider's list at
+  // most once for as long as the panel is mounted. A list that can't be read leaves models.dev's
+  // suggestions, where they are on, in its place.
+  const loadProviderList = (provider: AiModelProvider) => {
+    if (providerListRequests.current.has(provider)) return
+    providerListRequests.current.add(provider)
+    const settle = (listing: GatewayProviderModels) => {
+      setProviderLists((lists) => ({ ...lists, [provider]: listing }))
+      if (listing.state !== 'ready' && gatewayModels.modelsDevSuggestions) loadModelsDev()
+    }
+    admin.listGatewayProviderModels(provider).then(settle, (err) => {
+      console.error('Failed to list a provider’s models:', err)
+      settle({
+        provider, state: 'unavailable', models: [],
+        note: rpcFailureDescription(err) ?? 'Its model list couldn’t be read.',
+      })
+    })
+  }
+
   const confirmRemoval = async () => {
     if (!pendingRemoval) return
     await writeModel(pendingRemoval, () => admin.removeGatewayModel(pendingRemoval.id))
@@ -288,17 +313,37 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
   const added = gatewayModels.models.filter((model) => model.added)
   const { userModelsEnabled, defaultReasoning } = gatewayModels
   const poolSuggestions = allowedModelSuggestions(gatewayModels.providers, gatewayModels.models)
-  const suggestions = gatewayModels.modelsDevSuggestions
-    ? {
-        models: suggestModels(
-          modelsDev?.list, gatewayModels.providers, gatewayModels.models.map((model) => model.id)),
-        // Nothing to suggest even counting the models already here: the request failed, or what
-        // it returned is not the list.
-        unavailable: modelsDev !== null
-          && suggestModels(modelsDev.list, gatewayModels.providers, []).length === 0,
-        onEngage: loadModelsDev,
-      }
-    : undefined
+  // Each provider's own list where it was read, and models.dev's suggestions, where they are on,
+  // for one whose list wasn't. A model already here is not suggested again.
+  const existingIds = new Set(gatewayModels.models.map((model) => model.id))
+  const fromModelsDev = gatewayModels.modelsDevSuggestions
+    ? suggestModels(modelsDev?.list, gatewayModels.providers, [...existingIds])
+    : []
+  // Nothing to suggest even counting the models already here: the request failed, or what it
+  // returned is not the list.
+  const modelsDevFailed = modelsDev !== null
+    && suggestModels(modelsDev.list, gatewayModels.providers, []).length === 0
+  const suggestedModels: GatewayProviderModel[] = []
+  const suggestionNotes: Partial<Record<AiModelProvider, string>> = {}
+  for (const provider of gatewayModels.providers) {
+    const listing = providerLists[provider]
+    if (listing?.state === 'ready') {
+      suggestedModels.push(...listing.models.filter((model) => !existingIds.has(model.id)))
+      continue
+    }
+    suggestedModels.push(...fromModelsDev.filter((model) => model.provider === provider))
+    if (!listing) continue
+    suggestionNotes[provider] = !gatewayModels.modelsDevSuggestions
+      ? `${listing.note ?? 'Its model list couldn’t be read.'} Enter the model’s details by hand.`
+      : modelsDevFailed
+        ? `${listing.note ?? ''} Suggestions from models.dev couldn’t be loaded either. Enter the model’s details by hand.`.trim()
+        : `${listing.note ?? ''} The suggestions are models.dev’s.`.trim()
+  }
+  const suggestions = {
+    models: suggestedModels,
+    notes: suggestionNotes,
+    onEngage: loadProviderList,
+  }
 
   return (
     <div className={CARD}>

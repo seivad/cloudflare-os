@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Select, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelProvider, AiGatewayInfo, RedactedAiModelConfig, SUGGESTED_MODELS, modelKind } from '@gadgets/workshop-shared/api'
+import { AiChatAuthorInfo, AiModelProvider, AiGatewayInfo, GatewayProviderModels, RedactedAiModelConfig, SUGGESTED_MODELS, modelKind } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { ExtraHeadersEditor } from './features/ai-models/ExtraHeadersEditor'
@@ -9,6 +9,8 @@ import {
   headerRowsFromRecord, headerRowsToRecord, validateHeaderRows, type HeaderRow,
 } from './features/ai-models/extraHeaders'
 import { PROVIDER_LABELS, parseTokenLimit } from './features/ai-models/modelForm'
+import { ModelSearchField } from './features/ai-models/ModelSearchField'
+import { rpcFailureDescription } from './rpcErrors'
 
 /**
  * Whether the modal adds a model from scratch, edits a stored one, or adds a model based on a
@@ -152,6 +154,29 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const enabledProviders: Set<string> | null = gatewayMode
     ? new Set(aiConfig.enabledProviders)
     : null
+
+  // In AI Gateway mode, the chosen provider's own model list, read through the gateway, for the
+  // Model ID field to search; null while it is being read, or with no provider chosen.
+  const listedProvider = gatewayMode && !editing && selection?.type === 'custom' ? selection.provider : null
+  const [providerList, setProviderList] = useState<GatewayProviderModels | null>(null)
+  useEffect(() => {
+    setProviderList(null)
+    if (!visible || listedProvider === null) return
+    let current = true
+    authenticatedApi.listGatewayProviderModels(listedProvider).then(
+      (listing) => { if (current) setProviderList(listing) },
+      (err) => {
+        console.error('Failed to list a provider’s models:', err)
+        if (current) {
+          setProviderList({
+            provider: listedProvider, state: 'unavailable', models: [],
+            note: rpcFailureDescription(err) ?? 'Its model list couldn’t be read.',
+          })
+        }
+      },
+    )
+    return () => { current = false }
+  }, [authenticatedApi, visible, listedProvider])
 
   // The server keeps withheld secrets only for the endpoint they were configured for. Once the URL
   // changes, withheld values are shown (and sent) as blank, and header values must be re-entered.
@@ -376,6 +401,26 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           {/* Custom model fields */}
           {showCustomFields && (
             <>
+              {listedProvider !== null ? (
+                <ModelSearchField
+                  label="Model ID"
+                  description={`Search ${PROVIDER_LABELS[listedProvider]}’s models by name or ID, or type the model identifier as specified by the provider (e.g., '${example!.modelId}')`}
+                  value={modelId}
+                  models={providerList?.state === 'ready' && aiConfig?.enabled ? providerList.models.filter(
+                    (model) => !aiConfig.builtInModelIds.includes(model.id)) : []}
+                  error={errors.modelId || undefined}
+                  status={providerList === null
+                    ? `Reading ${PROVIDER_LABELS[listedProvider]}’s models…`
+                    : providerList.state === 'ready' ? undefined : providerList.note}
+                  onValueChange={(value) => { setModelId(value); setErrors(prev => ({ ...prev, modelId: '' })) }}
+                  onPick={(picked) => {
+                    setDisplayName(picked.name)
+                    setContextWindow(String(picked.contextWindow ?? ''))
+                    setOutputLimit(String(picked.outputLimit ?? ''))
+                    setErrors(prev => ({ ...prev, displayName: '' }))
+                  }}
+                />
+              ) : (
               <Input
                 label="Model ID"
                 placeholder={`e.g., ${example!.modelId}`}
@@ -386,6 +431,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                 error={errors.modelId}
                 variant={errors.modelId ? 'error' : 'default'}
               />
+              )}
 
               <Input
                 label="Display Name"

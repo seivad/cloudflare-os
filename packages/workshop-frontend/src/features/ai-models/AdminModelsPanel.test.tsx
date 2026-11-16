@@ -9,8 +9,10 @@ import type {
   AdminApi,
   AdminModelView,
   AdminSettingsView,
+  AiModelProvider,
   GatewayModelLevelTest,
   GatewayModelTest,
+  GatewayProviderModels,
   ReasoningLevel,
 } from '@gadgets/workshop-shared/api'
 
@@ -280,7 +282,8 @@ const modelTestResult = (modelName: string) => {
 }
 
 // As typing reports itself: suggestions open for typed text, not for a value filled in some other way.
-const type = (element: HTMLInputElement, value: string) => act(() => {
+// Async, so that a read the typing starts (a provider's model list) settles within it.
+const type = (element: HTMLInputElement, value: string) => act(async () => {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(element, value)
   element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
 })
@@ -348,7 +351,13 @@ const suggestionOptions = () => {
   return Array.from(list?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])
 }
 
-const suggested = () => suggestionOptions().map((option) => option.textContent)
+// Each suggestion as its ID then its name; the line of facts under them is checked on its own.
+const suggested = () => suggestionOptions().map((option) => {
+  const [name, id] = Array.from(option.querySelectorAll('span'), (span) => span.textContent)
+  return `${id}${name}`
+})
+const suggestedFacts = () =>
+  suggestionOptions().map((option) => option.querySelectorAll('span')[2]?.textContent)
 
 /** Pick the first model suggested once `typed` is typed into the Model ID field. */
 const pickSuggestion = async (typed: string) => {
@@ -408,6 +417,7 @@ describe('AdminModelsPanel', () => {
 
   const render = async (
     { gatewayModels }: Pick<AdminSettingsView, 'gatewayModels'> = { gatewayModels: GATEWAY_MODELS },
+    providerLists: Partial<Record<AiModelProvider, GatewayProviderModels>> = {},
   ) => {
     const setGatewayModelMode = vi.fn<AdminApi['setGatewayModelMode']>(async () => {})
     const addGatewayModel = vi.fn<AdminApi['addGatewayModel']>(async () => {})
@@ -424,12 +434,17 @@ describe('AdminModelsPanel', () => {
       async (modelId) => ({ model: modelId, ok: true }))
     const testNewGatewayModel = vi.fn<AdminApi['testNewGatewayModel']>(
       async (model) => [{ model: model.id, ok: true, reasoning: null }])
+    // Each provider's own list, which these tests read as one that can't be read unless they
+    // give one, so models.dev's suggestions are what most of them see.
+    const listGatewayProviderModels = vi.fn<AdminApi['listGatewayProviderModels']>(
+      async (provider) => providerLists[provider]
+        ?? { provider, state: 'unavailable', models: [], note: 'The list couldn’t be read.' })
     const onChanged = vi.fn<() => Promise<void>>(async () => {})
     const admin = {
       setGatewayModelMode, addGatewayModel, removeGatewayModel, setUserModelsEnabled,
       setModelsDevSuggestions, setGatewayModelSettings, setDefaultReasoning,
       setGatewayProviderEnabled, setGatewayProviderOrder, setGatewayModelOrder,
-      testGatewayProvider, testGatewayModel, testNewGatewayModel,
+      testGatewayProvider, testGatewayModel, testNewGatewayModel, listGatewayProviderModels,
     } as unknown as RpcStub<AdminApi>
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -443,7 +458,8 @@ describe('AdminModelsPanel', () => {
       setGatewayModelMode, addGatewayModel, removeGatewayModel, setUserModelsEnabled,
       setModelsDevSuggestions, setGatewayModelSettings, setDefaultReasoning,
       setGatewayProviderEnabled, setGatewayProviderOrder, setGatewayModelOrder,
-      testGatewayProvider, testGatewayModel, testNewGatewayModel, onChanged, show,
+      testGatewayProvider, testGatewayModel, testNewGatewayModel, listGatewayProviderModels,
+      onChanged, show,
     }
   }
 
@@ -2661,17 +2677,19 @@ describe('AdminModelsPanel', () => {
       })
     })
 
-    it('asks models.dev for nothing while the setting is off, and leaves the field plain text', async () => {
+    it('asks models.dev for nothing while the setting is off, and says why the provider’s own list is missing', async () => {
       const fetch = stubModelsDev()
-      await render()
+      const { listGatewayProviderModels } = await render()
 
       await focus(modelId())
       await type(modelId(), 'claude')
 
+      expect(listGatewayProviderModels).toHaveBeenCalledExactlyOnceWith('anthropic')
       expect(fetch).not.toHaveBeenCalled()
-      expect(modelId().getAttribute('role')).toBeNull()
       expect(suggested()).toEqual([])
-      expect(suggestionNote()).toEqual([])
+      expect(suggestionNote()).toEqual([
+        'The list couldn’t be read. Enter the model’s details by hand.',
+      ])
     })
 
     it.each([
@@ -2732,7 +2750,7 @@ describe('AdminModelsPanel', () => {
 
       expect(modelId().value).toBe('claude-next')
       expect(suggested()).toEqual([])
-      expect(suggestionNote()).toEqual([])
+      expect(suggestionNote()).toEqual(['The list couldn’t be read. The suggestions are models.dev’s.'])
       expect(modelId().getAttribute('aria-expanded')).toBe('false')
       const signal = fetch.mock.calls[0][1]?.signal
       expect(signal?.aborted).toBe(false)
@@ -2978,7 +2996,6 @@ describe('AdminModelsPanel', () => {
       await focus(modelId())
       await type(modelId(), 'opu')
 
-      expect(modelId().getAttribute('role')).toBeNull()
       expect(suggested()).toEqual([])
     })
 
@@ -2994,7 +3011,8 @@ describe('AdminModelsPanel', () => {
       await focus(modelId())
 
       expect(suggestionNote()).toEqual([
-        'Suggestions from models.dev couldn’t be loaded. Enter the model’s details by hand.',
+        'The list couldn’t be read. Suggestions from models.dev couldn’t be loaded either. ' +
+          'Enter the model’s details by hand.',
       ])
       await fillAddForm({ id: 'claude-opus-4-5', name: 'Claude Opus 4.5', contextWindow: '200000' })
       expect(suggested()).toEqual([])
@@ -3010,13 +3028,83 @@ describe('AdminModelsPanel', () => {
       ['with only models the deployment has', {
         anthropic: { models: { 'claude-sonnet': MODELS_DEV.anthropic.models['claude-sonnet'] } },
       }],
-    ])('has no note for a list %s', async (_case, list) => {
+    ])('says the suggestions are models.dev’s for a list %s', async (_case, list) => {
       stubModelsDev(async () => new Response(JSON.stringify(list)))
       await render({ gatewayModels: SUGGESTING })
 
       await focus(modelId())
 
-      expect(suggestionNote()).toEqual([])
+      expect(suggestionNote()).toEqual(['The list couldn’t be read. The suggestions are models.dev’s.'])
+    })
+
+    describe('from the provider’s own list', () => {
+      const LIVE: GatewayProviderModels = {
+        provider: 'anthropic', state: 'ready', models: [
+          { provider: 'anthropic', id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1000000,
+            outputLimit: 128000, price: { input: 4, output: 20 } },
+          { provider: 'anthropic', id: 'claude-next', name: 'Claude Next' },
+          // The deployment has this one.
+          { provider: 'anthropic', id: 'claude-sonnet', name: 'Claude Sonnet', contextWindow: 200000 },
+        ],
+      }
+
+      it('searches it with prices and windows, and reads models.dev not at all', async () => {
+        const fetch = stubModelsDev()
+        await render({ gatewayModels: SUGGESTING }, { anthropic: LIVE })
+
+        await focus(modelId())
+        await type(modelId(), 'claude')
+
+        expect(fetch).not.toHaveBeenCalled()
+        expect(suggested()).toEqual(['claude-opus-5-5Claude Opus 5.5', 'claude-nextClaude Next'])
+        expect(suggestedFacts()).toEqual(['$4 in · $20 out per M tokens · 1M context', 'No list price'])
+        expect(suggestionNote()).toEqual([])
+
+        await type(modelId(), 'opus 5')
+        expect(suggested()).toEqual(['claude-opus-5-5Claude Opus 5.5'])
+      })
+
+      it('fills the form in from a pick, made with the keyboard', async () => {
+        const { addGatewayModel } = await render({ gatewayModels: GATEWAY_MODELS }, { anthropic: LIVE })
+        await focus(modelId())
+        await type(modelId(), 'claude')
+
+        await press(modelId(), 'ArrowDown')
+        expect(await press(modelId(), 'Enter')).toBe(true)
+
+        expect(addFormValues()).toEqual(['claude-opus-5-5', 'Claude Opus 5.5', '1000000', '128000'])
+        await click(button('Add model'))
+        expect(addGatewayModel).toHaveBeenCalledExactlyOnceWith({
+          provider: 'anthropic', id: 'claude-opus-5-5', name: 'Claude Opus 5.5',
+          contextWindow: 1000000, outputLimit: 128000,
+        })
+      })
+
+      it('leaves the window to fill in for a model the list gives none for', async () => {
+        await render({ gatewayModels: GATEWAY_MODELS }, { anthropic: LIVE })
+        await focus(modelId())
+        await type(modelId(), 'next')
+
+        await click(suggestionOptions()[0])
+
+        expect(addFormValues()).toEqual(['claude-next', 'Claude Next', '', ''])
+      })
+
+      it('says why a provider whose key the gateway lacks has no list, and falls back to models.dev', async () => {
+        stubModelsDev()
+        await render({ gatewayModels: SUGGESTING }, {
+          anthropic: { provider: 'anthropic', state: 'not-connected', models: [],
+            note: 'The AI Gateway holds no Anthropic key.' },
+        })
+
+        await focus(modelId())
+        await type(modelId(), 'opus')
+
+        expect(suggested()).toEqual(['claude-opus-4-5Claude Opus 4.5 (latest)'])
+        expect(suggestionNote()).toEqual([
+          'The AI Gateway holds no Anthropic key. The suggestions are models.dev’s.',
+        ])
+      })
     })
 
     it('points at an empty Model ID and says its error, as the plain field does', async () => {

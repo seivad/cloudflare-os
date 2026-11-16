@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from 'react'
-import { Autocomplete, Button, Input, Select } from '@cloudflare/kumo'
+import { Button, Input, Select } from '@cloudflare/kumo'
 import { Plus } from '@phosphor-icons/react'
 import { REASONING_LEVELS } from '@gadgets/workshop-shared/api'
 import type {
@@ -7,11 +7,12 @@ import type {
   GatewayModel,
   GatewayModelCapabilities,
   GatewayModelLevelTest,
+  GatewayProviderModel,
   ReasoningLevel,
 } from '@gadgets/workshop-shared/api'
 import { GatewayLevelTestsStatus, GatewayTestButton } from './GatewayTest'
 import { PROVIDER_LABELS, REASONING_LEVEL_LABELS, parseTokenLimit } from './modelForm'
-import type { ModelSuggestion } from './modelsDev'
+import { ModelSearchField } from './ModelSearchField'
 import { useFieldErrorAlert } from '../../hooks/useFieldErrorAlert'
 import { useGatewayTests } from './useGatewayTests'
 
@@ -55,16 +56,20 @@ export const AddGatewayModelForm = ({
    */
   disabled: boolean
   /**
-   * Present while the Model ID field suggests models. Picking one only fills the form in: what is
-   * added is what the form holds when it is submitted.
+   * Present while the Model ID field suggests models: each provider's own list, read through the
+   * gateway, or models.dev's where that list can't be read. Picking one only fills the form in:
+   * what is added is what the form holds when it is submitted.
    */
   suggestions?: {
     /** The models to suggest, each under the provider it belongs to. */
-    models: readonly ModelSuggestion[]
-    /** Whether the suggestions could not be loaded. */
-    unavailable: boolean
-    /** Called whenever the Model ID field is turned to, which is when suggestions are wanted. */
-    onEngage: () => void
+    models: readonly GatewayProviderModel[]
+    /** A sentence for a provider whose own list is not what is suggested, saying why. */
+    notes: Partial<Record<AiModelProvider, string>>
+    /**
+     * Called with the chosen provider whenever the Model ID field is turned to, which is when that
+     * provider's suggestions are wanted.
+     */
+    onEngage: (provider: AiModelProvider) => void
   }
   /** Adds the model. Rejects with the server's refusal. */
   onAdd: (model: GatewayModel) => Promise<void>
@@ -87,7 +92,6 @@ export const AddGatewayModelForm = ({
   const fieldError = useFieldErrorAlert()
   // The ID a picked suggestion filled the form in with.
   const [pickedId, setPickedId] = useState<string | null>(null)
-  const [listOpen, setListOpen] = useState(false)
 
   const idRef = useRef<HTMLInputElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
@@ -97,11 +101,8 @@ export const AddGatewayModelForm = ({
   const provider = providers.includes(chosenProvider) ? chosenProvider : providers[0]
   const behavesLikeOffered = behavesLikeOptions.filter((option) => option.provider === provider)
   const behavesLike = behavesLikeOffered.find((option) => option.id === chosenBehavesLike)
-  // The chosen provider's suggestions whose ID holds what is typed. Matched here rather than by
-  // the field, which would report itself expanded over a list with nothing in it.
-  const typed = id.trim().toLowerCase()
-  const offered = suggestions?.models.filter((suggestion) =>
-    suggestion.provider === provider && suggestion.id.toLowerCase().includes(typed)) ?? []
+  // The chosen provider's suggestions, which the Model ID field searches as it is typed into.
+  const offered = suggestions?.models.filter((suggestion) => suggestion.provider === provider) ?? []
   const contextWindowTokens = parseTokenLimit(contextWindow)
   const outputLimitTokens = parseTokenLimit(outputLimit)
   const fields = [
@@ -220,61 +221,26 @@ export const AddGatewayModelForm = ({
         ))}
       </Select>
       {suggestions ? (
-        // Kumo's Autocomplete hands out no ref to its input, and takes neither a focus handler nor
-        // aria-invalid for it, so all three go through this wrapper.
-        <div
-          ref={(wrapper) => {
-            idRef.current = wrapper?.querySelector<HTMLInputElement>('[role="combobox"]') ?? null
-            idRef.current?.setAttribute('aria-invalid', String(idError !== undefined))
+        <ModelSearchField
+          label={MODEL_ID.label}
+          description={MODEL_ID.description}
+          value={id}
+          models={offered}
+          disabled={disabled}
+          error={idError}
+          status={suggestions.notes[provider]}
+          inputRef={idRef}
+          onEngage={() => suggestions.onEngage(provider)}
+          onValueChange={(value) => edit(setId)({ target: { value } })}
+          onPick={(picked) => {
+            setPickedId(picked.id)
+            setName(picked.name)
+            setContextWindow(String(picked.contextWindow ?? ''))
+            setOutputLimit(String(picked.outputLimit ?? ''))
+            setImageInput(picked.capabilities?.imageInput ?? null)
+            setReasoningLevels(picked.capabilities?.reasoningLevels ?? [])
           }}
-          className="grid gap-2"
-          onFocus={suggestions.onEngage}
-        >
-          <Autocomplete<ModelSuggestion>
-            label={MODEL_ID.label}
-            description={MODEL_ID.description}
-            error={idError}
-            items={offered}
-            filter={null}
-            open={listOpen && offered.length > 0}
-            onOpenChange={(open) => setListOpen(open)}
-            itemToStringValue={(suggestion) => suggestion.id}
-            value={id}
-            disabled={disabled}
-            onValueChange={(value, { reason }) => {
-              suggestions.onEngage()
-              // With the list closed, Escape asks to empty the field. What was typed stays.
-              if (reason === 'escape-key') return
-              edit(setId)({ target: { value } })
-              const picked =
-                reason === 'item-press' && offered.find((suggestion) => suggestion.id === value)
-              if (!picked) return
-              setPickedId(picked.id)
-              setName(picked.name)
-              setContextWindow(String(picked.contextWindow))
-              setOutputLimit(String(picked.outputLimit ?? ''))
-              setImageInput(picked.capabilities?.imageInput ?? null)
-              setReasoningLevels(picked.capabilities?.reasoningLevels ?? [])
-            }}
-          >
-            <Autocomplete.InputGroup />
-            <Autocomplete.Content>
-              <Autocomplete.List>
-                {(suggestion: ModelSuggestion) => (
-                  <Autocomplete.Item key={suggestion.id} value={suggestion}>
-                    <span className="block break-all font-mono text-sm">{suggestion.id}</span>
-                    <span className="block text-xs text-kumo-subtle">{suggestion.name}</span>
-                  </Autocomplete.Item>
-                )}
-              </Autocomplete.List>
-            </Autocomplete.Content>
-          </Autocomplete>
-          {suggestions.unavailable && (
-            <p role="status" className="text-sm leading-snug text-kumo-subtle">
-              Suggestions from models.dev couldn’t be loaded. Enter the model’s details by hand.
-            </p>
-          )}
-        </div>
+        />
       ) : (
         <Input
           ref={idRef}
