@@ -65,6 +65,31 @@ The workspace being deleted, or the gadget being deleted or still provisional to
 a join the same way. The refusal is "No such gadget", as `getGadget()` refuses a gadget the caller
 does not hold.
 
+### Starting a call, and its PIN
+
+A gadget's call is open to everyone who holds the gadget, unless the person who starts it locks it
+with a PIN. Whoever joins a call nobody else is in starts it: `LiveCalls.join()` looks up who is in
+the meeting's live session afresh (not the shared roster lookup) and, finding no one else, records
+them in the Overseer's `callStarts` with the PIN they chose (`CallJoinOptions.startPin`, 4 to 6
+digits, or null). Someone joining a call someone else is in needs that PIN (`CallJoinOptions.pin`)
+unless the call has none or they were admitted to it already, so a dropped connection rejoins
+without it. The check runs after the caller's owed participant deletions and before any
+participant is added, serialized per gadget, so two people joining an empty call don't both
+start it.
+
+- RealtimeKit lists a starter only once their connection is made, so a call counts as started for
+  a minute (`CALL_START_GRACE_MS`) after its start is recorded, even with nobody listed in it.
+- Only the starter is told the PIN (`GadgetClient.getCallStatus()`), and only they can change it,
+  lock or unlock it (`setCallPin()`), while the call lasts. Everyone in the call when it is locked
+  stays in and is admitted.
+- Once everyone has left, the next person to join starts a new session and decides its PIN; a
+  starter rejoining their own empty call keeps theirs unless they choose again.
+- Five wrong PINs from one person at one gadget's call refuse further tries for ten minutes
+  (`CALL_PIN_ATTEMPTS`, `CALL_PIN_WINDOW_MS`), counted in memory.
+- A PIN is a convenience, not an access control: it narrows a call within the people who already
+  hold the gadget, and is stored as typed, since four to six digits would not survive hashing.
+  Calls started before PINs existed have no `callStarts` record and stay open.
+
 ### Roster
 
 `GadgetClient.getCallRoster()` lists who is in the call now, in join order, from RealtimeKit's
@@ -75,7 +100,8 @@ lookup per gadget is shared for ten seconds
 (`CALL_ROSTER_CACHE_MS`), so any number of viewers polling costs one lookup per interval. Each
 person in the lookup is matched to the participants stored now, so someone revoked drops out at
 once. The roster checks only that the gadget exists, not the caller's live access: it shows the
-same thing presence does, to the same people.
+same thing presence does, to the same people. `GadgetClient.getCallStatus()` adds whether the
+caller needs a PIN to join, and, for the call's starter alone, the PIN.
 
 ## Invitations
 
@@ -132,19 +158,29 @@ deletion that still fails refuses the join, to be tried again.
 `LiveCallProvider` (`features/live-call/`), mounted above the authenticated app shell, holds the one
 call a tab can be in, so a call survives navigating between gadgets and pages. `LiveCallSidebar` sits
 beside the routed page: a column of its own on `md` and wider, a small overlay on phones, and a pill
-when collapsed during a call. In a call it shows a vertical stack of webcam tiles (the caller first,
-then everyone else in the order they joined, each named, with a muted-microphone mark, an outline
-for whoever is speaking, and initials or an avatar when their camera is off), the caller's
-microphone, camera and leave controls, and Invite at the bottom.
+when collapsed during a call. The column's left edge drags (or, focused, moves with the arrow keys,
+Home and End) to widen it up to 60% of the window, and the width is remembered in the browser. In a
+call it shows the webcam tiles in a grid that is one column wide in the narrow sidebar and grows,
+then wraps into columns, as it widens (the caller first, then everyone else in the order they
+joined, each named, with a muted-microphone mark, an outline for whoever is speaking, and initials
+or an avatar when their camera is off), the caller's microphone, camera and leave controls, and
+Invite at the bottom. The call's starter also sees its PIN there, with a switch to lock or unlock it.
 
 The gadget views -- the editor and the `use`-only view -- lend the provider the selected gadget's
 capability while it is on screen (`useLiveCallGadget`), and show a Live toggle that opens the
-sidebar for it. Before joining, the sidebar shows who is live (`getCallRoster()`, polled every ten
-seconds while open and visible) and Join. During a call it names the call's gadget with a way back
-to it, and offers Switch call while another gadget is on screen.
+sidebar for it. While a gadget is on screen its call's status (`getCallStatus()`) is polled every
+ten seconds while the page is visible, and when anyone is in the call a pill names them with Join,
+which joins at once, or opens the sidebar to ask for the PIN of a locked call. Before joining, the
+sidebar shows who is live and Join, with a PIN field for a locked call, or, when nobody is live,
+Start with a switch to require a PIN (a random six digits, which can be changed). During a call it
+names the call's gadget with a way back to it, and offers Switch call while another gadget is on
+screen.
 
 - The RealtimeKit SDK is loaded with a dynamic `import()` only when someone joins, so it is a chunk
   of its own, and nothing asks for the camera or microphone before then.
+- Everyone else's audio is played by the SDK itself, through one audio element, which needs its
+  `modules.experimentalAudioPlayback`: without it the Core SDK plays no remote audio at all, leaving
+  that to the UI Kit, which this app doesn't use.
 - A denied camera or microphone leaves them in the call receive-only, with a hint. A browser that
   blocks autoplay gets a button that starts the others' audio.
 - Leaving stops every local track, even when the SDK is slow to let go of them.

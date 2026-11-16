@@ -113,7 +113,8 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { isLoopLimitError, retryOnDoReset, shouldRetryAfterReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { CallInvite, CallRosterEntry, CallTicket, CreationApproval, GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { CallInvite, CallJoinOptions, CallRosterEntry, CallStatus, CallTicket, CreationApproval,
+    GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSize,
   decodeChatAttachmentText,
@@ -15374,12 +15375,20 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
         this.id, blueprintId, options, userMeta, this.clientUserId);
   }
 
-  async joinCall(): Promise<CallTicket> {
-    return this.impl.liveCalls.join(this.id, callCaller(this.impl, this.clientUserId));
+  async joinCall(options?: CallJoinOptions): Promise<CallTicket> {
+    return this.impl.liveCalls.join(this.id, callCaller(this.impl, this.clientUserId), options);
   }
 
   async getCallRoster(): Promise<CallRosterEntry[]> {
     return this.impl.liveCalls.roster(this.id);
+  }
+
+  async getCallStatus(): Promise<CallStatus> {
+    return this.impl.liveCalls.status(this.id, this.clientUserId);
+  }
+
+  async setCallPin(pin: string | null): Promise<void> {
+    return this.impl.liveCalls.setPin(this.id, callCaller(this.impl, this.clientUserId), pin);
   }
 
   async inviteToCall(profileId: string): Promise<void> {
@@ -15489,12 +15498,20 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
   }
 
   // Holding this gadget is what admits someone to its call (see docs/live-calls.md).
-  async joinCall(): Promise<CallTicket> {
-    return this.impl.liveCalls.join(this.id, callCaller(this.impl, this.clientUserId));
+  async joinCall(options?: CallJoinOptions): Promise<CallTicket> {
+    return this.impl.liveCalls.join(this.id, callCaller(this.impl, this.clientUserId), options);
   }
 
   async getCallRoster(): Promise<CallRosterEntry[]> {
     return this.impl.liveCalls.roster(this.id);
+  }
+
+  async getCallStatus(): Promise<CallStatus> {
+    return this.impl.liveCalls.status(this.id, this.clientUserId);
+  }
+
+  async setCallPin(pin: string | null): Promise<void> {
+    return this.impl.liveCalls.setPin(this.id, callCaller(this.impl, this.clientUserId), pin);
   }
 
   // --- Denied methods (build-only) ---

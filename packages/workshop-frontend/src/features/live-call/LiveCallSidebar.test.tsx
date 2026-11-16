@@ -5,7 +5,9 @@ import { act, type ComponentProps, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { CallRosterEntry, CallTicket, GadgetClient, ServerConfig } from '@gadgets/workshop-shared/api'
+import type {
+  CallJoinOptions, CallRosterEntry, CallStatus, CallTicket, GadgetClient, ServerConfig,
+} from '@gadgets/workshop-shared/api'
 import { ServerConfigContext } from '../../ServerConfigContext'
 import type { OpenCallMeeting } from './callMeeting'
 import { useLiveCallGadget, type LiveCallGadgetView, type LiveCallRequest } from './liveCallContext'
@@ -19,6 +21,15 @@ const toastAdd = vi.hoisted(() => vi.fn<(toast: { title: string }) => void>())
 vi.mock('@cloudflare/kumo', () => ({
   useKumoToastManager: () => ({ add: toastAdd }),
   Loader: () => <span />,
+  Switch: ({ label, checked, disabled, onCheckedChange }: {
+    label: string; checked: boolean; disabled?: boolean; onCheckedChange: (checked: boolean) => void
+  }) => (
+    <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled}
+      onClick={() => onCheckedChange(!checked)} />
+  ),
+  Input: ({ label, value, onChange, onKeyDown }: Pick<ComponentProps<'input'>, 'value' | 'onChange' | 'onKeyDown'> & {
+    label: string
+  }) => <input aria-label={label} value={value} onChange={onChange} onKeyDown={onKeyDown} />,
 }))
 vi.mock('../../components/WorkshopControls', () => ({
   WorkshopButton: ({ children, ...props }: ComponentProps<'button'>) => (
@@ -55,15 +66,19 @@ const ROSTER: CallRosterEntry[] = [
 ]
 
 type FakeClient = {
-  joinCall: ReturnType<typeof vi.fn<() => Promise<CallTicket>>>
-  getCallRoster: ReturnType<typeof vi.fn<() => Promise<CallRosterEntry[]>>>
+  joinCall: ReturnType<typeof vi.fn<(options?: CallJoinOptions) => Promise<CallTicket>>>
+  getCallStatus: ReturnType<typeof vi.fn<() => Promise<CallStatus>>>
+  setCallPin: ReturnType<typeof vi.fn<(pin: string | null) => Promise<void>>>
 }
 
-const fakeClient = (roster: CallRosterEntry[] = []): FakeClient => ({
-  joinCall: vi.fn<() => Promise<CallTicket>>(async () => ({
+const fakeClient = (roster: CallRosterEntry[] = [], status: Partial<CallStatus> = {}): FakeClient => ({
+  joinCall: vi.fn<(options?: CallJoinOptions) => Promise<CallTicket>>(async () => ({
     authToken: 'ticket', expiresAt: new Date(Date.now() + 3_600_000), displayName: 'Mick',
   })),
-  getCallRoster: vi.fn<() => Promise<CallRosterEntry[]>>(async () => roster),
+  getCallStatus: vi.fn<() => Promise<CallStatus>>(async () => ({
+    roster, pinRequired: false, startedByYou: false, pin: null, ...status,
+  })),
+  setCallPin: vi.fn<(pin: string | null) => Promise<void>>(async () => {}),
 })
 
 const viewOf = (client: FakeClient, overrides: Partial<LiveCallGadgetView> = {}): LiveCallGadgetView => ({
@@ -90,6 +105,15 @@ const click = (element: Element) => act(async () => {
 
 const flush = () => act(async () => {
   for (let i = 0; i < 10; i++) await new Promise(resolve => setTimeout(resolve, 0))
+})
+
+const type = (input: HTMLInputElement, value: string) => act(async () => {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+})
+
+const press = (element: Element, key: string) => act(async () => {
+  element.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
 })
 
 const setVisibility = (visibilityState: DocumentVisibilityState) => {
@@ -119,6 +143,8 @@ describe('live call sidebar', () => {
     if (!found) throw new Error(`No button labelled “${label}”`)
     return found
   }
+  const presence = () => container.querySelector<HTMLElement>('[aria-label="Live call in progress"]')
+  const input = (label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!
   const tiles = () => [...container.querySelectorAll('ul[aria-label="People in the call"] > li')]
   const tileLabels = () => tiles().map(tile => tile.getAttribute('aria-label'))
 
@@ -139,6 +165,7 @@ describe('live call sidebar', () => {
       if (!meeting) throw new Error('No meeting prepared')
       return meeting.asMeeting()
     })
+    window.localStorage.clear()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -177,16 +204,16 @@ describe('live call sidebar', () => {
     await click(button('Live call'))
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(sidebar()?.textContent).toContain('No one is live yet')
-    expect(client.getCallRoster).toHaveBeenCalledTimes(1)
+    expect(client.getCallStatus).toHaveBeenCalledTimes(1)
 
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
-    expect(client.getCallRoster).toHaveBeenCalledTimes(2)
+    expect(client.getCallStatus).toHaveBeenCalledTimes(2)
     act(() => setVisibility('hidden'))
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
-    expect(client.getCallRoster).toHaveBeenCalledTimes(2)
+    expect(client.getCallStatus).toHaveBeenCalledTimes(2)
     act(() => setVisibility('visible'))
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(client.getCallRoster).toHaveBeenCalledTimes(3)
+    expect(client.getCallStatus).toHaveBeenCalledTimes(3)
   })
 
   it('shows joining, then a tile per person: you first, then everyone in join order', async () => {
@@ -396,6 +423,110 @@ describe('live call sidebar', () => {
     expect(openMeeting).not.toHaveBeenCalled()
     expect(client.joinCall).not.toHaveBeenCalled()
     expect(tileLabels()).toEqual([])
+  })
+
+  it('shows who is live in the gadget on screen, and joins an open call in one click', async () => {
+    meetings.push(new FakeMeeting())
+    const client = fakeClient(ROSTER)
+    await render(<GadgetView view={viewOf(client)} />)
+    await flush()
+    expect(sidebar()).toBeNull()
+    expect(presence()?.textContent).toContain('Sam and Ann are live')
+
+    await click(button('Join'))
+    await flush()
+    expect(client.joinCall).toHaveBeenCalledExactlyOnceWith(undefined)
+    expect(openMeeting).toHaveBeenCalledOnce()
+    expect(presence()).toBeNull()
+    expect(tileLabels()).toEqual(['You'])
+  })
+
+  it('shows no pill while nobody is live', async () => {
+    await render(<GadgetView view={viewOf(fakeClient([]))} />)
+    await flush()
+    expect(presence()).toBeNull()
+  })
+
+  it('asks for the PIN of a locked call before joining it', async () => {
+    meetings.push(new FakeMeeting())
+    const client = fakeClient(ROSTER, { pinRequired: true })
+    await render(<GadgetView view={viewOf(client)} />)
+    await flush()
+
+    // The pill's Join opens the sidebar to ask, rather than failing.
+    await click(button('Join'))
+    await flush()
+    expect(client.joinCall).not.toHaveBeenCalled()
+    expect(input('Call PIN')).not.toBeNull()
+    expect(button('Join call').disabled).toBe(true)
+
+    await type(input('Call PIN'), '48-21x')
+    expect(input('Call PIN').value).toBe('4821')
+    await click(button('Join call'))
+    await flush()
+    expect(client.joinCall).toHaveBeenCalledExactlyOnceWith({ pin: '4821' })
+    expect(tileLabels()).toEqual(['You'])
+  })
+
+  it('starts a call open by default, or locked with the PIN chosen', async () => {
+    meetings.push(new FakeMeeting(), new FakeMeeting())
+    const client = fakeClient([])
+    await render(<GadgetView view={viewOf(client)} />)
+    await click(button('Live call'))
+    await flush()
+    expect(input('PIN')).toBeNull()
+    await click(button('Start call'))
+    await flush()
+    expect(client.joinCall).toHaveBeenLastCalledWith({ startPin: null })
+
+    await click(button('Leave call'))
+    await flush()
+    await click(button('Require a PIN to join'))
+    expect(input('PIN').value).toMatch(/^\d{6}$/)
+    await type(input('PIN'), '12')
+    expect(button('Start call').disabled).toBe(true)
+    await type(input('PIN'), '2468')
+    await click(button('Start call'))
+    await flush()
+    expect(client.joinCall).toHaveBeenLastCalledWith({ startPin: '2468' })
+  })
+
+  it("shows its starter the call's PIN, and lets them turn it off", async () => {
+    meetings.push(new FakeMeeting())
+    const client = fakeClient([], { startedByYou: true, pin: '4821' })
+    await render(<GadgetView view={viewOf(client)} />)
+    await openAndJoin()
+    expect(sidebar()?.querySelector('[aria-label="PIN 4 8 2 1"]')).not.toBeNull()
+
+    await click(button('PIN to join'))
+    await flush()
+    expect(client.setCallPin).toHaveBeenCalledExactlyOnceWith(null)
+    expect(sidebar()?.textContent).toContain('Anyone who can open this gadget can join.')
+    expect(sidebar()?.querySelector('[aria-label="PIN 4 8 2 1"]')).toBeNull()
+  })
+
+  it('is resized from its edge with the keyboard, within bounds, and remembers the width', async () => {
+    await render(<GadgetView view={viewOf(fakeClient())} />)
+    await click(button('Live call'))
+    await flush()
+    const handle = () => container.querySelector('[role="separator"][aria-label="Resize live call"]')!
+    expect(sidebar()?.style.width).toBe('224px')
+
+    await press(handle(), 'ArrowLeft')
+    expect(sidebar()?.style.width).toBe('240px')
+    await press(handle(), 'Home')
+    await press(handle(), 'ArrowRight')
+    expect(sidebar()?.style.width).toBe('224px')
+    await press(handle(), 'End')
+    const widest = `${Math.round(window.innerWidth * 0.6)}px`
+    expect(sidebar()?.style.width).toBe(widest)
+
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await render(<GadgetView view={viewOf(fakeClient())} />)
+    await click(button('Live call'))
+    await flush()
+    expect(sidebar()?.style.width).toBe(widest)
   })
 
   it('shows nothing when the deployment has no live calls', async () => {

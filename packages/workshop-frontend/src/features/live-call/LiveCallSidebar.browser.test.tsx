@@ -12,7 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
 import { Toasty, TooltipProvider } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
-import type { CallRosterEntry, CallTicket, GadgetClient, ServerConfig } from '@gadgets/workshop-shared/api'
+import type { CallRosterEntry, CallStatus, CallTicket, GadgetClient, ServerConfig } from '@gadgets/workshop-shared/api'
 import { ServerConfigContext } from '../../ServerConfigContext'
 import { useLiveCallGadget, type LiveCallGadgetView } from './liveCallContext'
 import { LiveCallProvider } from './LiveCallProvider'
@@ -67,9 +67,11 @@ const fakeCamera = (hue: number) => (element: HTMLVideoElement) => {
   void element.play().catch(() => {})
 }
 
-const fakeClient = (roster: CallRosterEntry[]) => ({
+const fakeClient = (roster: CallRosterEntry[], status: Partial<CallStatus> = {}) => ({
   joinCall: async (): Promise<CallTicket> => ({ authToken: 'ticket', expiresAt: new Date(), displayName: 'Mick Davies' }),
-  getCallRoster: async () => roster,
+  getCallStatus: async (): Promise<CallStatus> =>
+    ({ roster, pinRequired: false, startedByYou: false, pin: null, ...status }),
+  setCallPin: async () => {},
 }) as unknown as RpcStub<GadgetClient>
 
 const GadgetStage = ({ view }: { view: LiveCallGadgetView }) => {
@@ -163,11 +165,12 @@ const liveCall = async (view: LiveCallGadgetView) => {
   return meeting
 }
 
-const view = (roster: CallRosterEntry[] = ROSTER): LiveCallGadgetView => ({
-  workspaceId: 'ops', gadgetId: 1, gadgetTitle: 'Claude Code', client: fakeClient(roster), onInvite: () => {},
+const view = (roster: CallRosterEntry[] = ROSTER, status: Partial<CallStatus> = {}): LiveCallGadgetView => ({
+  workspaceId: 'ops', gadgetId: 1, gadgetTitle: 'Claude Code', client: fakeClient(roster, status), onInvite: () => {},
 })
 
 beforeEach(async () => {
+  localStorage.clear()
   setMode('light')
   await page.viewport(1280, 800)
 })
@@ -210,6 +213,53 @@ it('stacks the webcams in order, you first, with the controls and Invite pinned 
   await capture('live-call-sidebar-live-light')
   setMode('dark')
   await capture('live-call-sidebar-live-dark')
+})
+
+it('shows who is live in the gadget on screen with Join, before the sidebar is opened', async () => {
+  await render(view(), [])
+  const pill = page.getByRole('region', { name: 'Live call in progress' })
+  await expect.element(pill).toBeVisible()
+  await expect.element(pill.getByText('Sam Rivera and Ann Okafor are live')).toBeVisible()
+  const box = pill.element().getBoundingClientRect()
+  expect(box.right).toBeLessThanOrEqual(window.innerWidth)
+  // Clear of the gadget's top bar, where the Live toggle is.
+  expect(box.top).toBeGreaterThanOrEqual(56)
+  await capture('live-call-presence-light')
+  setMode('dark')
+  await capture('live-call-presence-dark')
+})
+
+it('grows the webcams into columns as its edge is dragged wider, and the page gives way', async () => {
+  await liveCall(view(ROSTER, { startedByYou: true, pin: '482190' }))
+  const handle = document.querySelector<HTMLElement>('[role="separator"][aria-label="Resize live call"]')!
+  const narrow = sidebar().getBoundingClientRect().width
+  const start = handle.getBoundingClientRect()
+  const at = (clientX: number) => ({ clientX, clientY: start.top + 200, pointerId: 1, button: 0, bubbles: true })
+  act(() => {
+    handle.dispatchEvent(new PointerEvent('pointerdown', at(start.left + 4)))
+    handle.dispatchEvent(new PointerEvent('pointermove', at(start.left + 4 - 500)))
+    handle.dispatchEvent(new PointerEvent('pointerup', at(start.left + 4 - 500)))
+  })
+  await expect.poll(() => sidebar().getBoundingClientRect().width).toBeCloseTo(narrow + 500, 0)
+  // The page beside it shrinks rather than sliding under it.
+  expect(document.querySelector('.font-mono')!.getBoundingClientRect().right)
+    .toBeLessThanOrEqual(sidebar().getBoundingClientRect().left)
+
+  const tiles = [...sidebar().querySelectorAll('ul[aria-label="People in the call"] > li')]
+    .map(tile => tile.getBoundingClientRect())
+  expect(tiles[1].top).toBe(tiles[0].top)
+  expect(tiles[0].width).toBeGreaterThan(300)
+  await capture('live-call-sidebar-wide-light')
+  setMode('dark')
+  await capture('live-call-sidebar-wide-dark')
+
+  // No wider than 60% of the window, however far it is dragged.
+  act(() => {
+    handle.dispatchEvent(new PointerEvent('pointerdown', at(start.left - 496)))
+    handle.dispatchEvent(new PointerEvent('pointermove', at(0)))
+    handle.dispatchEvent(new PointerEvent('pointerup', at(0)))
+  })
+  await expect.poll(() => sidebar().getBoundingClientRect().width).toBeCloseTo(window.innerWidth * 0.6, 0)
 })
 
 it('scrolls a long call’s webcams while Invite stays in view', async () => {

@@ -3,12 +3,12 @@
 // (RealtimeKit participant tokens) to holders and revokes them -- by deleting the participant,
 // which also removes them from the live session -- whenever someone loses the gadget.
 
-import type { AiChatAuthorInfo, AffectedCollaborator, CallInvite, CallRosterEntry, CallTicket,
-    CollaboratorAccess, WorkpieceId } from "@gadgets/workshop-shared/api";
+import type { AiChatAuthorInfo, AffectedCollaborator, CallInvite, CallJoinOptions, CallRosterEntry,
+    CallStatus, CallTicket, CollaboratorAccess, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { createWorkshopLogger } from "./observability";
 import { RealtimeKitApi, type LiveParticipant } from "./realtime-kit";
 import { accessIncludesGadget } from "./sharing";
-import type { CallParticipantRecord, OverseerStorage } from "./storage-schema/overseer-storage";
+import type { CallParticipantRecord, CallStartRecord, OverseerStorage } from "./storage-schema/overseer-storage";
 
 const logger = createWorkshopLogger("workshop.live-calls");
 
@@ -21,6 +21,23 @@ export const CALL_ROSTER_CACHE_MS = 10_000;
 /** The least time between two invitations from one person to another to one gadget's call. */
 export const CALL_INVITE_INTERVAL_MS = 20_000;
 
+/**
+ * How long a call counts as started while nobody is listed in it yet: RealtimeKit lists its starter
+ * only once their connection is made, and someone joining meanwhile must not start it over.
+ */
+export const CALL_START_GRACE_MS = 60_000;
+
+/** How many wrong PINs one person may try at one gadget's call within CALL_PIN_WINDOW_MS. */
+export const CALL_PIN_ATTEMPTS = 5;
+
+/** The window CALL_PIN_ATTEMPTS counts over. */
+export const CALL_PIN_WINDOW_MS = 10 * 60 * 1000;
+
+const PIN_PATTERN = /^\d{4,6}$/;
+
+/** What joinCall() refuses with when the call needs a PIN and none was given. */
+export const CALL_PIN_NEEDED = "This call needs a PIN. Ask the person who started it.";
+
 // How long cleanup RealtimeKit keeps refusing is retried before it is abandoned (and logged as an
 // error). By then every ticket this Workshop issued for it has expired; see docs/live-calls.md.
 const CLEANUP_ABANDON_MS = 24 * 60 * 60 * 1000;
@@ -29,7 +46,7 @@ const UNAVAILABLE = "Live calls are not available: this deployment has no Realti
 
 /** What LiveCalls needs of the Overseer. */
 export type LiveCallsHost = {
-  storage: Pick<OverseerStorage, "callMeetings" | "callParticipants" | "callCleanup" | "deleting" |
+  storage: Pick<OverseerStorage, "callMeetings" | "callParticipants" | "callStarts" | "callCleanup" | "deleting" |
       "title" | "containsRestrictedData" | "gadgets">;
   ctx: {id: {toString(): string}, waitUntil(promise: Promise<unknown>): void};
   getSharingManager(): Promise<{getEffectiveAccess(profileId: string): CollaboratorAccess | undefined}>;
@@ -54,6 +71,9 @@ export class LiveCalls {
   #locks = new Map<string, Promise<unknown>>();
   // When each (inviter, invitee, gadget) invitation was last sent.
   #invitesSent = new Map<string, number>();
+  // When each person's recent wrong PINs at each gadget's call were tried, keyed as participants
+  // are. In memory: a restart forgets them, which costs at most another few tries.
+  #pinFailures = new Map<string, number[]>();
   #cleanupRetryAt = 0;
   #cleanupDrain?: Promise<void>;
   // The callCleanup keys a RealtimeKit request is in flight for, by a cleanup pass or by a join
@@ -91,8 +111,11 @@ export class LiveCalls {
    * ticket must not outlive the access that earned it, and the capability itself only dies with
    * the restart that follows a revocation, ~100ms later.
    */
-  async join(gadgetId: WorkpieceId, caller: CallCaller): Promise<CallTicket> {
+  async join(gadgetId: WorkpieceId, caller: CallCaller, options: CallJoinOptions = {}): Promise<CallTicket> {
     let api = this.#requireApi();
+    if (options.startPin != null && !PIN_PATTERN.test(options.startPin)) {
+      throw new Error("A call's PIN is 4 to 6 digits.");
+    }
     let [sharing, profile] = await Promise.all([this.host.getSharingManager(), caller.profile()]);
     let holds = () => this.#holds(sharing.getEffectiveAccess(profile.id), gadgetId);
     let refuse = () => new Error(`No such gadget: ${gadgetId}`);
@@ -106,6 +129,7 @@ export class LiveCalls {
 
     return await this.#withLock(`participant:${key}`, async () => {
       await this.#deleteOwedParticipants(api, meetingId, caller.userId);
+      await this.#admit(api, gadgetId, meetingId, caller.userId, options);
       let existing = this.host.storage.callParticipants.get(key);
       if (existing && existing.meetingId !== meetingId) {
         this.#retire([existing]);
@@ -199,20 +223,118 @@ export class LiveCalls {
     }
     let meeting = this.host.storage.callMeetings.get(gadgetId);
     if (!meeting) return [];
+    let live = await this.#live(api, gadgetId, meeting.meetingId, false);
+    return live.flatMap(({customParticipantId}) => {
+      let record = this.host.storage.callParticipants.get(participantKey(gadgetId, customParticipantId));
+      return record ? [{profileId: record.profileId, name: record.name, callParticipantId: record.userId}] : [];
+    });
+  }
+
+  // Who RealtimeKit lists in the meeting's live session: the lookup shared for
+  // CALL_ROSTER_CACHE_MS, or, when `fresh`, a lookup of its own. A fresh one isn't shared, since
+  // it is made just before the caller's own connection, which it would then hide from the roster.
+  #live(api: RealtimeKitApi, gadgetId: WorkpieceId, meetingId: string, fresh: boolean)
+      : Promise<LiveParticipant[]> {
+    if (fresh) return api.liveParticipants(meetingId);
     let cached = this.#rosters.get(gadgetId);
-    if (!cached || cached.meetingId !== meeting.meetingId || Date.now() - cached.at >= CALL_ROSTER_CACHE_MS) {
-      let live = api.liveParticipants(meeting.meetingId);
-      cached = {at: Date.now(), meetingId: meeting.meetingId, live};
+    if (!cached || cached.meetingId !== meetingId || Date.now() - cached.at >= CALL_ROSTER_CACHE_MS) {
+      let live = api.liveParticipants(meetingId);
+      cached = {at: Date.now(), meetingId, live};
       this.#rosters.set(gadgetId, cached);
       live.catch(() => {
         if (this.#rosters.get(gadgetId)?.live === live) this.#rosters.delete(gadgetId);
       });
     }
-    let live = await cached.live;
-    return live.flatMap(({customParticipantId}) => {
-      let record = this.host.storage.callParticipants.get(participantKey(gadgetId, customParticipantId));
-      return record ? [{profileId: record.profileId, name: record.name, callParticipantId: record.userId}] : [];
+    return cached.live;
+  }
+
+  /**
+   * The roster, and whether `userId` needs a PIN to join. Like the roster, it checks only that
+   * the gadget exists: the caller holds its capability, and learns a PIN only if they set it.
+   */
+  async status(gadgetId: WorkpieceId, userId: string): Promise<CallStatus> {
+    let roster = await this.roster(gadgetId);
+    let start = this.#currentStart(gadgetId, roster.length > 0);
+    let startedByYou = start?.userId === userId;
+    return {
+      roster,
+      pinRequired: start !== undefined && start.pin !== null && !startedByYou && !start.admitted.includes(userId),
+      startedByYou,
+      pin: startedByYou ? start!.pin : null,
+    };
+  }
+
+  /**
+   * Lock the call `caller` started with `pin`, or unlock it with null. Everyone in it now is
+   * admitted, so a dropped connection rejoins without the PIN.
+   */
+  async setPin(gadgetId: WorkpieceId, caller: CallCaller, pin: string | null): Promise<void> {
+    this.#requireApi();
+    if (pin !== null && !PIN_PATTERN.test(pin)) throw new Error("A call's PIN is 4 to 6 digits.");
+    let [sharing, profile] = await Promise.all([this.host.getSharingManager(), caller.profile()]);
+    let inCall = (await this.roster(gadgetId)).map(entry => entry.callParticipantId);
+    if (!this.#holds(sharing.getEffectiveAccess(profile.id), gadgetId)) {
+      throw new Error(`No such gadget: ${gadgetId}`);
+    }
+    let start = this.#currentStart(gadgetId, inCall.length > 0);
+    if (!start) throw new Error("This call has ended.");
+    if (start.userId !== caller.userId) {
+      throw new Error("Only the person who started this call can change its PIN.");
+    }
+    this.host.storage.callStarts.put({...start, pin, admitted: [...new Set([...start.admitted, ...inCall])]});
+  }
+
+  // The start of the gadget's current call session: the stored one, while its meeting is the
+  // gadget's and someone is in it (`anyoneIn`) or it was started moments ago.
+  #currentStart(gadgetId: WorkpieceId, anyoneIn: boolean): CallStartRecord | undefined {
+    let start = this.host.storage.callStarts.get(gadgetId);
+    if (!start || start.meetingId !== this.host.storage.callMeetings.get(gadgetId)?.meetingId) return undefined;
+    return anyoneIn || Date.now() - start.at < CALL_START_GRACE_MS ? start : undefined;
+  }
+
+  // Decide whether `userId` may join the call in `meetingId`, from a fresh lookup of who is in it.
+  // Nobody else in it: they start it (or resume the one they started), with the PIN they chose.
+  // Otherwise they need the starter's PIN, unless the call has none or they were admitted to it
+  // already. Serialized per gadget, so two people joining an empty call don't both start it.
+  async #admit(api: RealtimeKitApi, gadgetId: WorkpieceId, meetingId: string, userId: string,
+      options: CallJoinOptions): Promise<void> {
+    await this.#withLock(`start:${gadgetId}`, async () => {
+      let live = await this.#live(api, gadgetId, meetingId, true);
+      let othersIn = live.some(({customParticipantId: id}) =>
+          id !== userId && this.host.storage.callParticipants.get(participantKey(gadgetId, id)));
+      let stored = this.host.storage.callStarts.get(gadgetId);
+      let start = stored?.meetingId === meetingId ? stored : undefined;
+      let now = Date.now();
+      let startedByOther = start !== undefined && start.userId !== userId && now - start.at < CALL_START_GRACE_MS;
+      if (!othersIn && !startedByOther) {
+        let pin = options.startPin !== undefined ? options.startPin
+            : start?.userId === userId ? start.pin : null;
+        this.host.storage.callStarts.put({gadgetId, meetingId, userId, at: now, pin, admitted: [userId]});
+        return;
+      }
+      // A call started before PINs existed has no record, and is open.
+      if (!start || start.admitted.includes(userId)) return;
+      if (start.pin !== null && start.userId !== userId) this.#checkPin(gadgetId, userId, start.pin, options.pin);
+      this.host.storage.callStarts.put({...start, admitted: [...start.admitted, userId]});
     });
+  }
+
+  #checkPin(gadgetId: WorkpieceId, userId: string, pin: string, given: string | undefined): void {
+    let key = participantKey(gadgetId, userId);
+    let now = Date.now();
+    for (let [other, times] of this.#pinFailures) {
+      if (times.every(at => now - at >= CALL_PIN_WINDOW_MS)) this.#pinFailures.delete(other);
+    }
+    let failures = this.#pinFailures.get(key) ?? [];
+    if (failures.length >= CALL_PIN_ATTEMPTS) {
+      throw new Error("Too many wrong PINs for this call. Try again in a few minutes.");
+    }
+    if (given === undefined) throw new Error(CALL_PIN_NEEDED);
+    if (!samePin(given, pin)) {
+      this.#pinFailures.set(key, [...failures, now]);
+      throw new Error("That PIN isn't right.");
+    }
+    this.#pinFailures.delete(key);
   }
 
   /**
@@ -283,6 +405,7 @@ export class LiveCalls {
     let participants = Array.from(this.host.storage.callParticipants.list({prefix: `${gadgetId}:`}));
     if (!meeting && !participants.length) return;
     this.host.storage.callMeetings.delete(gadgetId);
+    this.host.storage.callStarts.delete(gadgetId);
     this.#retire(participants);
     if (meeting) this.#journal([{meetingId: meeting.meetingId}]);
   }
@@ -292,7 +415,10 @@ export class LiveCalls {
     let meetings = Array.from(this.host.storage.callMeetings.list());
     let participants = Array.from(this.host.storage.callParticipants.list());
     if (!meetings.length && !participants.length) return;
-    for (let meeting of meetings) this.host.storage.callMeetings.delete(meeting.gadgetId);
+    for (let meeting of meetings) {
+      this.host.storage.callMeetings.delete(meeting.gadgetId);
+      this.host.storage.callStarts.delete(meeting.gadgetId);
+    }
     this.#retire(participants);
     this.#journal(meetings.map(({meetingId}) => ({meetingId})));
   }
@@ -409,4 +535,14 @@ export class LiveCalls {
 
 function participantKey(gadgetId: WorkpieceId, userId: string): string {
   return `${gadgetId}:${userId}`;
+}
+
+// Compares two PINs without stopping at the first difference.
+function samePin(given: string, pin: string): boolean {
+  let a = new TextEncoder().encode(given);
+  let b = new TextEncoder().encode(pin);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }

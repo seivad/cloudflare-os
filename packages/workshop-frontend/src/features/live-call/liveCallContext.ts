@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef } from 'react'
 import type { RpcStub } from 'capnweb'
-import type { GadgetClient, WorkpieceId } from '@gadgets/workshop-shared/api'
+import type { CallJoinOptions, GadgetClient, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CallSession } from './callSession'
 
 /** Which gadget's call: one gadget of one workspace. */
@@ -53,8 +53,11 @@ export type LiveCallState = {
 export type LiveCallActions = {
   /** Lends the provider a gadget view's capability until the returned function is called. */
   registerGadget: (gadget: LiveCallGadget) => () => void
-  /** Joins `gadget`'s call, leaving any other first; does nothing if already in or joining it. */
-  join: (gadget: LiveCallGadget) => void
+  /**
+   * Joins `gadget`'s call, leaving any other first; does nothing if already in or joining it.
+   * `options` carry the PIN to start it with, or to get into one someone else locked.
+   */
+  join: (gadget: LiveCallGadget, options?: CallJoinOptions) => void
   leave: () => void
   setPanelOpen: (open: boolean) => void
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
+import type { CallJoinOptions } from '@gadgets/workshop-shared/api'
 import { useServerConfig } from '../../ServerConfigContext'
 import { openRealtimeKitMeeting, type CallLeaveReason, type CallMeeting, type OpenCallMeeting } from './callMeeting'
 import { CallSession } from './callSession'
@@ -57,11 +58,13 @@ export const LiveCallProvider = ({
 
   // Everything below reads only refs and stable setters, so it is built once.
   const actions = useMemo<LiveCallActions>(() => {
-    const connect = async (gadget: LiveCallGadget, call: LiveCallInfo, run: number) => {
+    // A reconnect passes no options: it was admitted already, and the server lets it back in
+    // without the PIN, keeping the PIN of a call it started.
+    const connect = async (gadget: LiveCallGadget, call: LiveCallInfo, run: number, options?: CallJoinOptions) => {
       const stale = () => run !== generation.current
       let session: CallSession | null = null
       try {
-        const { authToken } = await gadget.client.joinCall()
+        const { authToken } = await gadget.client.joinCall(options)
         if (stale()) return
         let meeting: CallMeeting
         let mediaFailed = false
@@ -140,7 +143,7 @@ export const LiveCallProvider = ({
         }
       },
 
-      join: gadget => {
+      join: (gadget, options) => {
         const current = statusRef.current
         if ((current.phase === 'joining' || current.phase === 'live') && isSameCall(current.call, gadget)) {
           return
@@ -158,7 +161,7 @@ export const LiveCallProvider = ({
         void (async () => {
           // One camera at a time: the old call lets go of it before the new one asks.
           if (current.phase === 'live') await current.session.leave()
-          if (run === generation.current) await connect(gadget, call, run)
+          if (run === generation.current) await connect(gadget, call, run, options)
         })()
       },
 

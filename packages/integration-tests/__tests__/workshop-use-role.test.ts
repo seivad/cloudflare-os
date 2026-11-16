@@ -162,7 +162,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
 
 const deniedGadget = (chatId: number): Record<
     // A use collaborator holds the gadget, which admits them to its live call.
-    Exclude<keyof GadgetClient, keyof RpcTarget | "getId" | "getTitle" | "joinCall" | "getCallRoster">,
+    Exclude<keyof GadgetClient, keyof RpcTarget | "getId" | "getTitle" | "joinCall" | "getCallRoster" |
+        "getCallStatus" | "setCallPin">,
     (gadget: RpcStub<GadgetClient>) => unknown> => ({
   setTitle: g => g.setTitle("Title"),
   remove: g => g.remove(),
