@@ -26,6 +26,8 @@ const MODELS_DEV_PROVIDER_IDS: Record<AiModelProvider, string | null> = {
   ollama: null,
   // No model can be added under it: Auto Router is the gateway's one model of its own.
   'cloudflare-auto-router': null,
+  openrouter: 'openrouter',
+  'aws-bedrock': 'amazon-bedrock',
 }
 
 // The longest ID or name the server accepts for an added model.

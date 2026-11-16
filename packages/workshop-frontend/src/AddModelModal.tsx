@@ -42,12 +42,15 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   ollama: '(optional)',
   // Never shown: Auto Router's one model is the deployment's (see AiGatewayInfo.enabledProviders).
   'cloudflare-auto-router': '',
+  openrouter: 'sk-or-...',
+  // Never shown: a Bedrock model runs only through a gateway, which holds its AWS credentials.
+  'aws-bedrock': '',
 }
 
 // Providers whose client can send no API key at all, so a proxy that extra headers authenticate
 // can supply its own (AI Gateway only injects a stored key into requests that carry none). Google's
 // SDK always sends a key, and the Workers AI endpoint can't be redirected to a proxy.
-const TOKEN_OPTIONAL_WITH_HEADERS: ReadonlySet<AiModelProvider> = new Set(['anthropic', 'openai'])
+const TOKEN_OPTIONAL_WITH_HEADERS: ReadonlySet<AiModelProvider> = new Set(['anthropic', 'openai', 'openrouter'])
 
 const isTokenRequired = (provider: AiModelProvider, headerRows: readonly HeaderRow[]) =>
   provider !== 'ollama' &&
@@ -88,6 +91,8 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
   for (const provider of providerOrder) {
     // Auto Router's one model is the deployment's; it runs only through a gateway.
     if (provider === 'cloudflare-auto-router') continue
+    // A Bedrock model's AWS credentials are the gateway's to hold, so it is a gateway's alone.
+    if (provider === 'aws-bedrock' && !gatewayMode) continue
     if (enabledProviders && !enabledProviders.has(provider)) continue
 
     // In gateway mode, suggested models are already built-in, so don't list them.
