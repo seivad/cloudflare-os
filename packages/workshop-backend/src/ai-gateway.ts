@@ -239,27 +239,39 @@ export async function checkGatewayKeys(gateway: AiGatewayConfig,
   return (await Promise.race([pending, waited])) ?? new Set();
 }
 
+/**
+ * A GET of `path` under `gateway`'s root for `provider`, over the Workers AI binding where the
+ * provider rides it and otherwise over HTTPS with the gateway's token, for a read that sends no
+ * prompt (a key check, a model list). The gateway's stored key for the provider applies, and the
+ * request is not logged as inference.
+ */
+export function gatewayProviderGet(gateway: AiGatewayConfig, provider: string, path: string,
+                                   headers: Record<string, string>, signal: AbortSignal)
+    : Promise<Response> {
+  let binding = gateway.bindingFor(provider);
+  let root = binding
+      ? `https://workers-binding.ai/ai-gateway/gateways/${gateway.gateway}`
+      : `https://gateway.ai.cloudflare.com/v1/${gateway.accountId}/${gateway.gateway}`;
+  let init: RequestInit = {
+    headers: {
+      ...headers,
+      ...(binding ? {} : { "cf-aig-authorization": `Bearer ${gateway.apiToken}` }),
+      "cf-aig-collect-log": "false",
+    },
+    signal,
+  };
+  return binding
+      ? (binding as unknown as { fetch: typeof fetch }).fetch(`${root}/${path}`, init)
+      : fetch(`${root}/${path}`, init);
+}
+
 /** One key check of `gateway`, each provider's failure keeping what `last` found. */
 async function askGatewayKeys(gateway: AiGatewayConfig,
                               last: ReadonlySet<string> | undefined): Promise<ReadonlySet<string>> {
   let results = await Promise.all(Object.entries(KEY_CHECKS).map(async ([provider, check]) => {
-    let binding = gateway.bindingFor(provider);
-    let root = binding
-        ? `https://workers-binding.ai/ai-gateway/gateways/${gateway.gateway}`
-        : `https://gateway.ai.cloudflare.com/v1/${gateway.accountId}/${gateway.gateway}`;
-    let init: RequestInit = {
-      headers: {
-        ...check.headers,
-        ...(binding ? {} : { "cf-aig-authorization": `Bearer ${gateway.apiToken}` }),
-        // Not this request's to be logged as inference.
-        "cf-aig-collect-log": "false",
-      },
-      signal: AbortSignal.timeout(KEY_CHECK_TIMEOUT_MS),
-    };
     try {
-      let response = binding
-          ? await (binding as unknown as { fetch: typeof fetch }).fetch(`${root}/${check.path}`, init)
-          : await fetch(`${root}/${check.path}`, init);
+      let response = await gatewayProviderGet(gateway, provider, check.path, check.headers ?? {},
+          AbortSignal.timeout(KEY_CHECK_TIMEOUT_MS));
       await response.body?.cancel();
       if (response.ok) return [provider, true] as const;
       if (response.status === 401 || response.status === 403) return [provider, false] as const;

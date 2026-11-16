@@ -726,7 +726,7 @@ describe("GatewayModels", () => {
       expect(keyed.keyedByGateway("openrouter")).toBe(true);
       expect(keyed.keyedByGateway("anthropic")).toBe(false);
       expect(keyed.addableProviders).toContain("openrouter");
-      expect(keyed.get("z-ai/glm-5.3")?.provider).toBe("openrouter");
+      expect(keyed.get("moonshotai/kimi-k3.1-pro")?.provider).toBe("openrouter");
     });
 
     it("reports a provider whose requests need a token the deployment lacks", () => {

@@ -81,7 +81,17 @@ on the Gateway's unified Chat Completions route (Claude and Amazon Nova models t
 reasoning levels); the Gateway has no request that tells whether it holds them, so Bedrock is on
 only when `CF_AI_GATEWAY_PROVIDERS` lists it or an admin turns it on. Its suggested models are
 Bedrock's global cross-region inference profiles; a regional one (`us.`, `eu.`, `au.`) can be added
-under it. Each model is **Enabled**, **Hidden** (out of the model pickers, still
+under it.
+
+Adding a model starts from the provider's own list: the **Model ID** field on the Models tab, and in
+a user's **Add AI Model** dialog while users may add their own models, searches the models the
+provider lists through the Gateway as it is typed into (OpenRouter's, Anthropic's and OpenAI's
+lists, read with the Gateway's stored key; Workers AI's catalog), each with its price per million
+tokens, context window and, for Workers AI, its rate. A pick fills in the model's ID, name and
+limits. Only models that call tools and answer in text are listed, each list is read at most every
+ten minutes, and no prompt is sent. A provider whose key the Gateway lacks says so, and the admin's
+models.dev suggestions, where they are on, stand in for a list that can't be read. Bedrock has no
+list behind the Gateway, so its suggested models are offered. Each model is **Enabled**, **Hidden** (out of the model pickers, still
 works where it is already in use) or **Disabled** (stops working everywhere, including existing
 chats, gadget model bindings and scheduled tasks). The tab also sets reasoning levels and
 compaction budgets, adds models the catalog doesn't list, and tests a provider or a model with
