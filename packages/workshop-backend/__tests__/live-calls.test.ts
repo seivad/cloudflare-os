@@ -22,7 +22,7 @@ import type { OverseerDurableObject } from "../src/overseer.js";
 import type { UserDurableObject } from "../src/user.js";
 import { makeUserStorage } from "../src/storage-schema/user-storage.js";
 import { OVERSEER_STORAGE_VERSION } from "../src/storage-schema/overseer-migrations.js";
-import { CALL_TICKET_TTL_MS, LiveCalls } from "../src/live-calls.js";
+import { CALL_PIN_ATTEMPTS, CALL_PIN_NEEDED, CALL_TICKET_TTL_MS, LiveCalls } from "../src/live-calls.js";
 import { LIVE_CALL_PRESET, RealtimeKitApi, realtimeKitConfig } from "../src/realtime-kit.js";
 import { getServerConfig } from "../src/deployment-config.js";
 
@@ -385,6 +385,117 @@ describe("getCallRoster across a long session", () => {
       expect((await (await gadget(session, 100)).getCallRoster()).map(e => e.name)).toEqual(["Owner"]);
     });
     expect(fixture.rtk.requests.filter(r => r.startsWith("GET /sessions/"))).toHaveLength(3);
+  });
+});
+
+describe("PINs", () => {
+  // The owner starts gadget 100's call locked with `pin`, and connects.
+  async function lockedCall(pin: string | null = "4821") {
+    let fixture = await setup();
+    let viewer = await collaborator(fixture, "Viewer", {gadgetId: 100});
+    let builder = await collaborator(fixture, "Builder", "workspace");
+    let ticket = await asOwner(fixture, async s => (await gadget(s, 100)).joinCall({startPin: pin}));
+    fixture.rtk.enter(ticket.authToken);
+    return {...fixture, viewer, builder};
+  }
+  type Locked = Awaited<ReturnType<typeof lockedCall>>;
+  const asViewer = <T>(f: Locked, fn: (g: GadgetClient) => Promise<T>) =>
+    asUser(f, f.viewer.user, f.viewer.profile, async s => fn(await gadget(s, 100)));
+  const asStarter = <T>(f: Locked, fn: (g: GadgetClient) => Promise<T>) =>
+    asOwner(f, async s => fn(await gadget(s, 100)));
+
+  it("admits others to a locked call only with its PIN, telling the PIN only to its starter", async () => {
+    let f = await lockedCall();
+    expect(await asStarter(f, g => g.getCallStatus())).toMatchObject({pinRequired: false, startedByYou: true, pin: "4821"});
+    expect(await asViewer(f, g => g.getCallStatus())).toMatchObject({pinRequired: true, startedByYou: false, pin: null});
+
+    await expect(asViewer(f, g => g.joinCall())).rejects.toThrow(CALL_PIN_NEEDED);
+    await expect(asViewer(f, g => g.joinCall({pin: "1111"}))).rejects.toThrow("That PIN isn't right.");
+    let ticket = await asViewer(f, g => g.joinCall({pin: "4821"}));
+    expect(ticket.displayName).toBe("Viewer");
+
+    // Admitted once, they rejoin without it, as a dropped connection does.
+    await expect(asViewer(f, g => g.joinCall())).resolves.toMatchObject({displayName: "Viewer"});
+    expect(await asViewer(f, g => g.getCallStatus())).toMatchObject({pinRequired: false, pin: null});
+  });
+
+  it("lets anyone holding the gadget join an unlocked call", async () => {
+    let f = await lockedCall(null);
+    expect(await asViewer(f, g => g.getCallStatus())).toMatchObject({pinRequired: false});
+    await expect(asViewer(f, g => g.joinCall())).resolves.toMatchObject({displayName: "Viewer"});
+  });
+
+  it("refuses further tries after too many wrong PINs, even the right one", async () => {
+    let f = await lockedCall();
+    for (let i = 0; i < CALL_PIN_ATTEMPTS; i++) {
+      await expect(asViewer(f, g => g.joinCall({pin: "0000"}))).rejects.toThrow("That PIN isn't right.");
+    }
+    await expect(asViewer(f, g => g.joinCall({pin: "4821"}))).rejects.toThrow("Too many wrong PINs");
+    // Counted per person: someone else still gets in.
+    await expect(asUser(f, f.builder.user, f.builder.profile, async s =>
+      (await gadget(s, 100)).joinCall({pin: "4821"}))).resolves.toMatchObject({displayName: "Builder"});
+  });
+
+  it("refuses a malformed PIN to start a call with", async () => {
+    let fixture = await setup();
+    await asOwner(fixture, async s => {
+      await expect((await gadget(s, 100)).joinCall({startPin: "12"})).rejects.toThrow("4 to 6 digits");
+      await expect((await gadget(s, 100)).joinCall({startPin: "12345a"})).rejects.toThrow("4 to 6 digits");
+    });
+    expect(fixture.rtk.participants.size).toBe(0);
+  });
+
+  it("lets only the starter change the PIN, keeping everyone already in admitted", async () => {
+    let f = await lockedCall(null);
+    let viewerTicket = await asViewer(f, g => g.joinCall());
+    f.rtk.enter(viewerTicket.authToken);
+
+    await expect(asViewer(f, g => g.setCallPin("9999"))).rejects.toThrow("Only the person who started");
+    await expect(asStarter(f, g => g.setCallPin("99"))).rejects.toThrow("4 to 6 digits");
+    await asStarter(f, g => g.setCallPin("9999"));
+
+    expect(await asStarter(f, g => g.getCallStatus())).toMatchObject({pin: "9999"});
+    // The viewer was in when it was locked, so stays admitted; the builder now needs the PIN.
+    await expect(asViewer(f, g => g.joinCall())).resolves.toMatchObject({displayName: "Viewer"});
+    let asBuilder = <T>(fn: (g: GadgetClient) => Promise<T>) =>
+      asUser(f, f.builder.user, f.builder.profile, async s => fn(await gadget(s, 100)));
+    await expect(asBuilder(g => g.joinCall())).rejects.toThrow(CALL_PIN_NEEDED);
+
+    await asStarter(f, g => g.setCallPin(null));
+    await expect(asBuilder(g => g.joinCall())).resolves.toMatchObject({displayName: "Builder"});
+  });
+
+  it("doesn't let someone joining moments after the starter start the call over", async () => {
+    let fixture = await setup();
+    let viewer = await collaborator(fixture, "Viewer", {gadgetId: 100});
+    // The starter has a ticket but isn't connected yet, so RealtimeKit lists nobody.
+    await asOwner(fixture, async s => (await gadget(s, 100)).joinCall({startPin: "4821"}));
+    await asUser(fixture, viewer.user, viewer.profile, async s => {
+      await expect((await gadget(s, 100)).joinCall({startPin: null})).rejects.toThrow(CALL_PIN_NEEDED);
+    });
+  });
+
+  it("starts afresh once everyone has left: the next person decides the PIN", async () => {
+    let f = await lockedCall();
+    let meetingId = [...f.rtk.meetings.keys()][0];
+    f.rtk.live.set(meetingId, []);
+    await withImpl(f.workspace, async impl => {
+      let start = impl.storage.callStarts.get(100)!;
+      impl.storage.callStarts.put({...start, at: 0});
+    });
+
+    expect(await asViewer(f, g => g.getCallStatus())).toMatchObject({pinRequired: false, startedByYou: false});
+    await asViewer(f, g => g.joinCall({startPin: null}));
+    expect(await asViewer(f, g => g.getCallStatus())).toMatchObject({startedByYou: true, pin: null});
+    expect(await asStarter(f, g => g.getCallStatus())).toMatchObject({startedByYou: false, pinRequired: false});
+  });
+
+  it("forgets who started a deleted gadget's call", async () => {
+    let f = await lockedCall();
+    await withImpl(f.workspace, async impl => {
+      impl.liveCalls.forgetGadget(100);
+      expect(impl.storage.callStarts.get(100)).toBeUndefined();
+    });
   });
 });
 

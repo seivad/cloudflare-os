@@ -39,5 +39,9 @@ export type OpenCallMeeting =
 /** Loads the RealtimeKit SDK on first use and initialises a meeting with it. */
 export const openRealtimeKitMeeting: OpenCallMeeting = async ({ authToken, audio, video }) => {
   const { default: RealtimeKit } = await import('@cloudflare/realtimekit')
-  return RealtimeKit.init({ authToken, defaults: { audio, video } })
+  // Without `experimentalAudioPlayback` the Core SDK plays nobody's audio: that is left to the UI
+  // Kit's <rtk-participants-audio>, which this app doesn't use, so calls were silent. With it, the
+  // SDK plays every remote microphone through one audio element of its own, and reports a refused
+  // autoplay as `autoplayError`, which CallSession turns into "Click to enable sound".
+  return RealtimeKit.init({ authToken, defaults: { audio, video }, modules: { experimentalAudioPlayback: true } })
 }

@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { Loader } from '@cloudflare/kumo'
+import { Input, Loader, Switch } from '@cloudflare/kumo'
 import {
   ArrowLeft,
   Microphone,
@@ -14,11 +14,13 @@ import {
   WarningCircle,
   X,
 } from '@phosphor-icons/react'
-import type { CallRosterEntry } from '@gadgets/workshop-shared/api'
+import type { CallJoinOptions, CallStatus } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { PersonAvatar } from '../../components/PersonAvatar'
 import { WorkshopButton, WorkshopIconButton } from '../../components/WorkshopControls'
+import { isCallPin, pinDigits, randomCallPin } from './callPin'
 import type { CallSnapshot } from './callSession'
+import { LiveCallPinControl } from './LiveCallPinControl'
 import { LiveCallTile } from './LiveCallTile'
 import {
   isSameCall,
@@ -28,21 +30,8 @@ import {
   type LiveCallStatus,
   type LiveCallTarget,
 } from './liveCallContext'
+import { rosterSummary } from './rosterSummary'
 import { useCallSnapshot } from './useCallSnapshot'
-
-const NAME_LIST = new Intl.ListFormat('en', { type: 'conjunction' })
-
-// "No one is live yet", "Sam is live", "You and Sam are live", "Ann, Bo and 3 others are live".
-const rosterSummary = (roster: CallRosterEntry[], currentUserId: string | null): string => {
-  if (roster.length === 0) return 'No one is live yet'
-  const names = roster
-    .toSorted((a, b) => Number(b.profileId === currentUserId) - Number(a.profileId === currentUserId))
-    .map(entry => entry.profileId === currentUserId ? 'You' : entry.name)
-  const listed = names.length <= 3
-    ? NAME_LIST.format(names)
-    : `${names.slice(0, 2).join(', ')} and ${names.length - 2} others`
-  return `${listed} ${names.length === 1 && names[0] !== 'You' ? 'is' : 'are'} live`
-}
 
 // What to tell someone whose camera or microphone isn’t reaching the call, if anything.
 const mediaHint = ({ audio, video }: CallSnapshot['media']): string | null => {
@@ -135,14 +124,52 @@ const InviteFooterAction = ({ call, viewed }: { call: LiveCallInfo; viewed: Live
   )
 }
 
-const IdleContent = ({ viewed, roster, failure }: {
+// A PIN typed into a field: digits only, entered with Enter.
+const PinInput = ({ label, description, value, onValueChange, onEnter }: {
+  label: string
+  description: string
+  value: string
+  onValueChange: (pin: string) => void
+  onEnter: () => void
+}) => (
+  <Input
+    size="sm"
+    className="w-full font-mono tracking-[0.2em] tabular-nums"
+    label={label}
+    description={description}
+    value={value}
+    inputMode="numeric"
+    autoComplete="off"
+    passwordManagerIgnore
+    maxLength={6}
+    onChange={event => onValueChange(pinDigits(event.target.value))}
+    onKeyDown={event => {
+      if (event.key === 'Enter') onEnter()
+    }}
+  />
+)
+
+const IdleContent = ({ viewed, callStatus, failure }: {
   viewed: LiveCallGadget
-  roster: CallRosterEntry[] | null
+  callStatus: CallStatus | null
   failure: string | null
 }) => {
   const actions = useLiveCallActions()
   const { authenticatedApi, currentUser } = useAuthenticatedApi()
+  const [locking, setLocking] = useState(false)
+  const [startPin, setStartPin] = useState(randomCallPin)
+  const [pin, setPin] = useState('')
   const { invite } = viewed
+  const roster = callStatus?.roster ?? null
+  const live = roster !== null && roster.length > 0
+  const pinRequired = live && callStatus?.pinRequired === true
+  // Joining a call someone is in, or starting one; only the starter chooses a PIN.
+  const join: { label: string; options: CallJoinOptions; ready: boolean } = live
+    ? { label: 'Join call', options: pinRequired ? { pin } : {}, ready: !pinRequired || isCallPin(pin) }
+    : { label: 'Start call', options: { startPin: locking ? startPin : null }, ready: !locking || isCallPin(startPin) }
+  const submit = () => {
+    if (join.ready) actions?.join(viewed, join.options)
+  }
   return (
     <>
       <Header
@@ -167,6 +194,29 @@ const IdleContent = ({ viewed, roster, failure }: {
             ))}
           </ul>
         )}
+        {pinRequired && (
+          <PinInput
+            label="Call PIN"
+            description="This call is locked. Ask the person who started it for its PIN."
+            value={pin}
+            onValueChange={setPin}
+            onEnter={submit}
+          />
+        )}
+        {roster !== null && !live && (
+          <div className="space-y-2 rounded-xl border border-kumo-line px-2.5 py-2">
+            <Switch size="sm" label="Require a PIN to join" checked={locking} onCheckedChange={setLocking} />
+            {locking && (
+              <PinInput
+                label="PIN"
+                description="4 to 6 digits. You’ll see it during the call, to give to the people you want in."
+                value={startPin}
+                onValueChange={setStartPin}
+                onEnter={submit}
+              />
+            )}
+          </div>
+        )}
         {failure !== null && (
           <Notice tone="danger">
             <p className="font-medium">Couldn’t join the live call.</p>
@@ -175,8 +225,8 @@ const IdleContent = ({ viewed, roster, failure }: {
         )}
       </div>
       <div className="shrink-0 space-y-2 border-t border-kumo-line p-3">
-        <WorkshopButton tone="primary" className="w-full gap-1.5" onClick={() => actions?.join(viewed)}>
-          <VideoCamera size={15} weight="fill" /> {roster?.length ? 'Join call' : 'Start call'}
+        <WorkshopButton tone="primary" className="w-full gap-1.5" disabled={!join.ready} onClick={submit}>
+          <VideoCamera size={15} weight="fill" /> {join.label}
         </WorkshopButton>
         {invite && (
           <WorkshopButton tone="secondary" className="w-full gap-1.5" onClick={() => invite()}>
@@ -250,10 +300,11 @@ const InterruptedContent = ({ call, viewed }: { call: LiveCallInfo; viewed: Live
   )
 }
 
-const LiveContent = ({ status, viewed, roster }: {
+const LiveContent = ({ status, viewed, callStatus, onCallStatusChange }: {
   status: Extract<LiveCallStatus, { phase: 'live' }>
   viewed: LiveCallGadget | null
-  roster: CallRosterEntry[] | null
+  callStatus: CallStatus | null
+  onCallStatusChange: () => void
 }) => {
   const actions = useLiveCallActions()
   const { authenticatedApi, currentUser } = useAuthenticatedApi()
@@ -263,8 +314,9 @@ const LiveContent = ({ status, viewed, roster }: {
   const viewingCall = viewed !== null && isSameCall(viewed, call)
   const switchTo = viewed !== null && !viewingCall ? viewed : null
   const hint = mediaHint(snapshot.media)
-  const profiles = new Map(roster?.map(entry => [entry.callParticipantId, entry.profileId]))
+  const profiles = new Map(callStatus?.roster.map(entry => [entry.callParticipantId, entry.profileId]))
   const self = snapshot.tiles[0]
+  const viewedClient = viewingCall && viewed ? viewed.client : null
 
   return (
     <>
@@ -299,7 +351,17 @@ const LiveContent = ({ status, viewed, roster }: {
             <SpeakerHigh size={14} /> Click to enable sound
           </WorkshopButton>
         )}
-        <ul aria-label="People in the call" className="flex flex-col gap-2">
+        {callStatus?.startedByYou && (
+          <LiveCallPinControl
+            pin={callStatus.pin}
+            onPinChange={viewedClient && (async pin => {
+              await viewedClient.setCallPin(pin)
+              onCallStatusChange()
+            })}
+          />
+        )}
+        {/* As the sidebar widens, the tiles grow and then wrap into columns. */}
+        <ul aria-label="People in the call" className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-2">
           {snapshot.tiles.map(tile => (
             <LiveCallTile
               key={tile.id}
@@ -346,23 +408,26 @@ const LiveContent = ({ status, viewed, roster }: {
  * The sidebar's content for whatever phase the call is in: who's live and Join when idle, then
  * the webcams with the local controls and Invite pinned at the bottom.
  */
-export const LiveCallPanel = ({ status, viewed, roster }: {
+export const LiveCallPanel = ({ status, viewed, callStatus, onCallStatusChange }: {
   status: LiveCallStatus
   /** The gadget view on screen; required while idle, since the idle panel is about it. */
   viewed: LiveCallGadget | null
-  roster: CallRosterEntry[] | null
+  /** Who is in the call and whether it needs a PIN, or null until known. */
+  callStatus: CallStatus | null
+  /** Asks for the call's status again, as after its PIN changed. */
+  onCallStatusChange: () => void
 }) => {
   switch (status.phase) {
     case 'idle': {
       if (!viewed) return null
       const failure = status.failure && isSameCall(status.failure.target, viewed) ? status.failure.message : null
-      return <IdleContent viewed={viewed} roster={roster} failure={failure} />
+      return <IdleContent viewed={viewed} callStatus={callStatus} failure={failure} />
     }
     case 'joining':
       return <JoiningContent call={status.call} />
     case 'interrupted':
       return <InterruptedContent call={status.call} viewed={viewed} />
     case 'live':
-      return <LiveContent status={status} viewed={viewed} roster={roster} />
+      return <LiveContent status={status} viewed={viewed} callStatus={callStatus} onCallStatusChange={onCallStatusChange} />
   }
 }

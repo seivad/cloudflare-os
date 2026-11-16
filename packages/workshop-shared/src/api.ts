@@ -6687,14 +6687,31 @@ export interface GadgetClient extends WorkpieceClient {
    * Get a ticket to join this gadget's live call, creating the call on its first join. Holding
    * this gadget is what authorizes it, so a "use" collaborator may call it too, and the caller's
    * access is checked again before the ticket is issued. Each call issues a fresh ticket.
+   *
+   * Whoever joins a call nobody else is in starts it, and may lock it with a PIN
+   * (`options.startPin`). Joining a call someone else locked needs that PIN (`options.pin`), unless
+   * the caller was already admitted to it; a few wrong PINs refuse further tries for a while.
    */
-  joinCall(): Promise<CallTicket>;
+  joinCall(options?: CallJoinOptions): Promise<CallTicket>;
 
   /**
    * Who is in this gadget's live call right now, in the order they joined. Refreshed at most every
    * few seconds, so it can briefly lag someone joining or leaving.
    */
   getCallRoster(): Promise<CallRosterEntry[]>;
+
+  /**
+   * The roster (as getCallRoster() lists it), and whether joining needs a PIN. Only the person who
+   * started the call is told its PIN, so they can pass it on.
+   */
+  getCallStatus(): Promise<CallStatus>;
+
+  /**
+   * Lock the live call the caller started with `pin` (4 to 6 digits), or unlock it with null.
+   * Everyone in the call stays in, and may rejoin without the PIN. Refused to anyone but the
+   * person who started the call, and once it has ended.
+   */
+  setCallPin(pin: string | null): Promise<void>;
 
   /**
    * Invite `profileId` to this gadget's live call: their open tabs are told at once (see
@@ -6705,6 +6722,34 @@ export interface GadgetClient extends WorkpieceClient {
    */
   inviteToCall(profileId: string): Promise<void>;
 }
+
+/** How the caller joins a gadget's live call, passed to GadgetClient.joinCall(). */
+export type CallJoinOptions = {
+  /** The PIN of a call someone else started and locked. */
+  pin?: string;
+
+  /**
+   * When the caller is starting the call (nobody else is in it): the PIN to lock it with, 4 to 6
+   * digits, or null for none. Absent keeps the PIN of a call the caller started and is rejoining.
+   * Ignored when someone else is already in the call.
+   */
+  startPin?: string | null;
+};
+
+/** A gadget's live call as GadgetClient.getCallStatus() reports it to the caller. */
+export type CallStatus = {
+  /** Who is in the call, in the order they joined, as GadgetClient.getCallRoster() lists them. */
+  roster: CallRosterEntry[];
+
+  /** Whether the caller needs a PIN to join (CallJoinOptions.pin). */
+  pinRequired: boolean;
+
+  /** Whether the caller started the call, and so may change its PIN (GadgetClient.setCallPin()). */
+  startedByYou: boolean;
+
+  /** The call's PIN, told only to the person who started it; null for anyone else or none. */
+  pin: string | null;
+};
 
 /** A ticket to join a gadget's live call, returned by GadgetClient.joinCall(). */
 export type CallTicket = {

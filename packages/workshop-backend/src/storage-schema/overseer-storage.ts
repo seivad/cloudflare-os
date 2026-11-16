@@ -1343,6 +1343,24 @@ export type CallParticipantRecord = {
   name: string;
 };
 
+/**
+ * Who started the current session of a gadget's live call, and the PIN they locked it with, if
+ * any (see live-calls.ts). Replaced by the next person to join once nobody is in the call.
+ */
+export type CallStartRecord = {
+  gadgetId: WorkpieceId;
+  /** The meeting it was started in; a record for an earlier meeting of the gadget counts for none. */
+  meetingId: string;
+  /** The starter's User DO ID: only they are told the PIN, and only they may change it. */
+  userId: string;
+  /** When it was started (ms since the epoch). */
+  at: number;
+  /** 4 to 6 digits that admit anyone else, or null when the call is open to whoever holds the gadget. */
+  pin: string | null;
+  /** The User DO IDs already admitted to this session, who rejoin without the PIN. */
+  admitted: string[];
+};
+
 // =======================================================================================
 // Schema
 
@@ -1484,6 +1502,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           byProfile(record: CallParticipantRecord) { return record.profileId; },
         },
       }),
+      // Who started each gadget's call session and its PIN, if they locked it.
+      callStarts: collection<CallStartRecord>()({primaryKey: "gadgetId"}),
       // RealtimeKit cleanup still owed: a participant to delete, which revokes every ticket it was
       // issued and removes it from the call, or else a meeting to close for good. Written in the
       // same synchronous step as the change that calls for it, so it survives the restart a
