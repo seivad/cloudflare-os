@@ -19,7 +19,8 @@ const QUICK_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
  * Ollama has none, so a model added under it could never run.
  */
 const GATEWAY_PROVIDERS: ReadonlySet<string> = new Set<AiModelProvider>([
-  "anthropic", "openai", "google", "cloudflare", "cloudflare-auto-router",
+  "anthropic", "openai", "google", "cloudflare", "cloudflare-auto-router", "openrouter",
+  "aws-bedrock",
 ]);
 
 /** The providers a model may be added under: the gateway's, less Auto Router's, which has one. */
@@ -165,6 +166,77 @@ export class AiGatewayConfig {
 }
 
 /**
+ * How the gateway is asked whether it holds a provider's key: a request that reads nothing of the
+ * account's and sends no prompt, which the provider answers only with a key. OpenRouter's model
+ * list answers without one, so its key's own endpoint is asked. Bedrock has none of these behind
+ * the gateway, and Google rides HTTPS only (see HTTPS_ONLY_PROVIDERS), so neither is checked: an
+ * admin or the environment turns them on.
+ */
+const KEY_CHECKS: Partial<Record<AiModelProvider, { path: string; headers?: Record<string, string> }>> = {
+  openai: { path: "openai/models" },
+  anthropic: { path: "anthropic/v1/models?limit=1", headers: { "anthropic-version": "2023-06-01" } },
+  openrouter: { path: "openrouter/v1/key" },
+};
+
+/** How long one gateway's key check stands before the next request checks again. */
+const KEY_CHECK_TTL_MS = 10 * 60_000;
+
+/** How long one provider's check may take. A check that times out keeps the last answer. */
+const KEY_CHECK_TIMEOUT_MS = 3_000;
+
+/** The providers each gateway (by name) answered a key check for, and when it was asked. */
+const keyChecks = new Map<string, { at: number; keyed: ReadonlySet<string> }>();
+
+/**
+ * The providers `gateway` holds a working key for, as its last key check found (see
+ * checkGatewayKeys): empty until one has run in this isolate.
+ */
+export function gatewayKeyedProviders(gateway: AiGatewayConfig): ReadonlySet<string> {
+  return keyChecks.get(gateway.gateway)?.keyed ?? new Set();
+}
+
+/**
+ * Ask `gateway` which of the providers in KEY_CHECKS it holds a working key for, unless it was
+ * asked less than KEY_CHECK_TTL_MS ago, and return the answer. A provider is keyed while its check
+ * succeeds; a 401 or 403 says it has no key, and any other failure keeps what the last check found,
+ * so a passing outage can't take a provider's models away mid-chat.
+ */
+export async function checkGatewayKeys(gateway: AiGatewayConfig,
+                                       now = Date.now()): Promise<ReadonlySet<string>> {
+  let last = keyChecks.get(gateway.gateway);
+  if (last && now - last.at < KEY_CHECK_TTL_MS) return last.keyed;
+  let results = await Promise.all(Object.entries(KEY_CHECKS).map(async ([provider, check]) => {
+    let binding = gateway.bindingFor(provider);
+    let root = binding
+        ? `https://workers-binding.ai/ai-gateway/gateways/${gateway.gateway}`
+        : `https://gateway.ai.cloudflare.com/v1/${gateway.accountId}/${gateway.gateway}`;
+    let init: RequestInit = {
+      headers: {
+        ...check.headers,
+        ...(binding ? {} : { "cf-aig-authorization": `Bearer ${gateway.apiToken}` }),
+        // Not this request's to be logged as inference.
+        "cf-aig-collect-log": "false",
+      },
+      signal: AbortSignal.timeout(KEY_CHECK_TIMEOUT_MS),
+    };
+    try {
+      let response = binding
+          ? await (binding as unknown as { fetch: typeof fetch }).fetch(`${root}/${check.path}`, init)
+          : await fetch(`${root}/${check.path}`, init);
+      await response.body?.cancel();
+      if (response.ok) return [provider, true] as const;
+      if (response.status === 401 || response.status === 403) return [provider, false] as const;
+    } catch {
+      // A failed check says nothing either way.
+    }
+    return [provider, last?.keyed.has(provider) ?? false] as const;
+  }));
+  let keyed = new Set(results.filter(([, has]) => has).map(([provider]) => provider));
+  keyChecks.set(gateway.gateway, { at: now, keyed });
+  return keyed;
+}
+
+/**
  * Parse AI Gateway configuration from environment variables. Returns null if AI Gateway
  * mode is not enabled (i.e. CF_AI_GATEWAY is not set).
  */
@@ -204,10 +276,13 @@ export function allowedModelProvider(name: string): AiModelProvider | undefined 
  */
 export class GatewayModels {
   /**
-   * The providers the deployment enables: the environment's, which are a floor, and the ones its
-   * admin added that the gateway serves.
+   * The providers the deployment enables: the environment's, which are a floor, the ones the
+   * gateway holds a working key for (see checkGatewayKeys), and the ones its admin added that the
+   * gateway serves.
    */
   readonly providers: ReadonlySet<string>;
+  /** The providers the gateway holds a working key for, as its last key check found. */
+  readonly #keyed: ReadonlySet<string>;
   /** Every model, in any mode, in listing order. */
   readonly all: readonly AdminModel[];
   /** The providers a model may be added under: the ones the gateway both enables and serves. */
@@ -228,9 +303,12 @@ export class GatewayModels {
   constructor(readonly gateway: AiGatewayConfig,
               config: Pick<AdminConfig, "modelModes" | "addedProviders" | "providerOrder" |
                   "addedModels" | "modelOrder" | "userModelsEnabled" | "modelSettings" |
-                  "defaultReasoning">) {
+                  "defaultReasoning">,
+              keyed: ReadonlySet<string> = gatewayKeyedProviders(gateway)) {
+    this.#keyed = keyed;
     this.providers = new Set([
       ...gateway.providers,
+      ...keyed,
       ...config.addedProviders.filter(provider => GATEWAY_PROVIDERS.has(provider)),
     ]);
     this.#added = config.addedModels;
@@ -286,12 +364,19 @@ export class GatewayModels {
     return this.#providerOrder.filter(provider => GATEWAY_PROVIDERS.has(provider))
         .map(provider => ({
           provider,
-          ...(this.providers.has(provider) &&
-              { enabledBy: this.gateway.providers.has(provider) ? "environment" : "admin" }),
+          ...(this.providers.has(provider) && {
+            enabledBy: this.gateway.providers.has(provider) ? "environment"
+                : this.#keyed.has(provider) ? "gateway" : "admin",
+          }),
           // What getModelViaGateway refuses a request for. Only an admin can enable a provider
           // in that state: the environment enabling one keeps `gateway` from being built.
           needsApiToken: !this.gateway.bindingFor(provider) && !this.gateway.apiToken,
         }));
+  }
+
+  /** Whether the gateway's key check, rather than the environment or an admin, keeps `provider` on. */
+  keyedByGateway(provider: string): boolean {
+    return this.#keyed.has(provider) && !this.gateway.providers.has(provider);
   }
 
   /** The gateway model with this ID, in any mode: even a disabled model's ID stays reserved. */
@@ -403,7 +488,8 @@ export class GatewayModels {
 export async function getGatewayModels(env: Cloudflare.Env): Promise<GatewayModels | null> {
   let gateway = getAiGatewayConfig(env);
   if (!gateway) return null;
-  return new GatewayModels(gateway, await readAdminConfig(env));
+  let [config, keyed] = await Promise.all([readAdminConfig(env), checkGatewayKeys(gateway)]);
+  return new GatewayModels(gateway, config, keyed);
 }
 
 /** Identifies the Gateway and credentials needed to retrieve an inference log. */

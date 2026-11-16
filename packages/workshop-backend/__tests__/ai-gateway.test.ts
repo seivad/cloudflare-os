@@ -9,6 +9,8 @@ import {
   AiGatewayConfig,
   AiGatewayLogRetryableError,
   GatewayModels,
+  checkGatewayKeys,
+  gatewayKeyedProviders,
   gatewayModelConfig,
   gatewayRunConfig,
   getAiGatewayLogCost,
@@ -314,7 +316,8 @@ describe("GatewayModels", () => {
       ...Object.keys(SUGGESTED_MODELS.cloudflare),
     ]);
     expect(models.providerSettings.map(({ provider }) => provider)).toEqual(
-        ["openai", "anthropic", "cloudflare-auto-router", "cloudflare", "google"]);
+        ["openai", "anthropic", "cloudflare-auto-router", "cloudflare", "google", "openrouter",
+         "aws-bedrock"]);
     expect(models.addableProviders).toEqual(["openai", "anthropic", "cloudflare"]);
   });
 
@@ -651,7 +654,8 @@ describe("GatewayModels", () => {
   });
 
   describe("providers", () => {
-    const CATALOG_ORDER = ["cloudflare-auto-router", "cloudflare", "anthropic", "openai", "google"];
+    const CATALOG_ORDER = ["cloudflare-auto-router", "cloudflare", "anthropic", "openai", "google",
+      "openrouter", "aws-bedrock"];
     const GEMINI = "gemini-3.6-flash";
     const NO_TOKEN = 'Provider "google" cannot use the Workers AI binding transport, and no ' +
         "CF_AI_GATEWAY_API_TOKEN is configured for the HTTPS one.";
@@ -701,11 +705,28 @@ describe("GatewayModels", () => {
             { provider: "anthropic", enabledBy: "environment", needsApiToken: false },
             { provider: "openai", needsApiToken: false },
             { provider: "google", enabledBy: "admin", needsApiToken: false },
+            { provider: "openrouter", needsApiToken: false },
+            { provider: "aws-bedrock", needsApiToken: false },
           ]);
       // The environment's listing comes first, so a provider it lists can't be turned off.
       expect(gatewayModels({ addedProviders: ["anthropic", "cloudflare"] }, "anthropic")
           .providerSettings.map(({ enabledBy }) => enabledBy))
-          .toEqual([undefined, "admin", "environment", undefined, undefined]);
+          .toEqual([undefined, "admin", "environment", undefined, undefined, undefined, undefined]);
+    });
+
+    it("turns on the providers the gateway holds a key for, which only removing the key turns off", () => {
+      const keyed = new GatewayModels(new AiGatewayConfig(gatewayEnv("anthropic")), NO_CONFIG,
+          new Set(["openrouter", "anthropic"]));
+      expect([...keyed.providers]).toEqual(["anthropic", "openrouter"]);
+      expect(keyed.providerSettings.find(({ provider }) => provider === "openrouter"))
+          .toStrictEqual({ provider: "openrouter", enabledBy: "gateway", needsApiToken: false });
+      // The environment's listing comes first.
+      expect(keyed.providerSettings.find(({ provider }) => provider === "anthropic")?.enabledBy)
+          .toBe("environment");
+      expect(keyed.keyedByGateway("openrouter")).toBe(true);
+      expect(keyed.keyedByGateway("anthropic")).toBe(false);
+      expect(keyed.addableProviders).toContain("openrouter");
+      expect(keyed.get("z-ai/glm-5.3")?.provider).toBe("openrouter");
     });
 
     it("reports a provider whose requests need a token the deployment lacks", () => {
@@ -840,6 +861,55 @@ describe("getGatewayModels", () => {
       BLUEPRINTS: BLUEPRINTS as unknown as KVNamespace,
     }))).resolves.toBeNull();
     expect(BLUEPRINTS.get).not.toHaveBeenCalled();
+  });
+});
+
+describe("checkGatewayKeys", () => {
+  // A binding whose fetch answers each key check with `statuses[path]` (500 when unlisted).
+  const keyBinding = (statuses: Record<string, number>) => {
+    const calls: { url: string, init?: RequestInit }[] = [];
+    const binding = {
+      fetch: vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        const path = url.replace(/^https:\/\/workers-binding\.ai\/ai-gateway\/gateways\/[^/]+\//, "");
+        return new Response("{}", { status: statuses[path] ?? 500 });
+      }),
+    } as unknown as Ai;
+    return { binding, calls };
+  };
+  const config = (gateway: string, binding: Ai) => new AiGatewayConfig(env({
+    CF_AI_GATEWAY: gateway, CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+    CF_AI_GATEWAY_PROVIDERS: "cloudflare", WORKERS_AI: binding,
+  }));
+
+  it("asks the gateway over the binding which providers it holds a key for, sending no prompt", async () => {
+    const { binding, calls } = keyBinding({ "openrouter/v1/key": 200, "anthropic/v1/models?limit=1": 401 });
+    const gateway = config("keys-a", binding);
+    expect(gatewayKeyedProviders(gateway)).toEqual(new Set());
+    expect(await checkGatewayKeys(gateway, 1_000)).toEqual(new Set(["openrouter"]));
+    expect(gatewayKeyedProviders(gateway)).toEqual(new Set(["openrouter"]));
+    expect(calls.map(({ url }) => url).toSorted()).toEqual([
+      "https://workers-binding.ai/ai-gateway/gateways/keys-a/anthropic/v1/models?limit=1",
+      "https://workers-binding.ai/ai-gateway/gateways/keys-a/openai/models",
+      "https://workers-binding.ai/ai-gateway/gateways/keys-a/openrouter/v1/key",
+    ]);
+    for (const { init } of calls) {
+      expect(init?.method ?? "GET").toBe("GET");
+      expect(init?.body).toBeUndefined();
+      expect((init!.headers as Record<string, string>)["cf-aig-collect-log"]).toBe("false");
+    }
+  });
+
+  it("asks again only once its answer is ten minutes old, and keeps a key through a failed check", async () => {
+    const first = keyBinding({ "openrouter/v1/key": 200, "openai/models": 200 });
+    const gateway = config("keys-b", first.binding);
+    expect(await checkGatewayKeys(gateway, 0)).toEqual(new Set(["openai", "openrouter"]));
+    expect(await checkGatewayKeys(gateway, 9 * 60_000)).toEqual(new Set(["openai", "openrouter"]));
+    expect(first.calls).toHaveLength(3);
+    // Ten minutes on: openai's key is gone (401), openrouter's check fails (500) and keeps its key.
+    const second = keyBinding({ "openai/models": 401 });
+    expect(await checkGatewayKeys(config("keys-b", second.binding), 10 * 60_000))
+        .toEqual(new Set(["openrouter"]));
   });
 });
 

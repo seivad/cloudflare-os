@@ -260,6 +260,72 @@ describe("getModel AI Gateway routing", () => {
         .toThrow(new Error('Provider "ollama" is not supported through AI Gateway.'));
   });
 
+  describe("OpenRouter and Amazon Bedrock models", () => {
+    const ROOT = "https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway";
+
+    it("speaks Chat Completions to OpenRouter on the gateway's openrouter route", async () => {
+      const handle = getModel(env(),
+          { provider: "openrouter", model: "z-ai/glm-5.3", apiToken: "" }, INITIATOR);
+      expect(handle.model).toMatchObject({
+        api: "openai-completions", provider: "openrouter", id: "z-ai/glm-5.3",
+        baseUrl: `${ROOT}/openrouter/v1`, reasoning: true,
+      });
+      const request = await captureRequest(handle);
+      expect(request.url).toBe(`${ROOT}/openrouter/v1/chat/completions`);
+      expect(JSON.parse(request.body).model).toBe("z-ai/glm-5.3");
+      // The gateway's stored OpenRouter key applies, so no key of the client's goes out.
+      expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
+      expect(request.headers.get("authorization")).toBeNull();
+    }, 15000);
+
+    // pi catalogs OpenRouter's Claude on OpenRouter's Anthropic-compatible API; it runs on Chat
+    // Completions here, without that API's flags.
+    it("runs an OpenRouter model pi catalogs on another API on Chat Completions", () => {
+      const handle = getModel(env(),
+          { provider: "openrouter", model: "anthropic/claude-sonnet-5.5", apiToken: "" }, INITIATOR);
+      expect(handle.model).toMatchObject({ api: "openai-completions", contextWindow: 1000000 });
+      expect(handle.model.compat).toEqual({ supportsDeveloperRole: false, thinkingFormat: "openrouter" });
+    });
+
+    it("sends a Bedrock model to the gateway's unified route by its aws-bedrock/ name", async () => {
+      const handle = getModel(env(),
+          { provider: "aws-bedrock", model: "global.anthropic.claude-sonnet-5-5", apiToken: "" },
+          INITIATOR);
+      expect(handle.model).toMatchObject({
+        api: "openai-completions", provider: "aws-bedrock",
+        id: "aws-bedrock/global.anthropic.claude-sonnet-5-5", baseUrl: `${ROOT}/compat`,
+        reasoning: false, contextWindow: 1000000,
+      });
+      expect(gatewayReasoningLevels("aws-bedrock", "global.anthropic.claude-sonnet-5-5")).toEqual([]);
+      const request = await captureRequest(handle);
+      expect(request.url).toBe(`${ROOT}/compat/chat/completions`);
+      expect(JSON.parse(request.body).model).toBe("aws-bedrock/global.anthropic.claude-sonnet-5-5");
+      expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
+    }, 15000);
+
+    it("rides the binding with no token, and refuses Bedrock outside a gateway", () => {
+      const binding = { fetch: vi.fn() } as unknown as Ai;
+      const tokenless = env({ WORKERS_AI: binding, CF_AI_GATEWAY_API_TOKEN: undefined,
+        CF_AI_GATEWAY_PROVIDERS: "openrouter" });
+      const BOUND = "https://workers-binding.ai/ai-gateway/gateways/platform-gateway";
+      expect(getModel(tokenless, { provider: "openrouter", model: "moonshotai/kimi-k3", apiToken: "" },
+          INITIATOR).model.baseUrl).toBe(`${BOUND}/openrouter/v1`);
+      expect(getModel(tokenless, { provider: "aws-bedrock", model: "global.amazon.nova-2-lite-v1:0",
+        apiToken: "" }, INITIATOR).model.baseUrl).toBe(`${BOUND}/compat`);
+      expect(() => getModel(env({ CF_AI_GATEWAY: undefined }),
+          { provider: "aws-bedrock", model: "global.amazon.nova-2-lite-v1:0", apiToken: "" }, INITIATOR))
+          .toThrow("Amazon Bedrock models run only through an AI Gateway");
+    });
+
+    it("reaches OpenRouter itself with the user's own key outside a gateway", async () => {
+      const handle = getModel(env({ CF_AI_GATEWAY: undefined }),
+          { provider: "openrouter", model: "z-ai/glm-5.3", apiToken: "sk-or-test" }, INITIATOR);
+      expect(handle.model.baseUrl).toBe("https://openrouter.ai/api/v1");
+      const request = await captureRequest(handle);
+      expect(request.headers.get("authorization")).toBe("Bearer sk-or-test");
+    }, 15000);
+  });
+
   describe("the Auto Router model", () => {
     const AUTO: AiModelConfig =
         { provider: "cloudflare-auto-router", model: "cloudflare/auto", apiToken: "" };
@@ -1149,6 +1215,15 @@ describe("gateway model reasoning levels", () => {
     ["cloudflare", "@cf/cloudflare/clef", null],
     ["cloudflare", "@cf/cloudflare/clef-flash", null],
     ["cloudflare-auto-router", "cloudflare/auto", null],
+    ["openrouter", "anthropic/claude-sonnet-5.5", null],
+    ["openrouter", "openai/gpt-6.1-sol", null],
+    ["openrouter", "z-ai/glm-5.3", null],
+    ["openrouter", "moonshotai/kimi-k3", null],
+    ["openrouter", "deepseek/deepseek-v4.1-flash", null],
+    ["aws-bedrock", "global.anthropic.claude-sonnet-5-5", null],
+    ["aws-bedrock", "global.anthropic.claude-opus-5-5", null],
+    ["aws-bedrock", "global.anthropic.claude-haiku-5-5", null],
+    ["aws-bedrock", "global.amazon.nova-2-lite-v1:0", null],
   ];
   it.each(BUILT_IN)("says what %s model %s is asked for while no level is set",
       (provider, model, builtIn) => {

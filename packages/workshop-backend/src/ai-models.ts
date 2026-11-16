@@ -23,6 +23,8 @@ import {
 } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
+import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
+import { AMAZON_BEDROCK_MODELS } from "@earendil-works/pi-ai/providers/amazon-bedrock.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
@@ -205,6 +207,10 @@ const CATALOGS: Partial<Record<AiModelProvider, Record<string, Model<Api>>>> = {
   openai: OPENAI_MODELS,
   google: GOOGLE_MODELS,
   cloudflare: CLOUDFLARE_WORKERS_AI_MODELS,
+  openrouter: OPENROUTER_MODELS,
+  // Its entries' names, prices and limits only: Bedrock models run on the gateway's
+  // OpenAI-compatible route, never on pi's Bedrock API (see gatewayNativeModel).
+  "aws-bedrock": AMAZON_BEDROCK_MODELS,
 };
 
 // Consult pi's builtin catalog for cost/compat metadata of a known model id. Unknown models are
@@ -386,6 +392,26 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         ...(config.reasoning !== undefined ? { thinkingLevelMap: catalog?.thinkingLevelMap } : {}),
         compat: workersAiCompat(catalog),
       };
+    case "openrouter":
+      return openRouterModel(config, catalog, window, `${gatewayUrl}/openrouter/v1`);
+    case "aws-bedrock":
+      // The gateway signs each request with the AWS credentials stored under its Provider Keys
+      // and translates Chat Completions to Bedrock on its /compat route, which names a Bedrock
+      // model "aws-bedrock/<model id>". pi's own Bedrock API would need the AWS SDK, credentials
+      // of the Worker's own and HTTPS. The translation carries text and images, not Bedrock's
+      // reasoning settings, so no level is offered.
+      return {
+        id: `aws-bedrock/${config.model}`,
+        name: catalog?.name ?? config.model,
+        api: "openai-completions",
+        provider: "aws-bedrock",
+        baseUrl: `${gatewayUrl}/compat`,
+        reasoning: false,
+        input: catalog?.input ?? ["text", "image"],
+        cost: catalog?.cost ?? ZERO_COST,
+        ...window,
+        compat: { supportsStore: false, supportsDeveloperRole: false },
+      };
     case "cloudflare-auto-router":
       // Auto Router answers on the gateway's /compat route in Chat Completions format whichever
       // model it picks, so the descriptor claims only what every candidate has: text and image
@@ -404,6 +430,31 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
     default:
       return undefined;
   }
+}
+
+// An OpenRouter model on its Chat Completions API at `baseUrl` (the gateway's openrouter route, or
+// OpenRouter's own), which serves every model OpenRouter lists. pi catalogs a few of them on
+// OpenRouter's Anthropic-compatible API instead; their names, prices, limits and levels apply here
+// too, but not their compat flags, which are that API's. A model pi does not know is taken to
+// reason in OpenRouter's format only when its config says it reasons.
+function openRouterModel(config: AiModelConfig, catalog: CatalogEntry | undefined,
+                         window: { contextWindow: number, maxTokens: number },
+                         baseUrl: string): Model<Api> {
+  const own = (catalog as Model<Api> | undefined)?.api === "openai-completions";
+  return {
+    id: config.model,
+    name: catalog?.name ?? config.model,
+    api: "openai-completions",
+    provider: "openrouter",
+    baseUrl,
+    reasoning: catalog?.reasoning ?? false,
+    input: catalog?.input ?? ["text"],
+    cost: catalog?.cost ?? ZERO_COST,
+    ...window,
+    thinkingLevelMap: catalog?.thinkingLevelMap,
+    compat: own ? catalog?.compat
+        : { supportsDeveloperRole: false, thinkingFormat: "openrouter" } satisfies OpenAICompletionsCompat,
+  };
 }
 
 /**
@@ -1101,8 +1152,18 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
         ...directAuth(config, "Authorization"),
         sessionAffinity,
       });
+    case "openrouter":
+      return makeHandle({
+        model: openRouterModel(config, catalog, window,
+            stripTrailingSlashes(config.apiUrl ?? "https://openrouter.ai/api/v1")),
+        ...directAuth(config, "Authorization"),
+        sessionAffinity,
+      });
     case "cloudflare-auto-router":
       throw new Error("The Auto Router model runs only through an AI Gateway.");
+    case "aws-bedrock":
+      throw new Error("Amazon Bedrock models run only through an AI Gateway, which holds their " +
+          "AWS credentials.");
     default:
       config.provider satisfies never;
       throw new Error(`Unknown provider "${config.provider}".`);

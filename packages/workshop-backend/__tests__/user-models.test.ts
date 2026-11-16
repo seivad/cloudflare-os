@@ -152,6 +152,11 @@ describe("UserDurableObject model editing", () => {
           { provider: "cloudflare-auto-router" as const, model: "cloudflare/auto", apiToken: "" };
       await expect(user.addModel(PROFILE, auto))
           .rejects.toThrow("The Auto Router model runs only through an AI Gateway.");
+      // Nor a Bedrock model, whose AWS credentials only a gateway holds.
+      const bedrock = { provider: "aws-bedrock" as const, model: "global.amazon.nova-2-lite-v1:0",
+        apiToken: "" };
+      await expect(user.addModel(PROFILE, bedrock))
+          .rejects.toThrow("Amazon Bedrock models run only through an AI Gateway");
     });
   });
 });

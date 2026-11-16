@@ -3298,10 +3298,13 @@ export type CloudflareAccountOption = {
 
 /**
  * Supported AI providers. "cloudflare-auto-router" is AI Gateway's Auto Router, which picks the
- * model behind each request (see AUTO_ROUTER_MODEL_ID); it exists only inside a gateway.
+ * model behind each request (see AUTO_ROUTER_MODEL_ID); it exists only inside a gateway, as does
+ * "aws-bedrock", whose AWS credentials only a gateway can hold (it signs each request with them).
+ * "openrouter" runs through a gateway or with the user's own OpenRouter key.
  */
 export type AiModelProvider =
-    "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "cloudflare-auto-router";
+    "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "cloudflare-auto-router" |
+    "openrouter" | "aws-bedrock";
 
 /** The model ID of AI Gateway's Auto Router, the one model of "cloudflare-auto-router". */
 export const AUTO_ROUTER_MODEL_ID = "cloudflare/auto";
@@ -3551,10 +3554,12 @@ export type AdminGatewayProvider = {
   provider: AiModelProvider;
 
   /**
-   * Who enabled the provider: the CF_AI_GATEWAY_PROVIDERS environment variable, or an admin (see
-   * AdminApi.setGatewayProviderEnabled). Absent while the provider is off.
+   * Who enabled the provider: the CF_AI_GATEWAY_PROVIDERS environment variable, an admin (see
+   * AdminApi.setGatewayProviderEnabled), or the gateway itself, which answered a provider-key check
+   * for it (a key stored under the gateway's Provider Keys, checked without sending a prompt).
+   * Absent while the provider is off.
    */
-  enabledBy?: 'environment' | 'admin';
+  enabledBy?: 'environment' | 'admin' | 'gateway';
 
   /**
    * Whether the provider's requests need CF_AI_GATEWAY_API_TOKEN on a deployment that has none,
@@ -3831,6 +3836,22 @@ const SUGGESTED_MODEL_CATALOG = {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
   },
   "ollama": {
+  },
+  // OpenRouter's own ids, which no other provider's catalog shares.
+  "openrouter": {
+    "anthropic/claude-sonnet-5.5": {name: "Claude Sonnet 5.5 (OpenRouter)", contextWindow: 1000000},
+    "openai/gpt-6.1-sol": {name: "GPT-6.1 Sol (OpenRouter)", contextWindow: 1050000},
+    "z-ai/glm-5.3": {name: "GLM 5.3 (OpenRouter)", contextWindow: 1048576},
+    "moonshotai/kimi-k3": {name: "Kimi K3 (OpenRouter)", contextWindow: 1048576},
+    "deepseek/deepseek-v4.1-flash": {name: "DeepSeek V4.1 Flash (OpenRouter)", contextWindow: 1048576},
+  },
+  // Bedrock's global cross-region inference profiles, which a credential of any commercial region
+  // can call; a regional profile ("us.", "eu.", "au.") can be added under the provider instead.
+  "aws-bedrock": {
+    "global.anthropic.claude-sonnet-5-5": {name: "Claude Sonnet 5.5 (Bedrock)", contextWindow: 1000000},
+    "global.anthropic.claude-opus-5-5": {name: "Claude Opus 5.5 (Bedrock)", contextWindow: 1000000},
+    "global.anthropic.claude-haiku-5-5": {name: "Claude Haiku 5.5 (Bedrock)", contextWindow: 1000000},
+    "global.amazon.nova-2-lite-v1:0": {name: "Nova 2 Lite (Bedrock)", contextWindow: 1000000},
   },
 } satisfies Record<AiModelProvider, Record<string, SuggestedModel>>;
 

@@ -1598,6 +1598,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (config.provider === "cloudflare-auto-router") {
       throw new Error("The Auto Router model runs only through an AI Gateway.");
     }
+    if (!models && config.provider === "aws-bedrock") {
+      throw new Error("Amazon Bedrock models run only through an AI Gateway, which holds their " +
+          "AWS credentials.");
+    }
     for (let limit of [config.contextWindow, config.outputLimit]) {
       if (limit !== undefined && !(Number.isSafeInteger(limit) && limit > 0)) {
         throw new Error("Token limits must be positive integers.");
