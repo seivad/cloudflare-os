@@ -848,6 +848,14 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getAiConfig(): Promise<AiGatewayInfo>;
 
+  /**
+   * The models `provider` lists through the deployment's AI Gateway, for the user to pick one to
+   * add as their own (see AdminApi.listGatewayProviderModels). Throws outside AI Gateway mode,
+   * while users may not add their own models (see AiGatewayInfo.userModelsEnabled), and for a
+   * provider not among AiGatewayInfo.enabledProviders.
+   */
+  listGatewayProviderModels(provider: AiModelProvider): Promise<GatewayProviderModels>;
+
   /** Resolve UI feature flags for the authenticated user. */
   getUiFeatureFlags(): Promise<UiFeatureFlags>;
 
@@ -2050,6 +2058,15 @@ export interface AdminApi {
   testGatewayProvider(provider: AiModelProvider): Promise<GatewayModelTest>;
 
   /**
+   * The models `provider` lists through the deployment's AI Gateway, for an admin to pick one to
+   * add: the ones that call tools and answer in text, read through the gateway with its stored key
+   * and cached for ten minutes. No prompt is sent. Amazon Bedrock has no list behind the gateway,
+   * so its suggested models are returned. A provider that is off can be listed. Throws outside AI
+   * Gateway mode and for a provider the gateway does not serve.
+   */
+  listGatewayProviderModels(provider: AiModelProvider): Promise<GatewayProviderModels>;
+
+  /**
    * Send one request to a gateway model the way a chat turn would, through the gateway, as the
    * admin, and report what happened within 30 seconds. The request asks for the reasoning level
    * in effect for the model (its own, else the deployment's default, else what BuiltInReasoning
@@ -2464,6 +2481,39 @@ export type GatewayModel = {
 };
 
 /**
+ * One model a provider lists through the deployment's AI Gateway (see
+ * AdminApi.listGatewayProviderModels): a GatewayModel as far as the list describes it, with what a
+ * person choosing it wants to see beside. Its context window is absent where neither the list nor
+ * the model runtime gives one.
+ */
+export type GatewayProviderModel = Omit<GatewayModel, "contextWindow"> & {
+  /** The maximum tokens one request may total. Absent while unknown. */
+  contextWindow?: number;
+
+  /**
+   * US$ per million tokens of input and of output, from the provider's list or, where it gives
+   * none, from the model runtime's catalog. Absent while neither has one. A guide, not a bill.
+   */
+  price?: { input: number; output: number };
+
+  /** The requests a minute the account may send it, where the list says (Workers AI's plan rates). */
+  rateLimit?: number;
+};
+
+/**
+ * What one provider's model list came to (see AdminApi.listGatewayProviderModels). `models` is
+ * empty unless `state` is "ready". "not-connected": the gateway holds no key the provider accepts.
+ * "unavailable": the list could not be read, or the provider has none to read; `note` says which,
+ * in a sentence for the person choosing.
+ */
+export type GatewayProviderModels = {
+  provider: AiModelProvider;
+  state: "ready" | "not-connected" | "unavailable";
+  note?: string;
+  models: GatewayProviderModel[];
+};
+
+/**
  * A model of the deployment's catalog, as a gadget's `modelCatalog` binding lists it: what is
  * needed to choose and describe a model, and nothing about how the deployment runs it.
  */
@@ -2832,10 +2882,12 @@ const SUGGESTED_MODEL_CATALOG = {
   // OpenRouter's own ids, which no other provider's catalog shares.
   "openrouter": {
     "anthropic/claude-sonnet-5.5": {name: "Claude Sonnet 5.5 (OpenRouter)", contextWindow: 1000000},
+    "anthropic/claude-opus-5.5": {name: "Claude Opus 5.5 (OpenRouter)", contextWindow: 1000000},
     "openai/gpt-6.1-sol": {name: "GPT-6.1 Sol (OpenRouter)", contextWindow: 1050000},
-    "z-ai/glm-5.3": {name: "GLM 5.3 (OpenRouter)", contextWindow: 1048576},
-    "moonshotai/kimi-k3": {name: "Kimi K3 (OpenRouter)", contextWindow: 1048576},
+    "openai/gpt-6-luna": {name: "GPT-6 Luna (OpenRouter)", contextWindow: 1050000},
+    "moonshotai/kimi-k3.1-pro": {name: "Kimi K3.1 Pro (OpenRouter)", contextWindow: 1048576},
     "deepseek/deepseek-v4.1-flash": {name: "DeepSeek V4.1 Flash (OpenRouter)", contextWindow: 1048576},
+    "deepseek/deepseek-v4-pro-0813": {name: "DeepSeek V4 Pro 0813 (OpenRouter)", contextWindow: 1048576},
   },
   // Bedrock's global cross-region inference profiles, which a credential of any commercial region
   // can call; a regional profile ("us.", "eu.", "au.") can be added under the provider instead.

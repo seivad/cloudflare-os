@@ -225,6 +225,20 @@ export function isRuntimeModel(provider: AiModelProvider, modelId: string): bool
   return catalogModel(provider, modelId) !== undefined;
 }
 
+/**
+ * What the model runtime's catalog says of `modelId` under `provider`, for a model list to show:
+ * its context window, output cap and price per million tokens. Undefined while it has no entry.
+ */
+export function runtimeModelFacts(provider: AiModelProvider, modelId: string)
+    : { contextWindow: number, maxTokens: number, price: { input: number, output: number } }
+    | undefined {
+  let model = catalogModel(provider, modelId);
+  return model && {
+    contextWindow: model.contextWindow, maxTokens: model.maxTokens,
+    price: { input: model.cost.input, output: model.cost.output },
+  };
+}
+
 // What a model descriptor takes from pi's catalog. An entry borrowed from another model supplies
 // the runtime flags alone, so that the name, cost and limits stay the model's own, and one made
 // of stated capabilities supplies only what they state.
