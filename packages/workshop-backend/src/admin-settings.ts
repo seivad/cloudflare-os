@@ -9,7 +9,7 @@ import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, pars
 import { MAX_AGENT_HINT, MAX_ALLOWED_MODELS, adminConfigSeed, assertPermutation, changesModelSettings, defaultOutputFormatId, diffAdminConfig, effectiveAdminConfig, isAllowedModelName, isUpdateCheckInterval, isUpdateHours, listPromotedFormats, parseRestrictedWebFetchHosts, reorderFormats, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
 import { makeAdminSettingsStorage, type AdminConfig, type AdminSettingsStorage, type FormatCuration } from './storage-schema/admin-settings-storage.js';
 import { getModelTokenLimits } from './agent-compaction.js';
-import { AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, GatewayModels, assertGatewayProvider, gatewayModelConfig, gatewayRunConfig, getAiGatewayConfig, isCatalogModel } from './ai-gateway.js';
+import { AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, GatewayModels, assertGatewayProvider, checkGatewayKeys, gatewayModelConfig, gatewayRunConfig, getAiGatewayConfig, isCatalogModel } from './ai-gateway.js';
 import { AgentTurnError, completeText } from './ai-invoke.js';
 import { gatewayBuiltInReasoning, gatewayReasoningLevels, getModel, isRuntimeModel } from './ai-models.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
@@ -566,7 +566,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       restrictedWebFetchApprovals: config.restrictedWebFetchApprovals,
       resourceVendors: await this.#listResourceConfig(config, adminUserId),
       formats: await this.#listFormatConfig(config),
-      gatewayModels: this.#listGatewayModels(config),
+      gatewayModels: await this.#listGatewayModels(config),
       adminAuditRetentionDays: {
         effective: policy.retentionDays,
         chosen: config.adminAuditRetentionDays,
@@ -702,11 +702,11 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 
   // Admin view of the gateway models, or undefined outside AI Gateway mode. A gateway the
   // environment misconfigures reads the same way, so that it can't take the admin panel down.
-  #listGatewayModels(config: AdminConfig): AdminSettingsView["gatewayModels"] {
+  async #listGatewayModels(config: AdminConfig): Promise<AdminSettingsView["gatewayModels"]> {
     try {
       let gateway = getAiGatewayConfig(this.env);
       if (!gateway) return undefined;
-      let models = new GatewayModels(gateway, config);
+      let models = new GatewayModels(gateway, config, await checkGatewayKeys(gateway));
       return {
         providers: models.addableProviders,
         providerSettings: models.providerSettings,
@@ -904,6 +904,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         if (enabled) return config;
         throw new Error(`Provider "${provider}" is enabled by CF_AI_GATEWAY_PROVIDERS and can ` +
             "only be turned off there.");
+      }
+      if (!enabled && new GatewayModels(gateway, config).keyedByGateway(provider)) {
+        throw new Error(`Provider "${provider}" is on because the AI Gateway holds a key for it, ` +
+            "and can only be turned off by removing that key from the gateway's Provider Keys.");
       }
       let addedProviders = config.addedProviders.filter(added => added !== provider);
       if (enabled) addedProviders.push(provider);

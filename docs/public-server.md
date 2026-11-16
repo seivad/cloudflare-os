@@ -39,7 +39,9 @@ CLOUDFLARE_OAUTH_CLIENT_SECRET=...
 
 # Platform AI Gateway used for the free tier:
 CF_AI_GATEWAY=your-gateway
-# The providers that are always on. An admin can turn on others on the Models tab of /admin:
+# The providers that are always on (any of anthropic, openai, google, cloudflare,
+# cloudflare-auto-router, openrouter, aws-bedrock). An admin can turn on others on the Models tab
+# of /admin:
 CF_AI_GATEWAY_PROVIDERS=anthropic,openai,google
 
 # Required whenever CF_AI_GATEWAY is set:
@@ -67,7 +69,18 @@ routes through the same Gateway.
 
 Which models the Gateway offers is managed on the **Models** tab of `/admin`, not in the
 environment. `CF_AI_GATEWAY_PROVIDERS` names the providers that are always on, and an admin can
-turn on the others there. Each model is **Enabled**, **Hidden** (out of the model pickers, still
+turn on the others there. A provider whose key the Gateway holds under **Provider Keys** is on as
+well, for as long as it holds it: the Workshop asks the Gateway every ten minutes, with a request
+that sends no prompt (OpenAI's and Anthropic's model lists, OpenRouter's key endpoint), and only
+removing the key turns such a provider off. **OpenRouter** (`openrouter`) runs on its Chat
+Completions API through the Gateway, which also lets a user add a model with an OpenRouter key of
+their own outside AI Gateway mode. **Amazon Bedrock** (`aws-bedrock`) runs only through a Gateway
+that holds AWS credentials as an Amazon Bedrock provider key, which signs each request with them,
+on the Gateway's unified Chat Completions route (Claude and Amazon Nova models today, without
+reasoning levels); the Gateway has no request that tells whether it holds them, so Bedrock is on
+only when `CF_AI_GATEWAY_PROVIDERS` lists it or an admin turns it on. Its suggested models are
+Bedrock's global cross-region inference profiles; a regional one (`us.`, `eu.`, `au.`) can be added
+under it. Each model is **Enabled**, **Hidden** (out of the model pickers, still
 works where it is already in use) or **Disabled** (stops working everywhere, including existing
 chats, gadget model bindings and scheduled tasks). The tab also sets reasoning levels and
 compaction budgets, adds models the catalog doesn't list, and tests a provider or a model with
