@@ -71,8 +71,8 @@ routes through the same Gateway.
 Which models the Gateway offers is managed on the **Models** tab of `/admin`, not in the
 environment. `CF_AI_GATEWAY_PROVIDERS` names the providers that are always on, and an admin can
 turn on the others there. A provider whose key the Gateway holds under **Provider Keys** is on as
-well, for as long as it holds it: the Workshop asks the Gateway every ten minutes, with a request
-that sends no prompt (OpenAI's and Anthropic's model lists, OpenRouter's key endpoint), and only
+well, for as long as it holds it: the Workshop asks the Gateway every ten minutes, behind the
+requests it serves, with a request that sends no prompt (OpenAI's and Anthropic's model lists, OpenRouter's key endpoint), and only
 removing the key turns such a provider off. **OpenRouter** (`openrouter`) runs on its Chat
 Completions API through the Gateway, which also lets a user add a model with an OpenRouter key of
 their own outside AI Gateway mode. **Amazon Bedrock** (`aws-bedrock`) runs only through a Gateway
