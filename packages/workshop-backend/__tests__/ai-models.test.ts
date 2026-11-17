@@ -15,7 +15,8 @@ import { DEFAULT_ADMIN_CONFIG, type AdminConfig } from "../src/storage-schema/ad
 import { zeroUsage } from "../src/ai-invoke.js";
 import {
   DecisionModelGatekeeper, gatewayBuiltInReasoning, gatewayReasoningLevels, getDecisionModel,
-  getModel, isRuntimeModel, LanguageModelGatekeeper, type ModelHandle,
+  getModel, isRuntimeModel, LanguageModelGatekeeper, SKIPPED_THOUGHT_SIGNATURE,
+  withThoughtSignatures, type ModelHandle,
 } from "../src/ai-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
@@ -727,6 +728,32 @@ describe("getModel AI Gateway catalog models", () => {
     expect(handle.lastResponse).toEqual(
         { status: 200, aiGatewayLogId: "log-1", routedModel: undefined });
   }, 15000);
+
+  it("shows a Gemini model each replayed tool call with a thought signature, and no other model",
+      () => {
+    const call = { id: "call_1", type: "function", function: { name: "read", arguments: "{}" } };
+    const signed =
+        { ...call, id: "call_2", extra_content: { google: { thought_signature: "its-own" } } };
+    const body = {
+      stream: true,
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: null, tool_calls: [call, signed] },
+        { role: "tool", tool_call_id: "call_1", content: "x" },
+      ],
+    };
+    const sent = withThoughtSignatures("google/gemini-4-argon", body) as typeof body;
+    expect(sent.messages[1]!.tool_calls).toStrictEqual([
+      { ...call, extra_content: { google: { thought_signature: SKIPPED_THOUGHT_SIGNATURE } } },
+      signed,
+    ]);
+    expect(sent.messages[0]).toBe(body.messages[0]);
+    expect(sent.stream).toBe(true);
+    // The request pi built is left as it was.
+    expect(body.messages[1]!.tool_calls![0]).toBe(call);
+    expect(withThoughtSignatures("xai/grok-4.7", body)).toBe(body);
+    expect(withThoughtSignatures("moonshotai/kimi-k3.1-pro", body)).toBe(body);
+  });
 
   it("reports the gateway's refusal as pi reports any, and passes on a cache bypass",
       async () => {

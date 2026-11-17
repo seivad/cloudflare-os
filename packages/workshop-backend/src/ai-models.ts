@@ -1028,6 +1028,41 @@ type AiRunBinding = {
       options: AiOptions & { openaiEndpoint: string, returnRawResponse: true }): Promise<Response>;
 };
 
+/**
+ * What Google accepts in place of a tool call's thought signature
+ * (https://ai.google.dev/gemini-api/docs/thought-signatures).
+ */
+export const SKIPPED_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+
+type ReplayedToolCall =
+    { extra_content?: { google?: { thought_signature?: unknown } } } & Record<string, unknown>;
+
+/**
+ * A Chat Completions body for catalog model `model`, with every tool call a Gemini model is shown
+ * again carrying a thought signature. Gemini answers a tool call with one
+ * (`extra_content.google.thought_signature`) and refuses the next request unless the call comes
+ * back with one: the gateway answers "7003 Model execution failed (User Input Error)". pi's Chat
+ * Completions adapter keeps no `extra_content`, so each replayed call is given the placeholder
+ * Google accepts. No other vendor's catalog model needs one, and theirs are left as they are.
+ */
+export function withThoughtSignatures(model: string, body: Record<string, unknown>)
+    : Record<string, unknown> {
+  if (!model.startsWith("google/") || !Array.isArray(body.messages)) return body;
+  const messages = (body.messages as ({ role?: unknown, tool_calls?: unknown })[]).map(message => {
+    if (message?.role !== "assistant" || !Array.isArray(message.tool_calls)) return message;
+    const calls = (message.tool_calls as ReplayedToolCall[]).map(call =>
+        call?.extra_content?.google?.thought_signature ? call : {
+          ...call,
+          extra_content: {
+            ...call?.extra_content,
+            google: { ...call?.extra_content?.google, thought_signature: SKIPPED_THOUGHT_SIGNATURE },
+          },
+        });
+    return { ...message, tool_calls: calls };
+  });
+  return { ...body, messages };
+}
+
 // The fetch of an "ai-gateway-catalog" model: pi's Chat Completions request, carried through
 // `gateway` by the binding's run(), since the gateway serves a catalog model on none of its HTTP
 // routes. The request's `model` names the model and the rest of its body is the input. run()
@@ -1039,7 +1074,7 @@ function catalogRunFetch(binding: Ai, gateway: string): FetchFunction {
     const request = new Request(input, init);
     const { model, ...body } = await request.json<{ model: string } & Record<string, unknown>>();
     const metadata = request.headers.get("cf-aig-metadata");
-    return (binding as unknown as AiRunBinding).run(model, body, {
+    return (binding as unknown as AiRunBinding).run(model, withThoughtSignatures(model, body), {
       gateway: {
         id: gateway,
         ...(metadata !== null ? { metadata: JSON.parse(metadata) } : {}),
