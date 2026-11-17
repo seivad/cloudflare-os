@@ -111,6 +111,9 @@ describe('AddModelModal', () => {
     // Auto Router runs only through a gateway, so it is never offered here.
     expect(options).not.toContain('Auto')
     expect(options).not.toContain('Other AI Gateway Auto Router...')
+    // Nor is AI Gateway's catalog, which only a gateway's Workers AI binding reaches.
+    expect(options).not.toContain('Gemini 4 Argon (Unified)')
+    expect(options).not.toContain('Other AI Gateway catalog...')
   })
 
   it.each([false, true])('adds a decision model typed as a custom model only without chatModelsOnly (chatModelsOnly: %s)', async (chatModelsOnly) => {

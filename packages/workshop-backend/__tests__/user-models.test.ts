@@ -157,6 +157,11 @@ describe("UserDurableObject model editing", () => {
         apiToken: "" };
       await expect(user.addModel(PROFILE, bedrock))
           .rejects.toThrow("Amazon Bedrock models run only through an AI Gateway");
+      // Nor a model of AI Gateway's catalog, which only a gateway's Workers AI binding reaches.
+      const catalog = { provider: "ai-gateway-catalog" as const, model: "google/gemini-4-argon",
+        apiToken: "" };
+      await expect(user.addModel(PROFILE, catalog))
+          .rejects.toThrow("AI Gateway catalog models run only through an AI Gateway");
     });
   });
 });
@@ -173,7 +178,7 @@ describe("UserDurableObject gateway model modes", () => {
   const ENABLED_ID = "claude-opus-5-5";
   const HIDDEN_ID = "claude-opus-5";
   const DISABLED_MESSAGE =
-      'The "Claude Opus 5.5" model is disabled on this deployment by an administrator.';
+      'The "Claude Opus 5.5 (Unified)" model is disabled on this deployment by an administrator.';
   const DISABLED: Partial<AdminConfig> = { modelModes: { [ENABLED_ID]: "disabled" } };
 
   // Every call runs in one invocation, since the gateway env is only overridden on this instance.
@@ -364,7 +369,7 @@ describe("UserDurableObject gateway model modes", () => {
     await expect(user.deleteModel("claude-test"))
         .rejects.toThrow(new Error('Cannot delete built-in model "Claude Test".'));
     await expect(user.deleteModel(ENABLED_ID))
-        .rejects.toThrow(new Error('Cannot delete built-in model "Claude Opus 5.5".'));
+        .rejects.toThrow(new Error('Cannot delete built-in model "Claude Opus 5.5 (Unified)".'));
     const stored = (user as unknown as { storage: { aiModels: { get(id: string): unknown } } })
         .storage.aiModels.get("claude-test");
     expect(stored).toMatchObject({ profile: { name: "Stale" } });
@@ -455,7 +460,7 @@ describe("UserDurableObject gateway model modes", () => {
       expect(storedModel(user, MINE.id)).toEqual({ profile: MINE, config: MINE_CONFIG });
       expect((await user.getModelConfig(MINE.id)).profile).toEqual(MINE);
       await expect(user.deleteModel(ENABLED_ID))
-          .rejects.toThrow(new Error('Cannot delete built-in model "Claude Opus 5.5".'));
+          .rejects.toThrow(new Error('Cannot delete built-in model "Claude Opus 5.5 (Unified)".'));
 
       await user.deleteModel(MINE.id);
       expect(storedModel(user, MINE.id)).toBeUndefined();

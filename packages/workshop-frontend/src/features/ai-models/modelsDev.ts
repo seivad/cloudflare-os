@@ -28,6 +28,8 @@ const MODELS_DEV_PROVIDER_IDS: Record<AiModelProvider, string | null> = {
   'cloudflare-auto-router': null,
   openrouter: 'openrouter',
   'aws-bedrock': 'amazon-bedrock',
+  // models.dev lists the gateway's catalog under the catalog's own "<author>/<model>" IDs.
+  'ai-gateway-catalog': 'cloudflare-ai-gateway',
 }
 
 // The longest ID or name the server accepts for an added model.

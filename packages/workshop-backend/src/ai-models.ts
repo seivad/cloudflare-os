@@ -31,7 +31,7 @@ import { DecisionAnswer, DecisionModelBinding, DecisionRequest } from "./decisio
 import DECISION_MODEL_BINDING_TYPES from "./decision-model-binding.txt";
 import {
   AiChatAuthorInfo, AiModelConfig, AiModelProvider, BuiltInReasoning, GatewayModelCapabilities,
-  REASONING_LEVELS, ReasoningLevel, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT,
+  REASONING_LEVELS, ReasoningLevel, SUGGESTED_MODELS, SuggestedModelId, WORKERS_AI_OUTPUT_LIMIT,
 } from "@gadgets/workshop-shared/api";
 import { traceChat } from "./agent-tracing.js";
 import {
@@ -199,6 +199,36 @@ const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 
 // of each request, which prices the model that answered (see AiGatewayLogRoute); the estimate
 // only sizes the resends that keep a prompt cached (see CachedRequest).
 const AUTO_ROUTER_COST: ModelCost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
+
+// What Cloudflare's catalog pages charge for the suggested AI Gateway catalog models, in US$ per
+// million tokens of input and of output: pi has no catalog of them to take a cost from. The pages
+// price no cached tokens, so those count for nothing. A chat's real cost comes from the gateway's
+// log of each request (see AiGatewayLogRoute); these price a request whose log gives none. Total
+// over the suggested ids, so that one listed there does not compile until it is decided here.
+const AI_GATEWAY_CATALOG_PRICES: Record<SuggestedModelId<"ai-gateway-catalog">,
+    { input: number, output: number } | null> = {
+  "google/gemini-4-argon": { input: 2, output: 10 },
+  "google/gemini-4-carbon": { input: 2, output: 10 },
+  "google/gemini-4-hydrogen": { input: 1.5, output: 7.5 },
+  "moonshotai/kimi-k3.1-pro": { input: 2, output: 10 },
+  // Its page lists no base price, only that of a prompt of 200K tokens or more ($4 and $12), so
+  // its cost is left unknown rather than guessed.
+  "xai/grok-4.7": null,
+  "meta/muse-spark-1.3": { input: 1.25, output: 4.25 },
+  "meta/muse-wonder-1.0": { input: 4, output: 20 },
+};
+
+/**
+ * What Cloudflare lists an AI Gateway catalog model at, in US$ per million tokens of input and of
+ * output. Undefined for a model with no listed price.
+ */
+export function aiGatewayCatalogPrice(modelId: string)
+    : { input: number, output: number } | undefined {
+  // Object.hasOwn, so that an ID like "constructor" does not find an inherited entry.
+  return Object.hasOwn(AI_GATEWAY_CATALOG_PRICES, modelId)
+      ? AI_GATEWAY_CATALOG_PRICES[modelId as SuggestedModelId<"ai-gateway-catalog">] ?? undefined
+      : undefined;
+}
 
 // pi's builtin catalogs, by provider. Import per-provider, not providers/all.
 const CATALOGS: Partial<Record<AiModelProvider, Record<string, Model<Api>>>> = {
@@ -424,6 +454,30 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         cost: catalog?.cost ?? ZERO_COST,
         ...window,
         compat: { supportsStore: false, supportsDeveloperRole: false },
+      };
+    case "ai-gateway-catalog":
+      // A model of AI Gateway's own catalog, which Cloudflare bills with no provider key. The
+      // gateway serves it on no route, /compat included, only through the Workers AI binding's
+      // run(), which takes a Chat Completions request (see catalogRunFetch). pi addresses that
+      // request here, where nothing answers: the handle's fetch carries it to run() instead. The
+      // flags keep the request to what Chat Completions has for every vendor behind the catalog:
+      // no `store`, no "developer" role, no OpenAI cache retention, and the response cap as
+      // `max_completion_tokens`, the field Cloudflare's Agents SDK sends a catalog model. No
+      // reasoning level is offered, since none is known to mean the same to each vendor.
+      return {
+        id: config.model,
+        name: catalog?.name ?? config.model,
+        api: "openai-completions",
+        provider: "ai-gateway-catalog",
+        baseUrl: `${gatewayUrl}/run/v1`,
+        reasoning: false,
+        input: catalog?.input ?? ["text", "image"],
+        cost: { ...ZERO_COST, ...aiGatewayCatalogPrice(config.model) },
+        ...window,
+        compat: {
+          supportsStore: false, supportsDeveloperRole: false, supportsLongCacheRetention: false,
+          maxTokensField: "max_completion_tokens",
+        },
       };
     case "cloudflare-auto-router":
       // Auto Router answers on the gateway's /compat route in Chat Completions format whichever
@@ -859,6 +913,12 @@ function getModelViaUserGateway(
   userGateway: UserGatewayRouting,
   sessionAffinity?: string,
 ): ModelHandle {
+  // A catalog model is reached through a Workers AI binding (see catalogRunFetch), and the
+  // deployment has none into a user's account.
+  if (config.provider === "ai-gateway-catalog") {
+    throw new Error("AI Gateway catalog models run only over this deployment's Workers AI " +
+        "binding, so a connected Cloudflare account can't be billed for them.");
+  }
   // Route through the user's AI Gateway data plane, speaking each provider's native API (see
   // gatewayNativeModel; unified *billing* has no API requirements). Auth is the connected user's
   // Cloudflare token via `cf-aig-authorization` (authorized by its `aig.run` scope); the
@@ -935,6 +995,40 @@ function bindingFetch(binding: Ai): FetchFunction {
   return (input, init) => (binding as unknown as AiFetchBinding).fetch(input, init);
 }
 
+/**
+ * `Ai#run` takes `openaiEndpoint` and, with `returnRawResponse`, answers for any model with the
+ * `Response` itself, but @cloudflare/workers-types declares neither for a model outside its own
+ * list, so the binding is cast structurally, as it is for its fetch.
+ */
+type AiRunBinding = {
+  run(model: string, input: Record<string, unknown>,
+      options: AiOptions & { openaiEndpoint: string, returnRawResponse: true }): Promise<Response>;
+};
+
+// The fetch of an "ai-gateway-catalog" model: pi's Chat Completions request, carried through
+// `gateway` by the binding's run(), since the gateway serves a catalog model on none of its HTTP
+// routes. The request's `model` names the model and the rest of its body is the input. run()
+// returns the gateway's own response, JSON or an event stream, for pi to read as it reads any
+// other. Of the request's headers, the two the gateway acts on go as the options run() has for
+// them: the attribution metadata and the cache bypass.
+function catalogRunFetch(binding: Ai, gateway: string): FetchFunction {
+  return async (input, init) => {
+    const request = new Request(input, init);
+    const { model, ...body } = await request.json<{ model: string } & Record<string, unknown>>();
+    const metadata = request.headers.get("cf-aig-metadata");
+    return (binding as unknown as AiRunBinding).run(model, body, {
+      gateway: {
+        id: gateway,
+        ...(metadata !== null ? { metadata: JSON.parse(metadata) } : {}),
+        ...(request.headers.get("cf-aig-skip-cache") === "true" ? { skipCache: true } : {}),
+      },
+      openaiEndpoint: "/v1/chat/completions",
+      returnRawResponse: true,
+      signal: request.signal,
+    });
+  };
+}
+
 // Platform free-tier path: route through the deployment's configured AI Gateway (platform-funded).
 // Used only for requests that are NOT billed to a connected user's account.
 function getModelViaGateway(
@@ -945,6 +1039,14 @@ function getModelViaGateway(
 ): ModelHandle {
   const metadata = buildMetadata(initiator, options.metadata);
   const binding = gwConfig.bindingFor(config.provider);
+  // A catalog model has no route on the gateway's HTTPS host to take the binding's place (see
+  // catalogRunFetch). The constructor refuses an environment that enables its provider without
+  // the binding, so this fires for a provider an admin enabled.
+  if (!binding && config.provider === "ai-gateway-catalog") {
+    throw new Error('Provider "ai-gateway-catalog" can only use the Workers AI binding ' +
+        "transport, which this deployment does not: bind WORKERS_AI and leave " +
+        "CF_AI_GATEWAY_USE_BINDING unset.");
+  }
   // No binding means either the provider can't ride one or the deployment has none; the second
   // case already required a token in the constructor, so this only fires for the first
   if (!binding && !gwConfig.apiToken) {
@@ -993,7 +1095,10 @@ function getModelViaGateway(
     // the gateway recognizes its own token there and applies the stored Google key instead.
     ...(config.provider === "google" ? { apiKey: gwConfig.apiToken } : {}),
     headers: gatewayAuthHeaders,
-    ...(binding ? { fetch: bindingFetch(binding) } : {}),
+    ...(binding ? {
+      fetch: config.provider === "ai-gateway-catalog"
+          ? catalogRunFetch(binding, gateway) : bindingFetch(binding),
+    } : {}),
     gatewayMetadata: metadata,
     sessionAffinity: options.sessionAffinity,
     reasoning: config.reasoning,
@@ -1155,6 +1260,9 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
     case "aws-bedrock":
       throw new Error("Amazon Bedrock models run only through an AI Gateway, which holds their " +
           "AWS credentials.");
+    case "ai-gateway-catalog":
+      throw new Error("AI Gateway catalog models run only through an AI Gateway, over its " +
+          "Workers AI binding.");
     default:
       config.provider satisfies never;
       throw new Error(`Unknown provider "${config.provider}".`);

@@ -47,6 +47,8 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   openrouter: 'sk-or-...',
   // Never shown: a Bedrock model runs only through a gateway, which holds its AWS credentials.
   'aws-bedrock': '',
+  // Never shown: a catalog model runs only through a gateway, on Cloudflare's billing.
+  'ai-gateway-catalog': '',
 }
 
 // Providers whose client can send no API key at all, so a proxy that extra headers authenticate
@@ -95,6 +97,8 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
     if (provider === 'cloudflare-auto-router') continue
     // A Bedrock model's AWS credentials are the gateway's to hold, so it is a gateway's alone.
     if (provider === 'aws-bedrock' && !gatewayMode) continue
+    // A model of AI Gateway's catalog is reached through a gateway's Workers AI binding alone.
+    if (provider === 'ai-gateway-catalog' && !gatewayMode) continue
     if (enabledProviders && !enabledProviders.has(provider)) continue
 
     // In gateway mode, suggested models are already built-in, so don't list them.

@@ -117,6 +117,27 @@ describe("AiGatewayConfig transport selection", () => {
     }))).toThrow("enabling the google provider requires CF_AI_GATEWAY_API_TOKEN");
   });
 
+  // The opposite case: a catalog model is reached through the binding's run() alone.
+  it("requires the binding when the AI Gateway catalog is enabled", () => {
+    const REFUSED = "ai-gateway-catalog inference can only ride the Workers AI binding " +
+        "transport, so enabling the ai-gateway-catalog provider requires the WORKERS_AI binding, " +
+        "with CF_AI_GATEWAY_USE_BINDING not set to false.";
+    const CATALOG = {
+      CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+      CF_AI_GATEWAY_PROVIDERS: "anthropic,ai-gateway-catalog",
+    };
+    expect(new AiGatewayConfig(env({ ...CATALOG, WORKERS_AI: binding }))
+        .bindingFor("ai-gateway-catalog")).toBe(binding);
+    // A token is no substitute, with no binding or with one the deployment opted out of.
+    expect(() => new AiGatewayConfig(env({
+      ...CATALOG, CF_AI_GATEWAY_API_TOKEN: "gateway-token", WORKERS_AI: undefined,
+    }))).toThrow(new Error(REFUSED));
+    expect(() => new AiGatewayConfig(env({
+      ...CATALOG, CF_AI_GATEWAY_API_TOKEN: "gateway-token", CF_AI_GATEWAY_USE_BINDING: "false",
+      WORKERS_AI: binding,
+    }))).toThrow(new Error(REFUSED));
+  });
+
   it("resolves the same-account gateway for binding-based callers (webFetch)", () => {
     expect(new AiGatewayConfig(bindingOnly).sameAccountGateway).toBe("platform-gateway");
     expect(new AiGatewayConfig(env({
@@ -152,7 +173,7 @@ const adminConfigKv = (config: Partial<AdminConfig>) => ({
 describe("GatewayModels", () => {
   const USER = { type: "user" as const, id: "user-1", name: "User" };
   const DISABLED_MESSAGE =
-      'The "Claude Fable 5.1" model is disabled on this deployment by an administrator.';
+      'The "Claude Haiku 5.5 (Unified)" model is disabled on this deployment by an administrator.';
   const ADDED: GatewayModel[] = [
     { provider: "anthropic", id: "claude-test", name: "Claude Test", contextWindow: 500000 },
     {
@@ -184,7 +205,7 @@ describe("GatewayModels", () => {
   it("offers each catalog model in its default mode, on enabled providers only", () => {
     const models = gatewayModels();
     expect(models.get("claude-opus-5-5")).toStrictEqual({
-      provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5",
+      provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5 (Unified)",
       contextWindow: 1000000, mode: "enabled", defaultMode: "enabled", added: false,
     });
     expect(models.get("gpt-6-sol")).toMatchObject(
@@ -216,28 +237,30 @@ describe("GatewayModels", () => {
   });
 
   it("hides an enabled model: unlisted, still resolved", () => {
-    const models = gatewayModels({ modelModes: { "claude-fable-5-1": "hidden" } });
-    expect(models.get("claude-fable-5-1")).toMatchObject({ mode: "hidden", defaultMode: "enabled" });
-    expect(ids(models.list("language"))).not.toContain("claude-fable-5-1");
-    expect(models.resolve("claude-fable-5-1")?.profile.name).toBe("Claude Fable 5.1");
-    expect(() => models.refuseDisabled("claude-fable-5-1")).not.toThrow();
+    const models = gatewayModels({ modelModes: { "claude-haiku-5-5": "hidden" } });
+    expect(models.get("claude-haiku-5-5"))
+        .toMatchObject({ mode: "hidden", defaultMode: "enabled" });
+    expect(ids(models.list("language"))).not.toContain("claude-haiku-5-5");
+    expect(models.resolve("claude-haiku-5-5")?.profile.name).toBe("Claude Haiku 5.5 (Unified)");
+    expect(() => models.refuseDisabled("claude-haiku-5-5")).not.toThrow();
   });
 
   it("disables an enabled model: unlisted and unresolved, with its ID still reserved", () => {
-    const models = gatewayModels({ modelModes: { "claude-fable-5-1": "disabled" } });
-    expect(models.get("claude-fable-5-1")).toMatchObject(
-        { name: "Claude Fable 5.1", mode: "disabled", defaultMode: "enabled" });
-    expect(ids(models.all)).toContain("claude-fable-5-1");
-    expect(ids(models.list("language"))).not.toContain("claude-fable-5-1");
-    expect(models.resolve("claude-fable-5-1")).toBeUndefined();
-    expect(() => models.refuseDisabled("claude-fable-5-1")).toThrow(new Error(DISABLED_MESSAGE));
+    const models = gatewayModels({ modelModes: { "claude-haiku-5-5": "disabled" } });
+    expect(models.get("claude-haiku-5-5")).toMatchObject(
+        { name: "Claude Haiku 5.5 (Unified)", mode: "disabled", defaultMode: "enabled" });
+    expect(ids(models.all)).toContain("claude-haiku-5-5");
+    expect(ids(models.list("language"))).not.toContain("claude-haiku-5-5");
+    expect(models.resolve("claude-haiku-5-5")).toBeUndefined();
+    expect(() => models.refuseDisabled("claude-haiku-5-5")).toThrow(new Error(DISABLED_MESSAGE));
   });
 
   it("enables a model the catalog hides, in its catalog position", () => {
     const models = gatewayModels({ modelModes: { "claude-opus-5": "enabled" } });
     expect(models.get("claude-opus-5")).toMatchObject({ mode: "enabled", defaultMode: "hidden" });
     const listed = ids(models.list("language"));
-    expect(listed.indexOf("claude-opus-5")).toBe(listed.indexOf("claude-fable-5-1") + 1);
+    // Fable 5.1, between the two in the catalog, is hidden.
+    expect(listed.indexOf("claude-opus-5")).toBe(listed.indexOf("claude-haiku-5-5") + 1);
   });
 
   it("refuses only a disabled gateway model", () => {
@@ -277,8 +300,9 @@ describe("GatewayModels", () => {
       mode: "enabled", defaultMode: "enabled", added: true,
     });
     const listed = ids(models.list("language"));
-    // Haiku 4.5 is hidden, so the last Anthropic catalog model the pickers list is Fable 5.1.
-    expect(listed.indexOf("claude-test")).toBe(listed.indexOf("claude-fable-5-1") + 1);
+    // The catalog models after it are hidden, so the last Anthropic catalog model the pickers
+    // list is Haiku 5.5.
+    expect(listed.indexOf("claude-test")).toBe(listed.indexOf("claude-haiku-5-5") + 1);
     expect(listed.indexOf("claude-test-2")).toBe(listed.indexOf("claude-test") + 1);
   });
 
@@ -317,7 +341,7 @@ describe("GatewayModels", () => {
     ]);
     expect(models.providerSettings.map(({ provider }) => provider)).toEqual(
         ["openai", "anthropic", "cloudflare-auto-router", "cloudflare", "google", "openrouter",
-         "aws-bedrock"]);
+         "aws-bedrock", "ai-gateway-catalog"]);
     expect(models.addableProviders).toEqual(["openai", "anthropic", "cloudflare"]);
   });
 
@@ -367,7 +391,7 @@ describe("GatewayModels", () => {
       { provider: "cloudflare", id: "gemini-3.6-flash", name: "Impostor", contextWindow: 1000 },
     ] });
     expect(models.get("claude-opus-5-5")).toMatchObject(
-        { provider: "anthropic", name: "Claude Opus 5.5", added: false });
+        { provider: "anthropic", name: "Claude Opus 5.5 (Unified)", added: false });
     expect(ids(models.all).filter(id => id === "claude-opus-5-5")).toHaveLength(1);
     expect(models.resolve("claude-opus-5-5")?.config).toStrictEqual(
         { provider: "anthropic", model: "claude-opus-5-5", apiToken: "" });
@@ -434,7 +458,7 @@ describe("GatewayModels", () => {
     it("gives a model the reasoning level set for it, and no other model", () => {
       const models = gatewayModels({ modelSettings: { "claude-opus-5-5": { reasoning: "low" } } });
       expect(models.get("claude-opus-5-5")).toStrictEqual({
-        provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5",
+        provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5 (Unified)",
         contextWindow: 1000000, mode: "enabled", defaultMode: "enabled", added: false,
         settings: { reasoning: "low" },
       });
@@ -603,6 +627,12 @@ describe("GatewayModels", () => {
     });
   });
 
+  // A gateway model is looked up by its ID alone, whichever provider lists it.
+  it("lists each suggested ID under one provider", () => {
+    const listed = Object.values(SUGGESTED_MODELS).flatMap(models => Object.keys(models));
+    expect(listed.filter((id, at) => listed.indexOf(id) !== at)).toEqual([]);
+  });
+
   it("names the providers a model may be added under, in catalog order", () => {
     // The gateway enables ollama here, but does not serve it.
     const models = gatewayModels({}, "openai,ollama,anthropic,mistral");
@@ -655,7 +685,7 @@ describe("GatewayModels", () => {
 
   describe("providers", () => {
     const CATALOG_ORDER = ["cloudflare-auto-router", "cloudflare", "anthropic", "openai", "google",
-      "openrouter", "aws-bedrock"];
+      "openrouter", "aws-bedrock", "ai-gateway-catalog"];
     const GEMINI = "gemini-3.6-flash";
     const NO_TOKEN = 'Provider "google" cannot use the Workers AI binding transport, and no ' +
         "CF_AI_GATEWAY_API_TOKEN is configured for the HTTPS one.";
@@ -707,11 +737,13 @@ describe("GatewayModels", () => {
             { provider: "google", enabledBy: "admin", needsApiToken: false },
             { provider: "openrouter", needsApiToken: false },
             { provider: "aws-bedrock", needsApiToken: false },
+            { provider: "ai-gateway-catalog", needsApiToken: false },
           ]);
       // The environment's listing comes first, so a provider it lists can't be turned off.
       expect(gatewayModels({ addedProviders: ["anthropic", "cloudflare"] }, "anthropic")
           .providerSettings.map(({ enabledBy }) => enabledBy))
-          .toEqual([undefined, "admin", "environment", undefined, undefined, undefined, undefined]);
+          .toEqual([undefined, "admin", "environment", undefined, undefined, undefined, undefined,
+            undefined]);
     });
 
     it("turns on the providers the gateway holds a key for, which only removing the key turns off", () => {
@@ -726,7 +758,43 @@ describe("GatewayModels", () => {
       expect(keyed.keyedByGateway("openrouter")).toBe(true);
       expect(keyed.keyedByGateway("anthropic")).toBe(false);
       expect(keyed.addableProviders).toContain("openrouter");
-      expect(keyed.get("moonshotai/kimi-k3.1-pro")?.provider).toBe("openrouter");
+      expect(keyed.get("deepseek/deepseek-v4.1-flash")?.provider).toBe("openrouter");
+    });
+
+    it("turns the AI Gateway catalog on for an admin, with its models and room for more", () => {
+      const CATALOG = Object.keys(SUGGESTED_MODELS["ai-gateway-catalog"]);
+      const off = gatewayModels({}, "anthropic");
+      expect(off.get("google/gemini-4-argon")).toBeUndefined();
+      expect(off.providerSettings.at(-1))
+          .toStrictEqual({ provider: "ai-gateway-catalog", needsApiToken: false });
+
+      const on = gatewayModels({ addedProviders: ["ai-gateway-catalog"] }, "anthropic");
+      expect([...on.providers]).toEqual(["anthropic", "ai-gateway-catalog"]);
+      expect(on.providerSettings.at(-1)).toStrictEqual(
+          { provider: "ai-gateway-catalog", enabledBy: "admin", needsApiToken: false });
+      // Its models follow the other providers', in catalog order, each enabled.
+      expect(ids(on.all)).toEqual([...Object.keys(SUGGESTED_MODELS.anthropic), ...CATALOG]);
+      expect(ids(on.list("language")).slice(-CATALOG.length)).toEqual(CATALOG);
+      expect(on.resolve("xai/grok-4.7")).toStrictEqual({
+        profile: { type: "agent", id: "xai/grok-4.7", name: "Grok 4.7 (Unified)" },
+        config: { provider: "ai-gateway-catalog", model: "xai/grok-4.7", apiToken: "" },
+      });
+      // Any other catalog ID can be added under it by hand. The ID it lists is taken for
+      // OpenRouter, whose own list names the same model the same way.
+      const grok: GatewayModel = { provider: "ai-gateway-catalog", id: "xai/grok-4.6",
+        name: "Grok 4.6", contextWindow: 256000 };
+      expect(on.addableProviders).toEqual(["anthropic", "ai-gateway-catalog"]);
+      expect(() => on.assertAddable(grok)).not.toThrow();
+      expect(() => off.assertAddable(grok))
+          .toThrow('Provider "ai-gateway-catalog" is not enabled on this deployment.');
+      expect(() => gatewayModels({ addedProviders: ["openrouter"] }, "anthropic").assertAddable(
+          { ...grok, provider: "openrouter", id: "moonshotai/kimi-k3.1-pro" }))
+          .toThrow('"moonshotai/kimi-k3.1-pro" is already a suggested model.');
+      // The environment's listing of it is the other way on.
+      const listed = new GatewayModels(
+          new AiGatewayConfig(tokenless("anthropic,ai-gateway-catalog")), NO_CONFIG);
+      expect(listed.providerSettings.at(-1)).toStrictEqual(
+          { provider: "ai-gateway-catalog", enabledBy: "environment", needsApiToken: false });
     });
 
     it("reports a provider whose requests need a token the deployment lacks", () => {
@@ -898,6 +966,15 @@ describe("checkGatewayKeys", () => {
       expect(init?.body).toBeUndefined();
       expect((init!.headers as Record<string, string>)["cf-aig-collect-log"]).toBe("false");
     }
+  });
+
+  // Bedrock, Google and the gateway's own catalog have no check, so no answer turns them on.
+  it("finds a key only for the providers it has a check for", async () => {
+    const { binding } = keyBinding({
+      "openrouter/v1/key": 200, "openai/models": 200, "anthropic/v1/models?limit=1": 200,
+    });
+    expect(await checkGatewayKeys(config("keys-all", binding), 0))
+        .toEqual(new Set(["openai", "anthropic", "openrouter"]));
   });
 
   it("asks again once its answer is ten minutes old, behind it, and keeps a key through a failed check",

@@ -2060,9 +2060,10 @@ export interface AdminApi {
   /**
    * The models `provider` lists through the deployment's AI Gateway, for an admin to pick one to
    * add: the ones that call tools and answer in text, read through the gateway with its stored key
-   * and cached for ten minutes. No prompt is sent. Amazon Bedrock has no list behind the gateway,
-   * so its suggested models are returned. A provider that is off can be listed. Throws outside AI
-   * Gateway mode and for a provider the gateway does not serve.
+   * and cached for ten minutes. No prompt is sent. Amazon Bedrock and AI Gateway's own catalog
+   * have no list behind the gateway, so their suggested models are returned. A provider that is
+   * off can be listed. Throws outside AI Gateway mode and for a provider the gateway does not
+   * serve.
    */
   listGatewayProviderModels(provider: AiModelProvider): Promise<GatewayProviderModels>;
 
@@ -2309,12 +2310,14 @@ export type CloudflareAccountOption = {
 /**
  * Supported AI providers. "cloudflare-auto-router" is AI Gateway's Auto Router, which picks the
  * model behind each request (see AUTO_ROUTER_MODEL_ID); it exists only inside a gateway, as does
- * "aws-bedrock", whose AWS credentials only a gateway can hold (it signs each request with them).
- * "openrouter" runs through a gateway or with the user's own OpenRouter key.
+ * "aws-bedrock", whose AWS credentials only a gateway can hold (it signs each request with them),
+ * and "ai-gateway-catalog", the models of AI Gateway's own catalog, named "<author>/<model>",
+ * which Cloudflare bills with no provider key and a gateway serves over the Workers AI binding
+ * alone. "openrouter" runs through a gateway or with the user's own OpenRouter key.
  */
 export type AiModelProvider =
     "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "cloudflare-auto-router" |
-    "openrouter" | "aws-bedrock";
+    "openrouter" | "aws-bedrock" | "ai-gateway-catalog";
 
 /** The model ID of AI Gateway's Auto Router, the one model of "cloudflare-auto-router". */
 export const AUTO_ROUTER_MODEL_ID = "cloudflare/auto";
@@ -2777,8 +2780,8 @@ type SuggestedModel = {
   /**
    * Makes the model's default mode 'hidden' rather than 'enabled' (see GatewayModelMode): still
    * resolvable for stored references, not offered in pickers. Set on models superseded by a newer
-   * one, which chats, spawners, and preferences created earlier may still name. A deployment's
-   * admin can override the default for its AI Gateway.
+   * one, which chats, spawners, and preferences created earlier may still name, and on ones priced
+   * well above the rest. A deployment's admin can override the default for its AI Gateway.
    */
   hidden?: true;
 
@@ -2787,6 +2790,8 @@ type SuggestedModel = {
 };
 
 // The literal is kept apart from the export so SuggestedModelId can derive the model ids from it.
+// A name ending "(Unified)" is that of a model Cloudflare bills through AI Gateway's Unified
+// Billing, where the gateway holds no key of the provider's own.
 const SUGGESTED_MODEL_CATALOG = {
   // First so that, when its provider is on, Auto leads the model pickers and is the model a new
   // user or chat gets by default, unless the admin lists the providers in another order.
@@ -2830,10 +2835,11 @@ const SUGGESTED_MODEL_CATALOG = {
     },
   },
   "anthropic": {
-    "claude-opus-5-5": {name: "Claude Opus 5.5", contextWindow: 1000000},
-    "claude-sonnet-5-5": {name: "Claude Sonnet 5.5", contextWindow: 1000000},
-    "claude-haiku-5-5": {name: "Claude Haiku 5.5", contextWindow: 1000000},
-    "claude-fable-5-1": {name: "Claude Fable 5.1", contextWindow: 1000000},
+    "claude-opus-5-5": {name: "Claude Opus 5.5 (Unified)", contextWindow: 1000000},
+    "claude-sonnet-5-5": {name: "Claude Sonnet 5.5 (Unified)", contextWindow: 1000000},
+    "claude-haiku-5-5": {name: "Claude Haiku 5.5 (Unified)", contextWindow: 1000000},
+    // Hidden for its price, several times the others': an admin enables it where it is wanted.
+    "claude-fable-5-1": {name: "Claude Fable 5.1", contextWindow: 1000000, hidden: true},
     "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000, hidden: true},
     "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000, hidden: true},
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000, hidden: true},
@@ -2842,7 +2848,11 @@ const SUGGESTED_MODEL_CATALOG = {
     // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the
     // preferred compaction budget, not as the hard context limit.
     "gpt-6.1-sol": {
-      name: "GPT-6.1 Sol", contextWindow: 1050000, outputLimit: 128000,
+      name: "GPT-6.1 Sol (Unified)", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
+    "gpt-6.1-terra": {
+      name: "GPT-6.1 Terra (Unified)", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
     },
     "gpt-6-sol": {
@@ -2851,12 +2861,14 @@ const SUGGESTED_MODEL_CATALOG = {
       hidden: true,
     },
     "gpt-6-luna": {
-      name: "GPT-6 Luna", contextWindow: 1050000, outputLimit: 128000,
+      name: "GPT-6 Luna (Unified)", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
     },
+    // Hidden for its price, several times the others': an admin enables it where it is wanted.
     "gpt-6-astra": {
       name: "GPT-6 Astra", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      hidden: true,
     },
     "gpt-5.6-sol": {
       name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000,
@@ -2879,13 +2891,13 @@ const SUGGESTED_MODEL_CATALOG = {
   },
   "ollama": {
   },
-  // OpenRouter's own ids, which no other provider's catalog shares.
+  // OpenRouter's own ids, which no other provider's catalog shares. AI Gateway's catalog names
+  // its models the same way, so a model listed there ("moonshotai/kimi-k3.1-pro") is left out here.
   "openrouter": {
     "anthropic/claude-sonnet-5.5": {name: "Claude Sonnet 5.5 (OpenRouter)", contextWindow: 1000000},
     "anthropic/claude-opus-5.5": {name: "Claude Opus 5.5 (OpenRouter)", contextWindow: 1000000},
     "openai/gpt-6.1-sol": {name: "GPT-6.1 Sol (OpenRouter)", contextWindow: 1050000},
     "openai/gpt-6-luna": {name: "GPT-6 Luna (OpenRouter)", contextWindow: 1050000},
-    "moonshotai/kimi-k3.1-pro": {name: "Kimi K3.1 Pro (OpenRouter)", contextWindow: 1048576},
     "deepseek/deepseek-v4.1-flash": {name: "DeepSeek V4.1 Flash (OpenRouter)", contextWindow: 1048576},
     "deepseek/deepseek-v4-pro-0813": {name: "DeepSeek V4 Pro 0813 (OpenRouter)", contextWindow: 1048576},
   },
@@ -2896,6 +2908,19 @@ const SUGGESTED_MODEL_CATALOG = {
     "global.anthropic.claude-opus-5-5": {name: "Claude Opus 5.5 (Bedrock)", contextWindow: 1000000},
     "global.anthropic.claude-haiku-5-5": {name: "Claude Haiku 5.5 (Bedrock)", contextWindow: 1000000},
     "global.amazon.nova-2-lite-v1:0": {name: "Nova 2 Lite (Bedrock)", contextWindow: 1000000},
+  },
+  // AI Gateway's catalog ids, with the context windows its catalog pages give. An id here is
+  // one no other provider's catalog may list: a gateway model is looked up by its id alone.
+  "ai-gateway-catalog": {
+    "google/gemini-4-argon": {name: "Gemini 4 Argon (Unified)", contextWindow: 1048576},
+    "google/gemini-4-carbon": {name: "Gemini 4 Carbon (Unified)", contextWindow: 1048576},
+    "google/gemini-4-hydrogen": {name: "Gemini 4 Hydrogen (Unified)", contextWindow: 1048576},
+    "moonshotai/kimi-k3.1-pro": {name: "Kimi K3.1 Pro (Unified)", contextWindow: 1048576},
+    "xai/grok-4.7": {name: "Grok 4.7 (Unified)", contextWindow: 500000},
+    // The catalog pages give Muse's models no context window, so each has the one a model of
+    // unknown window is taken to have.
+    "meta/muse-spark-1.3": {name: "Muse Spark 1.3 (Unified)", contextWindow: 128000},
+    "meta/muse-wonder-1.0": {name: "Muse Wonder 1.0 (Unified)", contextWindow: 128000},
   },
 } satisfies Record<AiModelProvider, Record<string, SuggestedModel>>;
 

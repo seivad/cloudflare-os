@@ -156,6 +156,23 @@ describe("listGatewayProviderModels", () => {
     await expect(listGatewayProviderModels(config, "ollama", 0))
         .rejects.toThrow('Provider "ollama" is not served through AI Gateway.');
   });
+
+  it("gives the AI Gateway catalog's suggested set, each at its listed price", async () => {
+    const { binding, config } = gateway("list-d", () => new Response("", { status: 500 }));
+    const listing = await listGatewayProviderModels(config, "ai-gateway-catalog", 0);
+    expect(listing.state).toBe("ready");
+    expect(listing.models.map(model => model.id))
+        .toEqual(Object.keys(SUGGESTED_MODELS["ai-gateway-catalog"]));
+    expect(listing.models[0]).toStrictEqual({
+      provider: "ai-gateway-catalog", id: "google/gemini-4-argon",
+      name: "Gemini 4 Argon (Unified)", contextWindow: 1048576, price: { input: 2, output: 10 },
+    });
+    // Its catalog page lists no base price, so it shows none rather than a guess.
+    expect(listing.models.find(model => model.id === "xai/grok-4.7"))
+        .toStrictEqual({ provider: "ai-gateway-catalog", id: "xai/grok-4.7",
+          name: "Grok 4.7 (Unified)", contextWindow: 500000 });
+    expect(binding.fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe("listGatewayProviderModelsForUser", () => {

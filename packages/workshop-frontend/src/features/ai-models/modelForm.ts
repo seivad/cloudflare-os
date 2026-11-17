@@ -16,6 +16,7 @@ export const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   'cloudflare-auto-router': 'AI Gateway Auto Router',
   openrouter: 'OpenRouter',
   'aws-bedrock': 'Amazon Bedrock',
+  'ai-gateway-catalog': 'AI Gateway catalog',
 }
 
 /** Each reasoning level's name as the Models tab shows it. */

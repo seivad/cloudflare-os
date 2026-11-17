@@ -242,6 +242,7 @@ describe('suggestModels', () => {
       ['openai', 'openai'],
       ['google', 'google'],
       ['cloudflare', 'cloudflare-workers-ai'],
+      ['ai-gateway-catalog', 'cloudflare-ai-gateway'],
     ] as const)('reads %s from models.dev’s %s', (provider, modelsDevId) => {
       const suggestions = suggestModels({ [modelsDevId]: { models: { HAIKU } } }, [provider], [])
       expect(suggestions.map((suggestion) => [suggestion.provider, suggestion.id]))

@@ -1449,6 +1449,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error("Amazon Bedrock models run only through an AI Gateway, which holds their " +
           "AWS credentials.");
     }
+    if (!models && config.provider === "ai-gateway-catalog") {
+      throw new Error("AI Gateway catalog models run only through an AI Gateway, over its " +
+          "Workers AI binding.");
+    }
     for (let limit of [config.contextWindow, config.outputLimit]) {
       if (limit !== undefined && !(Number.isSafeInteger(limit) && limit > 0)) {
         throw new Error("Token limits must be positive integers.");

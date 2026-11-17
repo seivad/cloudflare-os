@@ -20,7 +20,7 @@ const QUICK_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
  */
 const GATEWAY_PROVIDERS: ReadonlySet<string> = new Set<AiModelProvider>([
   "anthropic", "openai", "google", "cloudflare", "cloudflare-auto-router", "openrouter",
-  "aws-bedrock",
+  "aws-bedrock", "ai-gateway-catalog",
 ]);
 
 /** The providers a model may be added under: the gateway's, less Auto Router's, which has one. */
@@ -140,13 +140,23 @@ export class AiGatewayConfig {
           `${names} provider${httpsOnly.length > 1 ? "s" : ""} requires ` +
           "CF_AI_GATEWAY_API_TOKEN.");
     }
+    // The opposite case: a catalog model is reached through the binding's run() alone (see
+    // catalogRunFetch in ai-models.ts), which a token can't stand in for.
+    if (this.providers.has("ai-gateway-catalog") && !this.binding) {
+      throw new Error(
+          "ai-gateway-catalog inference can only ride the Workers AI binding transport, so " +
+          "enabling the ai-gateway-catalog provider requires the WORKERS_AI binding, with " +
+          "CF_AI_GATEWAY_USE_BINDING not set to false.");
+    }
   }
 
   /**
    * Transport for a provider's gateway inference: the Workers AI binding when present, except for
    * the providers in {@link HTTPS_ONLY_PROVIDERS}, which ride HTTPS with the token (the
    * constructor guarantees a token whenever the environment enables one of them; one that an
-   * admin enabled without a token is refused per request, in getModelViaGateway).
+   * admin enabled without a token is refused per request, in getModelViaGateway). The
+   * "ai-gateway-catalog" provider has no HTTPS transport to fall back on, and is held to the
+   * binding the same two ways.
    */
   bindingFor(provider: string): Ai | undefined {
     return HTTPS_ONLY_PROVIDERS.has(provider) ? undefined : this.binding;
@@ -169,8 +179,9 @@ export class AiGatewayConfig {
  * How the gateway is asked whether it holds a provider's key: a request that reads nothing of the
  * account's and sends no prompt, which the provider answers only with a key. OpenRouter's model
  * list answers without one, so its key's own endpoint is asked. Bedrock has none of these behind
- * the gateway, and Google rides HTTPS only (see HTTPS_ONLY_PROVIDERS), so neither is checked: an
- * admin or the environment turns them on.
+ * the gateway, Google rides HTTPS only (see HTTPS_ONLY_PROVIDERS), and the gateway's own catalog
+ * runs on Cloudflare's billing with no key to hold, so none of the three is checked: an admin or
+ * the environment turns them on.
  */
 const KEY_CHECKS: Partial<Record<AiModelProvider, { path: string; headers?: Record<string, string> }>> = {
   openai: { path: "openai/models" },

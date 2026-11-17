@@ -175,7 +175,7 @@ describe("AdminSettings records each admin's change before making it", () => {
     }]);
 
     const providers = ["anthropic", "cloudflare-auto-router", "cloudflare", "openai", "google",
-      "openrouter", "aws-bedrock"];
+      "openrouter", "aws-bedrock", "ai-gateway-catalog"];
     await inDo(admin => admin.setGatewayProviderOrder(providers, ACTOR));
     expect(records()[1]!.changes).toStrictEqual(
         [{ setting: "providerOrder", before: "[]", after: JSON.stringify(providers) }]);
