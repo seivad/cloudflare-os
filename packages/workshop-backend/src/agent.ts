@@ -770,6 +770,19 @@ Every Gadget's \`env\`, as well as your own \`executeCode\` env, always contains
 
 Note that the iframe sandbox on the client side prohibits modal popup boxes like alert() and confirm(), so do not use those.
 
+## Voice in a Gadget
+
+client.js also has a \`voice\` global: speech to text and text to speech, which the Workshop page records and plays for the Gadget (its frame can neither open the microphone nor reach the network). Use it for anything a person talks to or listens to, rather than the browser's own speech APIs, which do not work in the frame. Every call is asynchronous:
+
+* \`await voice.available()\`: whether voice can be used on this page. Check it before showing a microphone button.
+* \`await voice.listen({ untilSilence, maxSeconds, model, language, onLevel })\` records until the person pauses (\`untilSilence\`, default true) or for at most \`maxSeconds\` (default 60), and answers \`{ text, model }\`, or null if nothing was said. The first call each time the Gadget is opened asks the person, in the Workshop's own UI, to allow the microphone; it throws if they refuse. The Workshop shows a "Gadget is listening" indicator meanwhile. \`onLevel(level)\` (0 to 1) can drive a level meter. Call it from a click, and show while it listens.
+* \`await voice.stopListening()\` ends a \`listen()\` early, keeping what was said.
+* \`await voice.speak(text, { model, voice })\` speaks aloud through the Workshop page and resolves once it has been spoken; \`await voice.stopSpeaking()\` cuts it off. Without options it uses the person's own choice of model and voice.
+* \`await voice.synthesize(text, { model, voice })\` answers \`{ dataUrl, contentType, model }\` without playing it, for an \`<audio>\` element in the Gadget (a \`data:\` URL is what the frame can play). At most 2,000 characters and 20 calls a minute.
+* \`await voice.models()\` lists the models, each \`{ id, name, kind: "transcribe" | "speak", voices?, defaultVoice?, priceNote, isDefault? }\`. Offer them in a picker when the person wants to choose.
+
+For a spoken conversation, loop: \`listen()\`, send the text to the Gadget's server (which can answer with a language-model binding), \`speak()\` the answer, and listen again; give the person a button to stop. Each recording and each spoken reply is paid from the deployment's AI credits.
+
 ## Server -> Client callbacks and subscriptions
 
 Note that Cap'n Web is a bidirectional object capability protocol, meaning, among other things, you can pass a function over RPC, in the params or results of another function. This actually passes the function "by reference": the receiving end actually receives an RPC stub, which can be used to call back over RPC to the original function. This, of course, causes the function to become async, even if the original was synchronous.

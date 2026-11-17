@@ -110,6 +110,9 @@ import { AlwaysApproveButton, ResolveButton } from "./components/ResolveButton";
 import { RestrictedApprovalNotice } from "./components/RestrictedApprovalNotice";
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/WorkshopControls";
 import { WebFetchRequestCard } from "./features/web-fetch/WebFetchRequestCard";
+import { useVoice } from "./features/voice/VoiceContext";
+import { ReadAloudButton } from "./features/voice/VoiceControls";
+import { useConversation, type SpokenMessage } from "./features/voice/useConversation";
 import { actionLogResumed, useActionEntries } from "./useActions";
 import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useResolveAction } from "./useResolveAction";
@@ -4895,6 +4898,38 @@ function ChatInterface({
     return latest;
   }, [completedAgentTurnMessageSeqs]);
 
+  // Voice: the chat's messages as conversation mode reads them, the conversation itself, and
+  // reading each finished reply aloud when the person asked for that.
+  const voice = useVoice();
+  const spokenMessages = useMemo<SpokenMessage[]>(() => currentMessages.flatMap((m) =>
+      m.type === "message" ? [{ sequence: m.sequence, fromAgent: m.author.type === "agent", text: m.message }] : []),
+  [currentMessages]);
+  const conversation = useConversation({
+    voice,
+    isAgentActive,
+    messages: spokenMessages,
+    send: (text) => handleSend(text),
+  });
+  const stopConversation = conversation.stop;
+  useEffect(() => stopConversation, [selectedChatId, stopConversation]);
+  // Replies finished before the page (or this chat) was opened are not read out.
+  const readFromSeqRef = useRef<{ chat: number | null; after: number | null } | null>(null);
+  useEffect(() => {
+    if (readFromSeqRef.current?.chat !== selectedChatId) {
+      readFromSeqRef.current = { chat: selectedChatId, after: latestCompletedAgentTurnMessageSeq };
+      return;
+    }
+    const after = readFromSeqRef.current.after;
+    if (latestCompletedAgentTurnMessageSeq === null || (after !== null && latestCompletedAgentTurnMessageSeq <= after)) return;
+    readFromSeqRef.current.after = latestCompletedAgentTurnMessageSeq;
+    if (!voice?.settings.readReplies || conversation.state !== "off") return;
+    const reply = spokenMessages.find((m) => m.sequence === latestCompletedAgentTurnMessageSeq);
+    if (reply?.fromAgent && reply.text.trim()) {
+      voice.speakMessage(reply.text, `${selectedChatId}:${reply.sequence}`).catch((err: unknown) =>
+          console.warn("A reply could not be read aloud:", err));
+    }
+  }, [latestCompletedAgentTurnMessageSeq, selectedChatId, voice, conversation.state, spokenMessages]);
+
   // The current epoch's opening sequence (see ChatCodeBase.epoch), zero when the epoch spans the
   // whole chat. A *pending* changes message before it exists only in chats converted from
   // pre-git storage -- its content rides the conversion boundary's collapsed change, and the
@@ -6299,6 +6334,13 @@ function ChatInterface({
                                       </button>
                                     </Tooltip>
                                   )}
+                                  {hasMessageText && msg.author.type === "agent" && (
+                                    <ReadAloudButton
+                                      text={msg.message}
+                                      messageKey={`${selectedChatId}:${msg.sequence}`}
+                                      className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-default"
+                                    />
+                                  )}
                                   {pendingChange && (() => {
                                     const label = getDiscardLabel(
                                       pendingChange.through === lastDurablePendingChange?.sequence,
@@ -6770,6 +6812,7 @@ function ChatInterface({
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
+                    conversation={selectedChatId !== null ? conversation : undefined}
                     isAgentActive={isAgentActive}
                     models={availableModels}
                     selectedModel={selectedModel === null ? null : {
