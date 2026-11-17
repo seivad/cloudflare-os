@@ -2,6 +2,7 @@ import { z } from "zod";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelConfig, type BuiltInReasoning,
+  type GatewayModelCapabilities,
 } from "@gadgets/workshop-shared/api";
 import {
   type AssistantMessage, type ClassifierContext, type ToolResultMessage,
@@ -601,23 +602,203 @@ describe("getModel AI Gateway binding transport", () => {
 
 });
 
+// The Workers AI binding's run(), as a catalog model's requests call it.
+type CatalogRun = (model: string, input: Record<string, unknown>,
+                   options: { gateway: GatewayOptions, signal: AbortSignal }) => Promise<Response>;
+
+// "OK" as the gateway streams a catalog model's chat completion, logged as `log-1`.
+const catalogAnswer: CatalogRun = async () => new Response(`data: ${JSON.stringify({
+  id: "completion", object: "chat.completion.chunk", created: 0, model: "gemini-4-argon",
+  choices: [{ index: 0, delta: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+  usage: { prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100 },
+})}\n\ndata: [DONE]\n\n`, {
+  headers: { "content-type": "text/event-stream", "cf-aig-log-id": "log-1" },
+});
+
+// One request of a system prompt and "hello" through the handle's own transport.
+const sayHello = (handle: ModelHandle, options: Parameters<ModelHandle["stream"]>[2] = {}) =>
+    handle.stream(handle.model, {
+      systemPrompt: "Be brief.",
+      messages: [{ role: "user", content: "hello", timestamp: 0 }],
+    }, { maxRetries: 0, ...options });
+
+// A deployment whose gateway rides a Workers AI binding, with no token for HTTPS, and whose
+// binding answers run() with `respond`.
+function catalogEnv(respond: CatalogRun = catalogAnswer) {
+  const run = vi.fn(respond);
+  const fetch = vi.fn();
+  const bound = env({
+    CF_AI_GATEWAY_API_TOKEN: undefined,
+    CF_AI_GATEWAY_PROVIDERS: "anthropic,ai-gateway-catalog",
+    WORKERS_AI: { run, fetch } as unknown as Ai,
+  });
+  return { bound, run, fetch };
+}
+
+describe("getModel AI Gateway catalog models", () => {
+  const GEMINI: AiModelConfig =
+      { provider: "ai-gateway-catalog", model: "google/gemini-4-argon", apiToken: "" };
+
+  it("describes one as a Chat Completions model, with the flags of the plainest request", () => {
+    const handle = getModel(catalogEnv().bound, GEMINI, INITIATOR);
+    expect(handle.model).toStrictEqual({
+      id: "google/gemini-4-argon", name: "google/gemini-4-argon", api: "openai-completions",
+      provider: "ai-gateway-catalog",
+      baseUrl: "https://workers-binding.ai/ai-gateway/gateways/platform-gateway/run/v1",
+      reasoning: false, input: ["text", "image"],
+      cost: { input: 2, output: 10, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 1048576, maxTokens: 4096,
+      compat: {
+        supportsStore: false, supportsDeveloperRole: false, supportsLongCacheRetention: false,
+        maxTokensField: "max_completion_tokens",
+      },
+    });
+    // Its cost log is read through the binding, like any other binding-routed model's.
+    expect(handle.aiGatewayLogRoute).toEqual({ gateway: "platform-gateway" });
+    expect(gatewayReasoningLevels("ai-gateway-catalog", GEMINI.model)).toEqual([]);
+  });
+
+  // US$ per million tokens, from Cloudflare's catalog pages. Grok's page lists no base price,
+  // and Muse's pages no context window, which is then the one an unknown model is given.
+  const LISTED: [string, number, { input: number, output: number }][] = [
+    ["google/gemini-4-argon", 1048576, { input: 2, output: 10 }],
+    ["google/gemini-4-carbon", 1048576, { input: 2, output: 10 }],
+    ["google/gemini-4-hydrogen", 1048576, { input: 1.5, output: 7.5 }],
+    ["moonshotai/kimi-k3.1-pro", 1048576, { input: 2, output: 10 }],
+    ["xai/grok-4.7", 500000, { input: 0, output: 0 }],
+    ["meta/muse-spark-1.3", 128000, { input: 1.25, output: 4.25 }],
+    ["meta/muse-wonder-1.0", 128000, { input: 4, output: 20 }],
+  ];
+  it.each(LISTED)("gives %s its listed window and price", (model, contextWindow, price) => {
+    expect(getModel(catalogEnv().bound, { ...GEMINI, model }, INITIATOR).model).toMatchObject({
+      id: model, contextWindow, cost: { ...price, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it("lists every suggested catalog model, each named for its billing", () => {
+    const suggested = SUGGESTED_MODELS["ai-gateway-catalog"];
+    expect(Object.keys(suggested)).toEqual(LISTED.map(([model]) => model));
+    for (const { name } of Object.values(suggested)) expect(name).toMatch(/ \(Unified\)$/);
+  });
+
+  it("takes a model added by hand as it is stated, with no price and no reasoning level", () => {
+    const capabilities: GatewayModelCapabilities =
+        { imageInput: false, reasoningLevels: ["low", "high"] };
+    const { model } = getModel(catalogEnv().bound,
+        { ...GEMINI, model: "xai/grok-4.6", contextWindow: 256000, capabilities }, INITIATOR);
+    expect(model).toMatchObject({
+      id: "xai/grok-4.6", input: ["text"], reasoning: false, contextWindow: 256000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(gatewayReasoningLevels("ai-gateway-catalog", "xai/grok-4.6", undefined, capabilities))
+        .toEqual([]);
+  });
+
+  it("carries pi's request to the binding's run(), and reads its response as any other",
+      async () => {
+    const { bound, run, fetch } = catalogEnv();
+    const handle = getModel(bound, GEMINI, INITIATOR, {
+      metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },
+    });
+    const message = await sayHello(handle, { maxTokens: 64 }).result();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const [model, input, options] = run.mock.calls[0]!;
+    // The request's model names the model; the rest of its body is the input.
+    expect(model).toBe("google/gemini-4-argon");
+    expect(input).toStrictEqual({
+      messages: [{ role: "system", content: "Be brief." }, { role: "user", content: "hello" }],
+      stream: true, stream_options: { include_usage: true }, max_completion_tokens: 64,
+    });
+    expect(options).toStrictEqual({
+      gateway: {
+        id: "platform-gateway",
+        metadata: { user: "user-123", source: "chat", gadgetId: "gadget-123", chatId: 7 },
+      },
+      openaiEndpoint: "/v1/chat/completions", returnRawResponse: true,
+      signal: expect.any(AbortSignal),
+    });
+    // The gateway's passthrough has no route for a catalog model.
+    expect(fetch).not.toHaveBeenCalled();
+
+    expect(message.stopReason).toBe("stop");
+    expect(message.content).toMatchObject([{ type: "text", text: "OK" }]);
+    expect(message.usage.cost.total).toBeCloseTo((1000 * 2 + 100 * 10) / 1e6);
+    expect(handle.lastResponse).toEqual(
+        { status: 200, aiGatewayLogId: "log-1", routedModel: undefined });
+  }, 15000);
+
+  it("reports the gateway's refusal as pi reports any, and passes on a cache bypass",
+      async () => {
+    const { bound, run } = catalogEnv(async () => Response.json(
+        { error: { message: "No such model.", code: "model_not_found" } }, { status: 404 }));
+    const handle = getModel(bound, GEMINI, INITIATOR);
+    const message = await sayHello(handle, { headers: { "cf-aig-skip-cache": "true" } }).result();
+    expect(message.stopReason).toBe("error");
+    expect(message.errorMessage).toContain("No such model.");
+    expect(run.mock.calls[0]![2].gateway)
+        .toStrictEqual({ id: "platform-gateway", metadata: { user: "user-123" }, skipCache: true });
+  }, 15000);
+
+  it("aborts the run with the request", async () => {
+    const { bound, run } = catalogEnv((_model, _input, { signal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    const handle = getModel(bound, GEMINI, INITIATOR);
+    const controller = new AbortController();
+    const stream = sayHello(handle, { signal: controller.signal });
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    controller.abort();
+    expect((await stream.result()).stopReason).toBe("aborted");
+  }, 15000);
+
+  it("refuses a deployment whose gateway traffic rides HTTPS", () => {
+    const REFUSED = 'Provider "ai-gateway-catalog" can only use the Workers AI binding ' +
+        "transport, which this deployment does not: bind WORKERS_AI and leave " +
+        "CF_AI_GATEWAY_USE_BINDING unset.";
+    // The provider is one an admin turned on: with no binding, and with a binding opted out of.
+    const https = env({ CF_AI_GATEWAY_PROVIDERS: "anthropic" });
+    expect(() => getModel(https, GEMINI, INITIATOR)).toThrow(new Error(REFUSED));
+    const optedOut = env({
+      CF_AI_GATEWAY_PROVIDERS: "anthropic", CF_AI_GATEWAY_USE_BINDING: "false",
+      WORKERS_AI: { run: vi.fn() } as unknown as Ai,
+    });
+    expect(() => getModel(optedOut, GEMINI, INITIATOR)).toThrow(new Error(REFUSED));
+    // The environment's own listing of it fails every model, as google's does without a token.
+    expect(() => getModel(env({ CF_AI_GATEWAY_PROVIDERS: "anthropic,ai-gateway-catalog" }),
+        ANTHROPIC_CONFIG, INITIATOR))
+        .toThrow("enabling the ai-gateway-catalog provider requires the WORKERS_AI binding");
+  });
+
+  it("runs through no direct connection, and on no connected user's gateway", () => {
+    expect(() => getModel(env({ CF_AI_GATEWAY: undefined }), GEMINI, INITIATOR))
+        .toThrow("AI Gateway catalog models run only through an AI Gateway");
+    expect(() => getModel(catalogEnv().bound, GEMINI, INITIATOR,
+        { userGateway: { accountId: "user-account-id", apiKey: "user-token" } }))
+        .toThrow("a connected Cloudflare account can't be billed for them");
+  });
+});
+
 describe("getModel direct routing (no gateway)", () => {
   beforeEach(() => {
     capturedRequests.length = 0;
   });
 
+  // The models the pickers list are named for their billing as well; the hidden ones are not.
   it.each([
-    ["anthropic", "claude-opus-5-5", "Claude Opus 5.5", 1_000_000],
-    ["anthropic", "claude-sonnet-5-5", "Claude Sonnet 5.5", 1_000_000],
-    ["anthropic", "claude-fable-5-2", "Claude Fable 5.2", 1_000_000],
-    ["openai", "gpt-6.1-sol", "GPT-6.1 Sol", 1_050_000],
-    ["openai", "gpt-6-astra", "GPT-6 Astra", 1_050_000],
-    ["openai", "gpt-6-sol", "GPT-6 Sol", 1_050_000],
-    ["openai", "gpt-6-luna", "GPT-6 Luna", 1_050_000],
+    ["anthropic", "claude-opus-5-5", "Claude Opus 5.5", " (Unified)", 1_000_000],
+    ["anthropic", "claude-sonnet-5-5", "Claude Sonnet 5.5", " (Unified)", 1_000_000],
+    ["anthropic", "claude-fable-5-2", "Claude Fable 5.2", "", 1_000_000],
+    ["openai", "gpt-6.1-sol", "GPT-6.1 Sol", " (Unified)", 1_050_000],
+    ["openai", "gpt-6.1-terra", "GPT-6.1 Terra", " (Unified)", 1_050_000],
+    ["openai", "gpt-6-astra", "GPT-6 Astra", "", 1_050_000],
+    ["openai", "gpt-6-sol", "GPT-6 Sol", "", 1_050_000],
+    ["openai", "gpt-6-luna", "GPT-6 Luna", " (Unified)", 1_050_000],
   ] as const)(
       "offers %s model %s with configured limits and catalog metadata",
-      (provider, model, name, contextWindow) => {
-    expect(SUGGESTED_MODELS[provider][model]).toMatchObject({name, contextWindow});
+      (provider, model, name, billing, contextWindow) => {
+    expect(SUGGESTED_MODELS[provider][model]).toMatchObject({name: name + billing, contextWindow});
+    expect(SUGGESTED_MODELS[provider][model].hidden).toBe(billing === "" ? true : undefined);
 
     const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
       provider,
@@ -1163,6 +1344,7 @@ describe("gateway model reasoning levels", () => {
     ["anthropic", "claude-sonnet-5", ["off", "minimal", ...LOW_TO_MAX]],
     ["anthropic", "claude-haiku-4-5", OFF_TO_HIGH],
     ["openai", "gpt-6.1-sol", LOW_TO_MAX],
+    ["openai", "gpt-6.1-terra", ["off", ...LOW_TO_MAX]],
     ["openai", "gpt-6-astra", LOW_TO_MAX],
     ["openai", "gpt-6-sol", ["off", ...LOW_TO_MAX]],
     ["openai", "gpt-6-luna", ["off", ...LOW_TO_MAX]],
@@ -1199,6 +1381,7 @@ describe("gateway model reasoning levels", () => {
     ["anthropic", "claude-sonnet-5", "adaptive"],
     ["anthropic", "claude-haiku-4-5", null],
     ["openai", "gpt-6.1-sol", "medium"],
+    ["openai", "gpt-6.1-terra", "medium"],
     ["openai", "gpt-6-sol", "medium"],
     ["openai", "gpt-6-luna", "medium"],
     ["openai", "gpt-6-astra", "medium"],
@@ -1219,13 +1402,19 @@ describe("gateway model reasoning levels", () => {
     ["openrouter", "anthropic/claude-opus-5.5", null],
     ["openrouter", "openai/gpt-6.1-sol", null],
     ["openrouter", "openai/gpt-6-luna", null],
-    ["openrouter", "moonshotai/kimi-k3.1-pro", null],
     ["openrouter", "deepseek/deepseek-v4.1-flash", null],
     ["openrouter", "deepseek/deepseek-v4-pro-0813", null],
     ["aws-bedrock", "global.anthropic.claude-sonnet-5-5", null],
     ["aws-bedrock", "global.anthropic.claude-opus-5-5", null],
     ["aws-bedrock", "global.anthropic.claude-haiku-5-5", null],
     ["aws-bedrock", "global.amazon.nova-2-lite-v1:0", null],
+    ["ai-gateway-catalog", "google/gemini-4-argon", null],
+    ["ai-gateway-catalog", "google/gemini-4-carbon", null],
+    ["ai-gateway-catalog", "google/gemini-4-hydrogen", null],
+    ["ai-gateway-catalog", "moonshotai/kimi-k3.1-pro", null],
+    ["ai-gateway-catalog", "xai/grok-4.7", null],
+    ["ai-gateway-catalog", "meta/muse-spark-1.3", null],
+    ["ai-gateway-catalog", "meta/muse-wonder-1.0", null],
   ];
   it.each(BUILT_IN)("says what %s model %s is asked for while no level is set",
       (provider, model, builtIn) => {
@@ -1625,7 +1814,7 @@ describe("LanguageModelGatekeeper.startSession", () => {
   const MODEL_ID = "claude-opus-5-5";
   const DISABLED: Partial<AdminConfig> = { modelModes: { [MODEL_ID]: "disabled" } };
   const DISABLED_MESSAGE =
-      'The "Claude Opus 5.5" model is disabled on this deployment by an administrator.';
+      'The "Claude Opus 5.5 (Unified)" model is disabled on this deployment by an administrator.';
 
   // The session of a binding minted for `config`, on a deployment whose admin config is `admin`.
   function startSession(config: AiModelConfig, admin: Partial<AdminConfig>,

@@ -41,14 +41,14 @@ CLOUDFLARE_OAUTH_CLIENT_SECRET=...
 # Platform AI Gateway used for the free tier:
 CF_AI_GATEWAY=your-gateway
 # The providers that are always on (any of anthropic, openai, google, cloudflare,
-# cloudflare-auto-router, openrouter, aws-bedrock). An admin can turn on others on the Models tab
-# of /admin:
+# cloudflare-auto-router, openrouter, aws-bedrock, ai-gateway-catalog). An admin can turn on others
+# on the Models tab of /admin:
 CF_AI_GATEWAY_PROVIDERS=anthropic,openai,google
 
 # Required whenever CF_AI_GATEWAY is set:
 CF_AI_GATEWAY_ACCOUNT_ID=...
 # Required unless the WORKERS_AI binding carries gateway traffic (see below); always required
-# for the google provider:
+# for the google provider, and no substitute for the binding for ai-gateway-catalog:
 CF_AI_GATEWAY_API_TOKEN=...
 ```
 
@@ -65,8 +65,10 @@ the gateway transport. Without the binding transport, set
 execute models and report their costs (over HTTPS the Gateway may live in the Worker's own
 account or a different one). The token stays required for the `google` provider regardless of the
 binding (the model SDK adapter refuses the binding's fetch — note the platform config above enables
-it, so the platform server itself still needs the token). Every provider, Workers AI included,
-routes through the same Gateway.
+it, so the platform server itself still needs the token). The `ai-gateway-catalog` provider is the
+opposite case: its models are reached through the binding alone, so a deployment that routes over
+HTTPS can't list it in `CF_AI_GATEWAY_PROVIDERS`, and refuses its models if an admin turns it on.
+Every provider, Workers AI included, routes through the same Gateway.
 
 Which models the Gateway offers is managed on the **Models** tab of `/admin`, not in the
 environment. `CF_AI_GATEWAY_PROVIDERS` names the providers that are always on, and an admin can
@@ -81,7 +83,16 @@ on the Gateway's unified Chat Completions route (Claude and Amazon Nova models t
 reasoning levels); the Gateway has no request that tells whether it holds them, so Bedrock is on
 only when `CF_AI_GATEWAY_PROVIDERS` lists it or an admin turns it on. Its suggested models are
 Bedrock's global cross-region inference profiles; a regional one (`us.`, `eu.`, `au.`) can be added
-under it.
+under it. **AI Gateway catalog** (`ai-gateway-catalog`) serves the models of the Gateway's own
+model catalog, named `<author>/<model>` (`google/gemini-4-argon`, `xai/grok-4.7`), which Cloudflare
+bills through Unified Billing with no provider key. The Gateway serves them on none of its HTTP
+routes, so each request goes through the `WORKERS_AI` binding's `run()` in Chat Completions
+format, with the same attribution metadata as the other providers' requests, and without
+reasoning levels. With no key to check for, it is on only when `CF_AI_GATEWAY_PROVIDERS` lists it
+or an admin turns it on. Its suggested models are Gemini 4, Kimi K3.1 Pro, Grok 4.7 and Muse; any
+other catalog ID can be added under it by hand. Their names end "(Unified)", as do those of the
+suggested Anthropic and OpenAI models, which Unified Billing pays for where the Gateway holds no
+key of theirs.
 
 Adding a model starts from the provider's own list: the **Model ID** field on the Models tab, and in
 a user's **Add AI Model** dialog while users may add their own models, searches the models the
@@ -90,8 +101,8 @@ lists, read with the Gateway's stored key; Workers AI's catalog), each with its 
 tokens, context window and, for Workers AI, its rate. A pick fills in the model's ID, name and
 limits. Only models that call tools and answer in text are listed, each list is read at most every
 ten minutes, and no prompt is sent. A provider whose key the Gateway lacks says so, and the admin's
-models.dev suggestions, where they are on, stand in for a list that can't be read. Bedrock has no
-list behind the Gateway, so its suggested models are offered. Each model is **Enabled**, **Hidden** (out of the model pickers, still
+models.dev suggestions, where they are on, stand in for a list that can't be read. Bedrock and the
+AI Gateway catalog have no list behind the Gateway, so their suggested models are offered. Each model is **Enabled**, **Hidden** (out of the model pickers, still
 works where it is already in use) or **Disabled** (stops working everywhere, including existing
 chats, gadget model bindings and scheduled tasks). The tab also sets reasoning levels and
 compaction budgets, adds models the catalog doesn't list, and tests a provider or a model with

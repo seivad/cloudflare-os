@@ -3,12 +3,13 @@ import {
   SUGGESTED_MODELS,
 } from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, GatewayModels, assertGatewayProvider, gatewayProviderGet } from "./ai-gateway.js";
-import { runtimeModelFacts } from "./ai-models.js";
+import { aiGatewayCatalogPrice, runtimeModelFacts } from "./ai-models.js";
 
 // The models a provider lists through the deployment's AI Gateway, for a person adding a model to
 // pick from rather than type: each provider's own list read through the gateway with the key it
 // stores (OpenRouter's, Anthropic's, OpenAI's), Workers AI's from the account's catalog, and
-// Bedrock's suggested set, which is all there is behind the gateway. Only reads: no prompt is sent.
+// the suggested sets of Bedrock and of AI Gateway's own catalog, neither of which has a list to
+// read behind the gateway. Only reads: no prompt is sent.
 
 /** How long a list read stands. */
 const LIST_TTL_MS = 10 * 60_000;
@@ -246,6 +247,16 @@ async function readList(gateway: AiGatewayConfig, provider: AiModelProvider)
     case "aws-bedrock":
       return Object.entries(SUGGESTED_MODELS["aws-bedrock"]).map(([id, model]) =>
           ({ provider, id, name: model.name, contextWindow: model.contextWindow }));
+    case "ai-gateway-catalog":
+      // The model runtime has no entry to price these from (see withRuntimeFacts), so each
+      // carries the price Cloudflare lists for it, where it lists one.
+      return Object.entries(SUGGESTED_MODELS["ai-gateway-catalog"]).map(([id, model]) => {
+        let price = aiGatewayCatalogPrice(id);
+        return {
+          provider, id, name: model.name, contextWindow: model.contextWindow,
+          ...(price && { price }),
+        };
+      });
     default:
       return undefined;
   }
