@@ -61,6 +61,8 @@ import {
   type ComposerDocument,
 } from "./composerDocument";
 import { useComposerResources } from "./useComposerResources";
+import { ConversationBar, VoiceMenu, VoiceMicButton } from "../../voice/VoiceControls";
+import type { Conversation } from "../../voice/useConversation";
 import { useComposerEditorLayout } from "./useComposerEditorLayout";
 import styles from "./ChatComposer.module.css";
 
@@ -106,6 +108,7 @@ export const ChatComposer = ({
   queuedSteers,
   showThinkingTraces = true,
   onToggleThinkingTraces,
+  conversation,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -123,6 +126,11 @@ export const ChatComposer = ({
     attachments?: ChatAttachmentHandle[],
     formats?: MessageFormatRef[],
   ) => Promise<void> | void;
+  /**
+   * A voice conversation with this chat's agent (useConversation): offered in the voice menu, and
+   * shown above the composer while it runs. Absent where the composer has no chat to talk in yet.
+   */
+  conversation?: Conversation;
   isAgentActive: boolean;
   models: AiChatAuthorInfo[];
   selectedModel: SelectedModel;
@@ -953,6 +961,8 @@ export const ChatComposer = ({
           </div>
         </div>
 
+        {conversation && <ConversationBar conversation={conversation} />}
+
         {/* Footer row: connection/options left, model + send right */}
         <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
@@ -1008,6 +1018,15 @@ export const ChatComposer = ({
 
           {/* Right actions */}
           <div className="ml-auto flex min-w-0 flex-shrink items-center gap-1.5">
+              <VoiceMenu conversation={conversation} />
+              <VoiceMicButton
+                disabled={isBlocked || (conversation !== undefined && conversation.state !== "off")}
+                onTranscript={(text) => {
+                  recordDraftEdit();
+                  setInputValue((previous) => (previous.trim() ? `${previous.trimEnd()} ${text}` : text));
+                  composerTextareaRef.current?.focus();
+                }}
+              />
               <ComposerModelSelector
                 models={models}
                 selectedModel={selectedModel}

@@ -714,6 +714,55 @@ export type DeviceSessionHandoffStart = {
  * Top-level API exposed to the user after they have authenticated, from which they reach their
  * workspaces and the gadgets in them.
  */
+/** What a voice model does: turn speech into text, or text into speech. */
+export type VoiceModelKind = "transcribe" | "speak";
+
+/** A speech-to-text or text-to-speech model the deployment offers (`AuthenticatedApi.listVoiceModels`). */
+export type VoiceModelInfo = {
+  /** What `TranscribeOptions.model` or `SpeakOptions.model` takes, such as "@cf/deepgram/aura-2-en". */
+  id: string;
+  name: string;
+  kind: VoiceModelKind;
+  /** "workers-ai": a Workers AI model; "unified": a model of AI Gateway's catalog, paid from the deployment's credits. */
+  billing: "workers-ai" | "unified";
+  /** A text-to-speech model's voices. Absent for speech-to-text. */
+  voices?: { id: string; name: string }[];
+  /** The voice used when none is named. */
+  defaultVoice?: string;
+  /** What it costs, in words, for a person choosing. */
+  priceNote: string;
+  /** The model used for its kind when none is named. */
+  isDefault?: boolean;
+};
+
+/** How to transcribe recorded speech. */
+export type TranscribeOptions = {
+  /** A `VoiceModelInfo.id` of kind "transcribe". Default: the deployment's default. */
+  model?: string;
+  /** The spoken language as an ISO 639-1 code, such as "en". Default: detected. */
+  language?: string;
+};
+
+/** What was said, and the model that heard it. */
+export type VoiceTranscript = { text: string; model: string };
+
+/** How to speak text. */
+export type SpeakOptions = {
+  /** A `VoiceModelInfo.id` of kind "speak". Default: the deployment's default. */
+  model?: string;
+  /** One of the model's `voices`. Default: its `defaultVoice`. */
+  voice?: string;
+};
+
+/** Spoken text: the audio file, and the model that spoke it. */
+export type VoiceSpeech = { audio: Uint8Array; contentType: string; model: string };
+
+/** The largest recording `transcribe()` takes: about ten minutes of speech as a browser records it. */
+export const MAX_VOICE_AUDIO_BYTES = 10 * 1024 * 1024;
+
+/** The most characters one `speak()` takes. A longer reply is spoken in parts. */
+export const MAX_SPEAK_CHARS = 2000;
+
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
@@ -968,6 +1017,25 @@ export interface AuthenticatedApi extends RpcTarget {
    * Accepts any user ID so that other users' avatars can be displayed (e.g. in chat).
    */
   getAvatar(userId: string): Promise<Uint8Array | null>;
+
+  /**
+   * The speech-to-text and text-to-speech models offered to this user, defaults marked. Empty
+   * where the deployment has no AI Gateway reachable over its Workers AI binding.
+   */
+  listVoiceModels(): Promise<VoiceModelInfo[]>;
+
+  /**
+   * The text of recorded speech: a recording as the browser's MediaRecorder makes it (WebM/Opus,
+   * Ogg, MP4/AAC, WAV or MP3, at most {@link MAX_VOICE_AUDIO_BYTES}). Paid from the deployment's
+   * AI Gateway; the request carries the user in its gateway metadata.
+   */
+  transcribe(audio: Uint8Array, contentType: string, options?: TranscribeOptions): Promise<VoiceTranscript>;
+
+  /**
+   * `text` (at most {@link MAX_SPEAK_CHARS} characters) as spoken audio, an MP3 or WAV file. Paid
+   * from the deployment's AI Gateway; the request carries the user in its gateway metadata.
+   */
+  speak(text: string, options?: SpeakOptions): Promise<VoiceSpeech>;
 
   /**
    * Open an existing workspace, or join one shared with you by redeeming its share link's key.

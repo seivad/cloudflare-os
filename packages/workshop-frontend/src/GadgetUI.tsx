@@ -5,6 +5,9 @@ import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { GadgetClient, ConsoleLogEvent, type GadgetHost } from '@gadgets/workshop-shared/api'
 import { prepareUiPage, uiModuleKey, type UiPage } from '@gadgets/workshop-shared/ui-page'
 import { CAPNWEB_MODULE_URL, SANDBOX_HEAD } from './sandboxDocument'
+import { Microphone } from '@phosphor-icons/react'
+import { GadgetVoiceHost } from './features/voice/gadgetVoiceHost'
+import { useVoice } from './features/voice/VoiceContext'
 
 // Unfortunately, we will have to embed the code as a data: URL, because our iframe is totally
 // sandboxed. Even more unfortunately, since it's a module which we need to import from, we can't
@@ -41,6 +44,15 @@ globalThis.gadget = gadget;
 globalThis.RpcTarget = RpcTarget;
 globalThis.RpcStub = RpcStub;
 `}
+
+// The Workshop's voice: speech to text and text to speech, which the Workshop page records and
+// plays for this frame (it can do neither itself). A global property rather than a declaration,
+// so gadget code that declares its own variable named voice still runs.
+{
+  let {port1, port2} = new MessageChannel();
+  window.parent.postMessage("voice-handshake", "*", [port2]);
+  globalThis.voice = newMessagePortRpcSession(port1);
+}
 
 // Monkey-patch console to forward logs to the page.
 for (let level of ['debug', 'info', 'log', 'warn', 'error']) {
@@ -199,6 +211,9 @@ const createSandboxedHtml = (page: UiPage): string => {
 </html>`.trim()
 }
 
+/** Answers a gadget's request for the microphone. */
+type MicRequest = (allowed: boolean) => void
+
 interface GadgetUIProps {
   gadget: RpcStub<GadgetClient>
   height: string
@@ -267,6 +282,24 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   onNoUiChangeRef.current = onNoUiChange
   const onOpenAgentChatRef = useRef(onOpenAgentChat)
   onOpenAgentChatRef.current = onOpenAgentChat
+  // Voice for the frame (gadgetVoiceHost.ts): the page's voice, the person's answer to the
+  // frame's request for the microphone while it is being asked, and how to stop it listening.
+  const voice = useVoice()
+  const voiceRef = useRef(voice)
+  voiceRef.current = voice
+  const voiceHostRef = useRef<{ host: GadgetVoiceHost, port: MessagePort } | null>(null)
+  const [micRequest, setMicRequest] = useState<MicRequest | null>(null)
+  const [stopListening, setStopListening] = useState<(() => void) | null>(null)
+  const closeVoiceHost = () => {
+    voiceHostRef.current?.host[Symbol.dispose]()
+    voiceHostRef.current?.port.close()
+    voiceHostRef.current = null
+    setMicRequest((pending: MicRequest | null) => {
+      pending?.(false)
+      return null
+    })
+    setStopListening(null)
+  }
 
   // A code change invalidates the view without clearing `hasLoaded`, so the previous load's "no UI"
   // result must not keep counting while the replacement load is pending.
@@ -527,6 +560,22 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
         } finally {
           if (handshakePendingRef.current === generation) handshakePendingRef.current = null
         }
+      } else if (event.data === 'voice-handshake' && event.ports && event.ports[0]) {
+        closeVoiceHost()
+        const port = event.ports[0]
+        const host = new GadgetVoiceHost({
+          voice: () => voiceRef.current,
+          askToListen: () => new Promise<boolean>((resolve) => {
+            // An updater, since the state is itself a function: it answers any earlier request "no".
+            setMicRequest((pending: MicRequest | null) => {
+              pending?.(false)
+              return resolve
+            })
+          }).then((allowed) => allowed),
+          setListening: (stop) => setStopListening(() => stop),
+        })
+        voiceHostRef.current = { host, port }
+        newMessagePortRpcSession(port, host)
       }
     }
 
@@ -534,6 +583,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     return () => {
       cancelled = true
       window.removeEventListener('message', handleMessage)
+      closeVoiceHost()
       resetConnection(new Error('Gadget RPC session was closed.'))
     }
   }, [])
@@ -639,7 +689,22 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   }
 
   return (
-    <div style={{ height, width: '100%' }}>
+    <div style={{ height, width: '100%', position: 'relative' }}>
+      {micRequest && (
+        <div role="alertdialog" aria-label="Microphone request" className="absolute inset-x-2 top-2 z-10 flex flex-wrap items-center gap-2 rounded-lg border border-kumo-line bg-kumo-elevated px-3 py-2 text-[13px] text-kumo-default themed-floating-shadow">
+          <Microphone size={16} />
+          <span className="flex-1">This gadget wants to use your microphone. What it hears is transcribed and given to the gadget.</span>
+          <button type="button" className="cursor-pointer rounded-md px-2 py-1 text-[12.5px] text-kumo-subtle hover:bg-kumo-tint" onClick={() => { micRequest(false); setMicRequest(null) }}>Don&apos;t allow</button>
+          <button type="button" className="cursor-pointer rounded-md bg-kumo-contrast px-2.5 py-1 text-[12.5px] font-medium text-kumo-inverse hover:bg-kumo-strong" onClick={() => { micRequest(true); setMicRequest(null) }}>Allow</button>
+        </div>
+      )}
+      {stopListening && (
+        <div role="status" className="absolute bottom-2 right-2 z-10 flex items-center gap-2 rounded-full border border-kumo-line bg-kumo-elevated py-1 pl-2.5 pr-1 text-[12px] text-kumo-default themed-floating-shadow">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-kumo-danger" aria-hidden="true" />
+          Gadget is listening
+          <button type="button" className="cursor-pointer rounded-full px-2 py-0.5 text-[12px] font-medium text-kumo-danger hover:bg-kumo-danger-tint" onClick={stopListening}>Stop</button>
+        </div>
+      )}
       <iframe
         key={frameKey}
         ref={iframeRef}

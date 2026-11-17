@@ -17,6 +17,8 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 export { PendingLogin, LoginConnectCallbackImpl };
 import { GatekeeperUiFrame, GatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { DecisionModelGatekeeper, LanguageModelGatekeeper } from "./ai-models";
+import { listVoiceModels, speak as speakText, transcribe as transcribeSpeech } from "./voice.js";
+import type { SpeakOptions, TranscribeOptions, VoiceModelInfo, VoiceSpeech, VoiceTranscript } from "@gadgets/workshop-shared/api";
 import { ModelCatalogGatekeeper } from "./model-catalog";
 import { getGatewayModels } from "./ai-gateway.js";
 import { listGatewayProviderModelsForUser } from "./gateway-provider-models.js";
@@ -297,6 +299,18 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let result = await this.env.AVATARS.get(userId, "arrayBuffer");
     if (!result) return null;
     return new Uint8Array(result);
+  }
+
+  listVoiceModels(): Promise<VoiceModelInfo[]> {
+    return Promise.resolve(listVoiceModels(this.env, this.#userId.name!));
+  }
+
+  transcribe(audio: Uint8Array, contentType: string, options?: TranscribeOptions): Promise<VoiceTranscript> {
+    return transcribeSpeech(this.env, this.#userId.name!, audio, contentType, options);
+  }
+
+  speak(text: string, options?: SpeakOptions): Promise<VoiceSpeech> {
+    return speakText(this.env, this.#userId.name!, text, options);
   }
 
   async getAiConfig(): Promise<AiGatewayInfo> {
