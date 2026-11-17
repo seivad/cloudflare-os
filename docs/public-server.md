@@ -93,6 +93,39 @@ other catalog ID can be added under it by hand. Their names end "(Unified)", as 
 suggested Anthropic and OpenAI models, which Unified Billing pays for where the Gateway holds no
 key of theirs.
 
+A Gateway [dynamic route](https://developers.cloudflare.com/ai-gateway/features/routing/dynamic-routing/)
+can decide which model answers a request for one of those "(Unified)" models: it can give each
+user of an email domain a daily budget, for example, and answer with a Workers AI model once it
+is spent. `CF_AI_GATEWAY_ROUTE` names the route (`workshop` for `dynamic/workshop`), and
+`CF_AI_GATEWAY_ROUTE_DOMAINS` optionally lists the email domains, separated by commas, whose
+users are sent through it; with a route and no domains, every user is, and with no route nothing
+changes. A user's domain is read from their email, which is their ID when they sign in through
+Cloudflare Access or a sign-in gatekeeper; a password account's ID is a username, so its requests
+never go through the route. The route is asked for thirteen models, named in each request's
+metadata as the Gateway's catalog names them: `anthropic/claude-haiku-5.5`,
+`anthropic/claude-sonnet-5.5`, `anthropic/claude-opus-5.5`, `openai/gpt-6-luna`,
+`openai/gpt-6.1-terra`, `openai/gpt-6.1-sol`, `google/gemini-4-hydrogen`,
+`google/gemini-4-carbon`, `google/gemini-4-argon`, `moonshotai/kimi-k3.1-pro`, `xai/grok-4.7`,
+`meta/muse-spark-1.3` and `meta/muse-wonder-1.0`. The first six are the suggested Claude and GPT
+models of the `anthropic` and `openai` providers, and the rest the suggested AI Gateway catalog
+models. Every other model goes as it does with no route, and so do decision models and requests
+billed to a user's own Cloudflare account.
+
+A routed request goes as a catalog model's does, through the `WORKERS_AI` binding's `run()` in
+Chat Completions format, the only format a route takes, with `dynamic/<route>` as its model. A
+route therefore needs the binding transport, as `ai-gateway-catalog` does, and a Claude or GPT
+model takes no reasoning level while it is routed, nor the prompt-cache marks its own API takes
+(a routed GPT-6 Luna or GPT-6.1 Terra request asks for no reasoning, without which a route's
+OpenAI model refuses a request that has tools; GPT-6.1 Sol cannot be asked for none, so the
+route runs it by its catalog ID and it reasons as that decides). Of what the Workshop sends, the route sees the request's metadata alone,
+five entries at most: `user`, the user's email; `model`, the model wanted; `domain`, the part of
+the email after the `@`, in lowercase; `source`; and `gadgetId`, or `chatId` where there is no
+gadget. The route must have a branch for each of the thirteen IDs, which
+`ROUTABLE_CATALOG_MODELS` in `packages/workshop-backend/src/ai-models.ts` lists: a `model` with
+no branch falls to whatever the route answers everything else with, so a model added to one list
+is added to the other. The chat shows the model that was asked for, at its own name and limits,
+and the Gateway's log of each request prices the model that answered.
+
 Adding a model starts from the provider's own list: the **Model ID** field on the Models tab, and in
 a user's **Add AI Model** dialog while users may add their own models, searches the models the
 provider lists through the Gateway as it is typed into (OpenRouter's, Anthropic's and OpenAI's

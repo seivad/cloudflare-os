@@ -15,8 +15,8 @@ import { DEFAULT_ADMIN_CONFIG, type AdminConfig } from "../src/storage-schema/ad
 import { zeroUsage } from "../src/ai-invoke.js";
 import {
   DecisionModelGatekeeper, gatewayBuiltInReasoning, gatewayReasoningLevels, getDecisionModel,
-  getModel, isRuntimeModel, LanguageModelGatekeeper, SKIPPED_THOUGHT_SIGNATURE,
-  withThoughtSignatures, type ModelHandle,
+  getModel, isRuntimeModel, LanguageModelGatekeeper, ROUTABLE_CATALOG_MODELS,
+  SKIPPED_THOUGHT_SIGNATURE, withThoughtSignatures, type ModelHandle,
 } from "../src/ai-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
@@ -803,6 +803,340 @@ describe("getModel AI Gateway catalog models", () => {
     expect(() => getModel(catalogEnv().bound, GEMINI, INITIATOR,
         { userGateway: { accountId: "user-account-id", apiKey: "user-token" } }))
         .toThrow("a connected Cloudflare account can't be billed for them");
+  });
+});
+
+// catalogEnv's deployment with the provider of every routable model on, and with the dynamic
+// route "workshop" unless `overrides` say otherwise.
+function routeEnv(overrides: Partial<Cloudflare.Env> = {}, respond: CatalogRun = catalogAnswer) {
+  const { bound, run, fetch } = catalogEnv(respond);
+  return {
+    bound: {
+      ...bound,
+      CF_AI_GATEWAY_PROVIDERS: "anthropic,openai,cloudflare,openrouter,ai-gateway-catalog",
+      CF_AI_GATEWAY_ROUTE: "workshop",
+      ...overrides,
+    } as Cloudflare.Env,
+    run, fetch,
+  };
+}
+
+// The metadata run() was first given, as the entries the gateway receives, in order.
+const sentMetadata = (run: ReturnType<typeof routeEnv>["run"]) =>
+    Object.entries(run.mock.calls[0]![2].gateway.metadata ?? {});
+
+// The handle `config` and `initiator` get with a route, beside the one they get without.
+const withAndWithout = (config: AiModelConfig, initiator: AiChatAuthorInfo,
+                        overrides: Partial<Cloudflare.Env> = {}) => {
+  const options = { metadata: { source: "chat" as const, gadgetId: "gadget-123", chatId: 7 } };
+  return {
+    routed: getModel(routeEnv(overrides).bound, config, initiator, options),
+    unrouted: getModel(routeEnv({ CF_AI_GATEWAY_ROUTE: undefined }).bound, config, initiator,
+        options),
+  };
+};
+
+// One step of a tool loop on `handle`'s model: the call, then its result.
+const toolStep = (handle: ModelHandle): [AssistantMessage, ToolResultMessage] => [{
+  role: "assistant",
+  content: [{ type: "toolCall", id: "call_1", name: "lookUp", arguments: {} }],
+  api: handle.model.api, provider: handle.model.provider, model: handle.model.id,
+  usage: zeroUsage(), stopReason: "toolUse", timestamp: 0,
+}, {
+  role: "toolResult", toolCallId: "call_1", toolName: "lookUp",
+  content: [{ type: "text", text: "ok" }], isError: false, timestamp: 0,
+}];
+
+describe("getModel through a dynamic route", () => {
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+
+  // A user whose ID is their email, as an account's is that signed in through Cloudflare Access,
+  // and a gadget acting for them.
+  const ADA: AiChatAuthorInfo = { type: "user", id: "ada@example.com", name: "Ada" };
+  const ADAS_GADGET: AiChatAuthorInfo = { type: "gadget", id: ADA.id, name: "Report Gadget" };
+
+  const SONNET: AiModelConfig = { provider: "anthropic", model: "claude-sonnet-5-5", apiToken: "" };
+  const LUNA: AiModelConfig = { provider: "openai", model: "gpt-6-luna", apiToken: "" };
+  const GEMINI: AiModelConfig =
+      { provider: "ai-gateway-catalog", model: "google/gemini-4-argon", apiToken: "" };
+  const CATALOG_COMPAT = {
+    supportsStore: false, supportsDeveloperRole: false, supportsLongCacheRetention: false,
+    maxTokensField: "max_completion_tokens",
+  };
+
+  it("asks the route in a routable model's place, as a catalog model with the model's own facts",
+      async () => {
+    const { bound, run, fetch } = routeEnv();
+    // The level is one the model takes on Anthropic's API, and the route's format has none.
+    const handle = getModel(bound, { ...SONNET, reasoning: "high" }, ADA, {
+      metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },
+    });
+    expect(handle.model).toStrictEqual({
+      id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", api: "openai-completions",
+      provider: "ai-gateway-catalog",
+      baseUrl: "https://workers-binding.ai/ai-gateway/gateways/platform-gateway/run/v1",
+      reasoning: false, input: ["text", "image"],
+      cost: ANTHROPIC_MODELS["claude-sonnet-5-5"].cost,
+      contextWindow: 1000000, maxTokens: 128000,
+      compat: CATALOG_COMPAT,
+    });
+    expect(handle.aiGatewayLogRoute).toEqual({ gateway: "platform-gateway" });
+
+    const message = await sayHello(handle, { maxTokens: 64 }).result();
+    expect(run).toHaveBeenCalledTimes(1);
+    const [model, input, options] = run.mock.calls[0]!;
+    expect(model).toBe("dynamic/workshop");
+    expect(input).toStrictEqual({
+      messages: [{ role: "system", content: "Be brief." }, { role: "user", content: "hello" }],
+      stream: true, stream_options: { include_usage: true }, max_completion_tokens: 64,
+    });
+    expect(options).toStrictEqual({
+      gateway: {
+        id: "platform-gateway",
+        metadata: {
+          user: "ada@example.com", model: "anthropic/claude-sonnet-5.5", domain: "example.com",
+          source: "chat", gadgetId: "gadget-123",
+        },
+      },
+      openaiEndpoint: "/v1/chat/completions", returnRawResponse: true,
+      signal: expect.any(AbortSignal),
+    });
+    // Nothing goes to Anthropic's own route.
+    expect(fetch).not.toHaveBeenCalled();
+
+    expect(message.stopReason).toBe("stop");
+    expect(message.content).toMatchObject([{ type: "text", text: "OK" }]);
+    // Priced as Sonnet is.
+    expect(message.usage.cost.total).toBeCloseTo((1000 * 2 + 100 * 10) / 1e6);
+    expect(handle.lastResponse).toEqual(
+        { status: 200, aiGatewayLogId: "log-1", routedModel: undefined });
+  }, 15000);
+
+  // Each provider's ID for a model, and the catalog's.
+  const ROUTED: [AiModelConfig["provider"], string, string][] = [
+    ["anthropic", "claude-haiku-5-5", "anthropic/claude-haiku-5.5"],
+    ["anthropic", "claude-sonnet-5-5", "anthropic/claude-sonnet-5.5"],
+    ["anthropic", "claude-opus-5-5", "anthropic/claude-opus-5.5"],
+    ["openai", "gpt-6-luna", "openai/gpt-6-luna"],
+    ["openai", "gpt-6.1-terra", "openai/gpt-6.1-terra"],
+    ["openai", "gpt-6.1-sol", "openai/gpt-6.1-sol"],
+    ["ai-gateway-catalog", "google/gemini-4-hydrogen", "google/gemini-4-hydrogen"],
+    ["ai-gateway-catalog", "google/gemini-4-carbon", "google/gemini-4-carbon"],
+    ["ai-gateway-catalog", "google/gemini-4-argon", "google/gemini-4-argon"],
+    ["ai-gateway-catalog", "moonshotai/kimi-k3.1-pro", "moonshotai/kimi-k3.1-pro"],
+    ["ai-gateway-catalog", "xai/grok-4.7", "xai/grok-4.7"],
+    ["ai-gateway-catalog", "meta/muse-spark-1.3", "meta/muse-spark-1.3"],
+    ["ai-gateway-catalog", "meta/muse-wonder-1.0", "meta/muse-wonder-1.0"],
+  ];
+  it.each(ROUTED)("asks the route for %s model %s as %s", async (provider, model, wanted) => {
+    const { bound, run } = routeEnv();
+    const handle = getModel(bound, { provider, model, apiToken: "" }, ADA);
+    expect(handle.model).toMatchObject(
+        { id: wanted, api: "openai-completions", reasoning: false, compat: CATALOG_COMPAT });
+    await sayHello(handle).result();
+    expect(run.mock.calls[0]![0]).toBe("dynamic/workshop");
+    expect(sentMetadata(run)).toEqual(
+        [["user", "ada@example.com"], ["model", wanted], ["domain", "example.com"]]);
+  }, 15000);
+
+  it("routes exactly the models the route has a branch for", () => {
+    expect(ROUTED.map(([, , wanted]) => wanted).toSorted())
+        .toEqual([...ROUTABLE_CATALOG_MODELS].toSorted());
+  });
+
+  it("gives a routed OpenAI model its own facts, and a catalog model the ones it has unrouted",
+      () => {
+    expect(getModel(routeEnv().bound, LUNA, ADA).model).toStrictEqual({
+      id: "openai/gpt-6-luna", name: "GPT-6 Luna", api: "openai-completions",
+      provider: "ai-gateway-catalog",
+      baseUrl: "https://workers-binding.ai/ai-gateway/gateways/platform-gateway/run/v1",
+      reasoning: false, input: ["text", "image"],
+      cost: OPENAI_MODELS["gpt-6-luna"].cost,
+      contextWindow: 1050000, maxTokens: 128000,
+      compat: CATALOG_COMPAT,
+    });
+    expect(getModel(routeEnv().bound, GEMINI, ADA).model)
+        .toStrictEqual(getModel(catalogEnv().bound, GEMINI, ADA).model);
+  });
+
+  // The metadata of a request for Sonnet on behalf of `initiator`, in the context `metadata`.
+  const sent = async (initiator: AiChatAuthorInfo,
+                      metadata?: NonNullable<Parameters<typeof getModel>[3]>["metadata"]) => {
+    const { bound, run } = routeEnv();
+    await sayHello(getModel(bound, SONNET, initiator, { metadata })).result();
+    return sentMetadata(run);
+  };
+
+  it("leads the metadata with what the route reads, and keeps it to five entries", async () => {
+    const LEAD = [
+      ["user", "ada@example.com"], ["model", "anthropic/claude-sonnet-5.5"],
+      ["domain", "example.com"],
+    ];
+    // A gadget's request says so with `automated` unrouted, which a routed one has no room for,
+    // and the gadget is kept ahead of the chat.
+    expect(await sent(ADAS_GADGET, { source: "model-binding", gadgetId: "gadget-123", chatId: 7 }))
+        .toEqual([...LEAD, ["source", "model-binding"], ["gadgetId", "gadget-123"]]);
+    expect(await sent(ADA, { source: "thread-title", chatId: 7 }))
+        .toEqual([...LEAD, ["source", "thread-title"], ["chatId", 7]]);
+    expect(await sent(ADA)).toEqual(LEAD);
+  }, 15000);
+
+  // What the route is given for a request on `config`'s model that has a tool and a call of it
+  // to show the model again: its input, and the thought signature of each replayed call.
+  async function toolRequest(config: AiModelConfig, overrides: Partial<Cloudflare.Env> = {}) {
+    const { bound, run } = routeEnv(overrides);
+    const handle = getModel(bound, config, ADA);
+    const tool =
+        { name: "lookUp", description: "Looks something up.", parameters: Type.Object({}) };
+    await handle.stream(handle.model, {
+      messages: [
+        { role: "system", content: "Be brief.", toolsAdded: [tool], timestamp: 0 },
+        { role: "user", content: "hello", timestamp: 0 },
+        ...toolStep(handle),
+      ],
+    }, { maxRetries: 0 }).result();
+    const [model, input] = run.mock.calls[0]!;
+    const { messages } = z.object({ messages: z.array(z.object({
+      tool_calls: z.array(z.object({
+        extra_content: z.object({ google: z.object({ thought_signature: z.string() }) }).optional(),
+      })).optional(),
+    })) }).parse(input);
+    const signatures = messages.flatMap(message => message.tool_calls ?? [])
+        .map(call => call.extra_content?.google.thought_signature);
+    return { model, input, signatures };
+  }
+
+  it("asks GPT-6 Luna and GPT-6.1 Terra for no reasoning while routed, which their branch needs " +
+      "to take tools", async () => {
+    const luna = await toolRequest({ ...LUNA, reasoning: "high" });
+    expect(luna.model).toBe("dynamic/workshop");
+    expect(luna.input.tools).toHaveLength(1);
+    expect(luna.input.reasoning_effort).toBe("none");
+    expect((await toolRequest({ ...LUNA, model: "gpt-6.1-terra" })).input.reasoning_effort)
+        .toBe("none");
+    // GPT-6.1 Sol's branch runs it by its catalog ID, which refuses "none".
+    const sol = await toolRequest({ ...LUNA, model: "gpt-6.1-sol", reasoning: "high" });
+    expect(sol.model).toBe("dynamic/workshop");
+    expect(sol.input).not.toHaveProperty("reasoning_effort");
+    // No other vendor's branch is asked, at any level.
+    expect((await toolRequest({ ...SONNET, reasoning: "high" })).input)
+        .not.toHaveProperty("reasoning_effort");
+    expect((await toolRequest(GEMINI)).input).not.toHaveProperty("reasoning_effort");
+    // Nor is a catalog model with no route.
+    const unrouted = await toolRequest(GEMINI, { CF_AI_GATEWAY_ROUTE: undefined });
+    expect(unrouted.model).toBe("google/gemini-4-argon");
+    expect(unrouted.input).not.toHaveProperty("reasoning_effort");
+  }, 15000);
+
+  it("signs a routed Gemini model's replayed tool calls by the model wanted, not the route's name",
+      async () => {
+    const gemini = await toolRequest(GEMINI);
+    expect(gemini.model).toBe("dynamic/workshop");
+    expect(gemini.signatures).toEqual([SKIPPED_THOUGHT_SIGNATURE]);
+    expect((await toolRequest(SONNET)).signatures).toEqual([undefined]);
+    expect((await toolRequest(LUNA)).signatures).toEqual([undefined]);
+  }, 15000);
+
+  it("reports the model that answered when the route answers with another", async () => {
+    const { bound } = routeEnv({}, async () => new Response(`data: ${JSON.stringify({
+      id: "completion", object: "chat.completion.chunk", created: 0,
+      model: "@cf/moonshotai/kimi-k2.7-code",
+      choices: [{ index: 0, delta: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+    })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } }));
+    const message = await sayHello(getModel(bound, SONNET, ADA)).result();
+    expect(message.model).toBe("anthropic/claude-sonnet-5.5");
+    expect(message.responseModel).toBe("@cf/moonshotai/kimi-k2.7-code");
+  }, 15000);
+
+  it("routes only the users of the domains it is given, when it is given any", async () => {
+    const DOMAINS = { CF_AI_GATEWAY_ROUTE_DOMAINS: " Example.com , other.org,, " };
+    const scoped = (id: string) =>
+        withAndWithout(SONNET, { type: "user", id, name: "User" }, DOMAINS);
+    expect(scoped("ada@example.com").routed.model.id).toBe("anthropic/claude-sonnet-5.5");
+    expect(scoped("Grace@Other.ORG").routed.model.id).toBe("anthropic/claude-sonnet-5.5");
+    // A user of another domain, and of one that only ends like a listed one, takes the model's
+    // own route, with the metadata it has always had.
+    for (const id of ["bob@elsewhere.net", "eve@notexample.com", "eve@example.com.evil.net"]) {
+      const { routed, unrouted } = scoped(id);
+      expect(routed.model).toStrictEqual(unrouted.model);
+      expect(routed.model.api).toBe("anthropic-messages");
+    }
+    const { bound, run } = routeEnv(DOMAINS);
+    const bob: AiChatAuthorInfo =
+        { type: "gadget", id: "bob@elsewhere.net", name: "Report Gadget" };
+    const request = await captureRequest(getModel(bound, SONNET, bob, {
+      metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },
+    }));
+    expect(urlWithoutQuery(request.url)).toBe(
+        "https://workers-binding.ai/ai-gateway/gateways/platform-gateway/anthropic/v1/messages");
+    expect(JSON.parse(request.headers.get("cf-aig-metadata")!)).toStrictEqual({
+      user: "bob@elsewhere.net", source: "chat", gadgetId: "gadget-123", chatId: 7,
+      automated: true,
+    });
+    expect(run).not.toHaveBeenCalled();
+  }, 15000);
+
+  it("routes every user whose ID is an email when it is given no domains", () => {
+    for (const id of ["ada@example.com", "bob@elsewhere.net"]) {
+      expect(withAndWithout(SONNET, { type: "user", id, name: "User" }).routed.model.id)
+          .toBe("anthropic/claude-sonnet-5.5");
+    }
+    // A password account's ID is a username, which names no domain for the route to budget.
+    for (const id of ["ada", "ada@", "@example.com"]) {
+      const { routed, unrouted } = withAndWithout(SONNET, { type: "user", id, name: "User" });
+      expect(routed.model).toStrictEqual(unrouted.model);
+    }
+  });
+
+  it("leaves a model the route has no branch for on its own route", () => {
+    const UNROUTED: AiModelConfig[] = [
+      WORKERS_AI_CONFIG,
+      { provider: "anthropic", model: "claude-haiku-4-5", apiToken: "" },
+      { provider: "anthropic", model: "claude-opus-5", apiToken: "" },
+      { provider: "openai", model: "gpt-6-sol", apiToken: "" },
+      // OpenRouter's own model, whose ID only reads like the catalog's.
+      { provider: "openrouter", model: "anthropic/claude-sonnet-5.5", apiToken: "" },
+      { provider: "ai-gateway-catalog", model: "xai/grok-4.6", apiToken: "" },
+      // A model is asked for by its own ID, not by that of the one it behaves like.
+      { provider: "anthropic", model: "claude-next", behavesLike: "claude-sonnet-5-5",
+        apiToken: "" },
+    ];
+    for (const config of UNROUTED) {
+      const { routed, unrouted } = withAndWithout(config, ADA);
+      expect(routed.model).toStrictEqual(unrouted.model);
+    }
+  });
+
+  it("changes nothing while no route is set, whatever domains are", async () => {
+    for (const CF_AI_GATEWAY_ROUTE of [undefined, "", "  "]) {
+      const { bound, run } = routeEnv(
+          { CF_AI_GATEWAY_ROUTE, CF_AI_GATEWAY_ROUTE_DOMAINS: "example.com" });
+      expect(getModel(bound, SONNET, ADA).model.api).toBe("anthropic-messages");
+      expect(getModel(bound, LUNA, ADA).model.api).toBe("openai-responses");
+      await sayHello(getModel(bound, GEMINI, ADAS_GADGET, {
+        metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },
+      })).result();
+      expect(run.mock.calls[0]![0]).toBe("google/gemini-4-argon");
+      expect(run.mock.calls[0]![2].gateway.metadata).toStrictEqual({
+        user: "ada@example.com", source: "chat", gadgetId: "gadget-123", chatId: 7,
+        automated: true,
+      });
+    }
+  }, 15000);
+
+  it("leaves a connected user's own gateway alone", () => {
+    const handle = getModel(routeEnv().bound, SONNET, ADA,
+        { userGateway: { accountId: "user-account-id", apiKey: "user-token" } });
+    expect(handle.model.api).toBe("anthropic-messages");
+    expect(handle.model.baseUrl)
+        .toBe("https://gateway.ai.cloudflare.com/v1/user-account-id/default/anthropic");
+  });
+
+  it("refuses a deployment whose gateway traffic rides HTTPS", () => {
+    expect(() => getModel(env({ CF_AI_GATEWAY_ROUTE: "workshop" }), SONNET, ADA))
+        .toThrow("CF_AI_GATEWAY_ROUTE requires the WORKERS_AI binding");
   });
 });
 

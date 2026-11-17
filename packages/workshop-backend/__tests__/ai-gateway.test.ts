@@ -138,6 +138,56 @@ describe("AiGatewayConfig transport selection", () => {
     }))).toThrow(new Error(REFUSED));
   });
 
+  // A routed request is carried as a catalog model's is, by the binding's run() alone.
+  it("requires the binding when a dynamic route is set", () => {
+    const REFUSED = "Requests to a dynamic route can only ride the Workers AI binding " +
+        "transport, as ai-gateway-catalog inference does, so CF_AI_GATEWAY_ROUTE requires the " +
+        "WORKERS_AI binding, with CF_AI_GATEWAY_USE_BINDING not set to false.";
+    const ROUTE = { CF_AI_GATEWAY_ROUTE: "workshop" };
+    expect(new AiGatewayConfig({ ...bindingOnly, ...ROUTE }).route).toBe("workshop");
+    // A token is no substitute, with no binding or with one the deployment opted out of.
+    expect(() => new AiGatewayConfig(env({
+      ...ROUTE, CF_AI_GATEWAY_ACCOUNT_ID: "account-id", CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+      WORKERS_AI: undefined,
+    }))).toThrow(new Error(REFUSED));
+    expect(() => new AiGatewayConfig(env({
+      ...ROUTE, CF_AI_GATEWAY_ACCOUNT_ID: "account-id", CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+      CF_AI_GATEWAY_USE_BINDING: "false", WORKERS_AI: binding,
+    }))).toThrow(new Error(REFUSED));
+    // The domains alone name no route, so they ask nothing of the transport.
+    const domainsOnly = new AiGatewayConfig(env({
+      CF_AI_GATEWAY_ACCOUNT_ID: "account-id", CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+      CF_AI_GATEWAY_ROUTE: " ", CF_AI_GATEWAY_ROUTE_DOMAINS: "example.com", WORKERS_AI: undefined,
+    }));
+    expect(domainsOnly.route).toBeUndefined();
+    expect(domainsOnly.routedDomain("ada@example.com")).toBeUndefined();
+  });
+
+  it("sends a user through the route by the domain of their email", () => {
+    const everyone = new AiGatewayConfig({ ...bindingOnly, CF_AI_GATEWAY_ROUTE: " workshop " });
+    expect(everyone.route).toBe("workshop");
+    expect(everyone.routeDomains.size).toBe(0);
+    expect(everyone.routedDomain("ada@example.com")).toBe("example.com");
+    expect(everyone.routedDomain("Ada@Example.COM")).toBe("example.com");
+    // The domain is what follows the last "@".
+    expect(everyone.routedDomain('"a@b"@example.com')).toBe("example.com");
+    // A password account's ID is a username, and neither half of an email may be missing.
+    for (const id of ["ada", "", "@example.com", "ada@"]) {
+      expect(everyone.routedDomain(id)).toBeUndefined();
+    }
+
+    const some = new AiGatewayConfig({
+      ...bindingOnly, CF_AI_GATEWAY_ROUTE: "workshop",
+      CF_AI_GATEWAY_ROUTE_DOMAINS: " Example.com ,other.org,, ",
+    });
+    expect([...some.routeDomains]).toEqual(["example.com", "other.org"]);
+    expect(some.routedDomain("ada@example.com")).toBe("example.com");
+    expect(some.routedDomain("grace@OTHER.org")).toBe("other.org");
+    for (const id of ["bob@elsewhere.net", "eve@sub.example.com", "eve@notexample.com"]) {
+      expect(some.routedDomain(id)).toBeUndefined();
+    }
+  });
+
   it("resolves the same-account gateway for binding-based callers (webFetch)", () => {
     expect(new AiGatewayConfig(bindingOnly).sameAccountGateway).toBe("platform-gateway");
     expect(new AiGatewayConfig(env({
