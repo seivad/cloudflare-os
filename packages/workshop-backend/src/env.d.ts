@@ -44,6 +44,11 @@ declare global {
       CF_AI_GATEWAY_API_TOKEN?: string;   // Run + Read token; optional when the binding transport
                                           // applies (still required for google)
       CF_AI_GATEWAY_USE_BINDING?: string;
+      // A dynamic route of the Gateway's that answers for the routable models, and the email
+      // domains whose users are sent through it (comma-separated; unset sends every user). See
+      // ROUTABLE_CATALOG_MODELS in ai-models.ts.
+      CF_AI_GATEWAY_ROUTE?: string;
+      CF_AI_GATEWAY_ROUTE_DOMAINS?: string;
       // Note: outside gateway mode, Workers AI (provider "cloudflare") is BYOK like every other
       // provider -- the account ID and API token live in the user's model config, not in env.
 

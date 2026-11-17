@@ -65,6 +65,11 @@ type GatewayMetadata = {
   chatId?: number;
   // Distinguishes gadget-initiated model calls from interactive user calls.
   automated?: true;
+  // What the deployment's dynamic route picks the answering model by, on a request sent through
+  // it (see routedMetadata): the model wanted, as AI Gateway's catalog names it, and the domain
+  // of the user's email.
+  model?: string;
+  domain?: string;
 };
 
 type GatewayMetadataContext = {
@@ -182,6 +187,21 @@ function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataCon
   }
   if (initiator.type === "gadget") metadata.automated = true;
   return metadata;
+}
+
+// The metadata of a request sent through the deployment's dynamic route, which is all of the
+// request the route sees besides its body: `model` names the model it is to answer with and
+// `domain` the budget rule the user falls under, counted against `user`. The gateway reliably
+// keeps five entries, so the three the route reads lead, then the source and one of the gadget
+// and the chat, the gadget where both are known. `automated` is left out to stay within five.
+function routedMetadata(metadata: GatewayMetadata, model: string, domain: string)
+    : GatewayMetadata {
+  const { user, source, gadgetId, chatId } = metadata;
+  return {
+    user, model, domain,
+    ...(source !== undefined ? { source } : {}),
+    ...(gadgetId !== undefined ? { gadgetId } : chatId !== undefined ? { chatId } : {}),
+  };
 }
 
 // The pi API implementations we route through, keyed by `Model.api`. Import per-module (never
@@ -457,29 +477,12 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         compat: { supportsStore: false, supportsDeveloperRole: false },
       };
     case "ai-gateway-catalog":
-      // A model of AI Gateway's own catalog, which Cloudflare bills with no provider key. The
-      // gateway serves it on no route, /compat included, only through the Workers AI binding's
-      // run(), which takes a Chat Completions request (see catalogRunFetch). pi addresses that
-      // request here, where nothing answers: the handle's fetch carries it to run() instead. The
-      // flags keep the request to what Chat Completions has for every vendor behind the catalog:
-      // no `store`, no "developer" role, no OpenAI cache retention, and the response cap as
-      // `max_completion_tokens`, the field Cloudflare's Agents SDK sends a catalog model. No
-      // reasoning level is offered, since none is known to mean the same to each vendor.
-      return {
-        id: config.model,
+      return catalogRunModel(config.model, gatewayUrl, {
         name: catalog?.name ?? config.model,
-        api: "openai-completions",
-        provider: "ai-gateway-catalog",
-        baseUrl: `${gatewayUrl}/run/v1`,
-        reasoning: false,
         input: catalog?.input ?? ["text", "image"],
         cost: { ...ZERO_COST, ...aiGatewayCatalogPrice(config.model) },
         ...window,
-        compat: {
-          supportsStore: false, supportsDeveloperRole: false, supportsLongCacheRetention: false,
-          maxTokensField: "max_completion_tokens",
-        },
-      };
+      });
     case "cloudflare-auto-router":
       // Auto Router answers on the gateway's /compat route in Chat Completions format whichever
       // model it picks, so the descriptor claims only what every candidate has: text and image
@@ -498,6 +501,39 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
     default:
       return undefined;
   }
+}
+
+// A model of AI Gateway's own catalog, named `id` there, which Cloudflare bills with no provider
+// key: one of the "ai-gateway-catalog" provider, or one the deployment's dynamic route answers
+// for (see routedRequest), whose `facts` are then those of the model under its own provider. The
+// gateway serves it on no route, /compat included, only through the Workers AI binding's run(),
+// which takes a Chat Completions request (see catalogRunFetch). pi addresses that request here,
+// where nothing answers: the handle's fetch carries it to run() instead. The flags keep the
+// request to what Chat Completions has for every vendor behind the catalog: no `store`, no
+// "developer" role, no OpenAI cache retention, and the response cap as `max_completion_tokens`,
+// the field Cloudflare's Agents SDK sends a catalog model. No reasoning level is offered, since
+// none is known to mean the same to each vendor.
+function catalogRunModel(
+    id: string, gatewayUrl: string,
+    facts: Pick<Model<Api>, "name" | "input" | "cost" | "contextWindow" | "maxTokens">)
+    : Model<Api> {
+  const { name, input, cost, contextWindow, maxTokens } = facts;
+  return {
+    id,
+    name,
+    api: "openai-completions",
+    provider: "ai-gateway-catalog",
+    baseUrl: `${gatewayUrl}/run/v1`,
+    reasoning: false,
+    input,
+    cost,
+    contextWindow,
+    maxTokens,
+    compat: {
+      supportsStore: false, supportsDeveloperRole: false, supportsLongCacheRetention: false,
+      maxTokensField: "max_completion_tokens",
+    },
+  };
 }
 
 // An OpenRouter model on its Chat Completions API at `baseUrl` (the gateway's openrouter route, or
@@ -1069,12 +1105,21 @@ export function withThoughtSignatures(model: string, body: Record<string, unknow
 // returns the gateway's own response, JSON or an event stream, for pi to read as it reads any
 // other. Of the request's headers, the two the gateway acts on go as the options run() has for
 // them: the attribution metadata and the cache bypass.
-function catalogRunFetch(binding: Ai, gateway: string): FetchFunction {
+//
+// With `route`, the gateway's dynamic route of that name is run in the model's place, and picks
+// the model that answers from the metadata (see routedMetadata), so the body is still the one
+// the model named takes, but for the models of ROUTED_WITHOUT_REASONING, which are asked for no
+// reasoning.
+function catalogRunFetch(binding: Ai, gateway: string, route?: string): FetchFunction {
   return async (input, init) => {
     const request = new Request(input, init);
     const { model, ...body } = await request.json<{ model: string } & Record<string, unknown>>();
     const metadata = request.headers.get("cf-aig-metadata");
-    return (binding as unknown as AiRunBinding).run(model, withThoughtSignatures(model, body), {
+    const signed = withThoughtSignatures(model, body);
+    const routed = route !== undefined && ROUTED_WITHOUT_REASONING.has(model)
+        ? { ...signed, reasoning_effort: "none" } : signed;
+    return (binding as unknown as AiRunBinding).run(
+        route !== undefined ? `dynamic/${route}` : model, routed, {
       gateway: {
         id: gateway,
         ...(metadata !== null ? { metadata: JSON.parse(metadata) } : {}),
@@ -1085,6 +1130,59 @@ function catalogRunFetch(binding: Ai, gateway: string): FetchFunction {
       signal: request.signal,
     });
   };
+}
+
+/**
+ * The models the deployment's dynamic route (CF_AI_GATEWAY_ROUTE) answers with, as AI Gateway's
+ * catalog names them. It must match the route's own branches: the route gives a model it has no
+ * branch for to a Workers AI model, so an ID listed here without a branch there would be
+ * answered by another model, and one with a branch there is not sent through the route until it
+ * is listed here.
+ */
+export const ROUTABLE_CATALOG_MODELS: ReadonlySet<string> = new Set([
+  "anthropic/claude-haiku-5.5", "anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5",
+  "openai/gpt-6-luna", "openai/gpt-6.1-terra", "openai/gpt-6.1-sol",
+  "google/gemini-4-hydrogen", "google/gemini-4-carbon", "google/gemini-4-argon",
+  "moonshotai/kimi-k3.1-pro", "xai/grok-4.7", "meta/muse-spark-1.3", "meta/muse-wonder-1.0",
+]);
+
+/**
+ * The routable models whose branch of the route runs them under OpenAI's own name, on its Chat
+ * Completions API, where the route can count what they cost. That API refuses a request that has
+ * tools unless it asks for no reasoning, so a routed request for one does. GPT-6.1 Sol is not
+ * among them: it cannot be asked for no reasoning, so its branch runs it by its catalog ID, which
+ * takes tools as it is and refuses "none".
+ */
+const ROUTED_WITHOUT_REASONING: ReadonlySet<string> =
+    new Set(["openai/gpt-6-luna", "openai/gpt-6.1-terra"]);
+
+// What AI Gateway's catalog calls the model `config` names, for the providers whose models the
+// catalog lists under their vendor: its own, whose IDs are the catalog's, OpenAI, whose IDs the
+// catalog keeps, and Anthropic, which writes a version "5-5" where the catalog writes "5.5". The
+// ID is the model's own, never that of one it behaves like. Undefined for any other provider,
+// OpenRouter included: its IDs look like the catalog's and name OpenRouter's models.
+function aiGatewayCatalogId(config: AiModelConfig): string | undefined {
+  switch (config.provider) {
+    case "ai-gateway-catalog": return config.model;
+    case "openai": return `openai/${config.model}`;
+    case "anthropic": return `anthropic/${config.model.replace(/-(\d+)-(\d+)$/, "-$1.$2")}`;
+    default: return undefined;
+  }
+}
+
+// Whether a request for `config`'s model on behalf of `initiator` goes through the deployment's
+// dynamic route, and if so the catalog ID the route is asked for and the user's email domain
+// (see AiGatewayConfig.routedDomain). An initiator's ID is its user's profile ID, for a gadget
+// that of the user it acts for: the verified email of an account that signed in through
+// Cloudflare Access or a sign-in gatekeeper. Undefined, which leaves the request as it is with
+// no route, for a user outside the route's domains and for a model the route has no branch for.
+function routedRequest(gwConfig: AiGatewayConfig, config: AiModelConfig,
+                       initiator: AiChatAuthorInfo): { model: string, domain: string } | undefined {
+  const domain = gwConfig.routedDomain(initiator.id);
+  if (domain === undefined) return undefined;
+  const model = aiGatewayCatalogId(config);
+  return model !== undefined && ROUTABLE_CATALOG_MODELS.has(model)
+      ? { model, domain } : undefined;
 }
 
 // Platform free-tier path: route through the deployment's configured AI Gateway (platform-funded).
@@ -1141,6 +1239,22 @@ function getModelViaGateway(
   const model = gatewayNativeModel(config, gatewayUrl);
   if (!model) {
     throw new Error(`Provider "${config.provider}" is not supported through AI Gateway.`);
+  }
+
+  // A routable model of a user the deployment's dynamic route covers is asked of the route, in
+  // the Chat Completions format a route takes, as a catalog model under the name, limits and
+  // prices it has under its own provider. No reasoning level goes with it (see catalogRunModel).
+  // A route is configured only with the binding, which every routable model's provider rides.
+  const routed = binding && routedRequest(gwConfig, config, initiator);
+  if (routed) {
+    return makeHandle({
+      model: catalogRunModel(routed.model, gatewayUrl, model),
+      headers: gatewayAuthHeaders,
+      fetch: catalogRunFetch(binding, gateway, gwConfig.route),
+      gatewayMetadata: routedMetadata(metadata, routed.model, routed.domain),
+      sessionAffinity: options.sessionAffinity,
+      aiGatewayLogRoute: logRoute(gateway),
+    });
   }
 
   return makeHandle({

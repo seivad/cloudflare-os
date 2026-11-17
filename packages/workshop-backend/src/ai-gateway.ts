@@ -104,6 +104,17 @@ export class AiGatewayConfig {
   readonly binding?: Ai;
   /** The providers CF_AI_GATEWAY_PROVIDERS lists, which an admin can add to (see GatewayModels). */
   readonly providers: Set<string>;
+  /**
+   * The name of the Gateway's dynamic route that answers for the routable models
+   * (CF_AI_GATEWAY_ROUTE), which picks the model behind each request from the request's metadata
+   * (see routedRequest in ai-models.ts). Unset on a deployment with no route.
+   */
+  readonly route?: string;
+  /**
+   * The email domains whose users are sent through {@link route}
+   * (CF_AI_GATEWAY_ROUTE_DOMAINS), in lowercase. Empty sends every user.
+   */
+  readonly routeDomains: ReadonlySet<string>;
 
   constructor(env: Cloudflare.Env) {
     this.gateway = env.CF_AI_GATEWAY!;
@@ -148,6 +159,31 @@ export class AiGatewayConfig {
           "enabling the ai-gateway-catalog provider requires the WORKERS_AI binding, with " +
           "CF_AI_GATEWAY_USE_BINDING not set to false.");
     }
+    this.route = env.CF_AI_GATEWAY_ROUTE?.trim() || undefined;
+    this.routeDomains = new Set((env.CF_AI_GATEWAY_ROUTE_DOMAINS || "").split(",")
+        .map(s => s.trim().toLowerCase()).filter(s => s !== ""));
+    // A routed request is carried as a catalog model's is, by the binding's run() (see
+    // catalogRunFetch in ai-models.ts), which a token can't stand in for either.
+    if (this.route && !this.binding) {
+      throw new Error(
+          "Requests to a dynamic route can only ride the Workers AI binding transport, as " +
+          "ai-gateway-catalog inference does, so CF_AI_GATEWAY_ROUTE requires the WORKERS_AI " +
+          "binding, with CF_AI_GATEWAY_USE_BINDING not set to false.");
+    }
+  }
+
+  /**
+   * The email domain of the user `userId` while their requests go through {@link route}: what
+   * follows the "@" of the id, in lowercase. Undefined on a deployment with no route, for an id
+   * that is not an email (a password account's is a bare username), and for a domain
+   * {@link routeDomains} leaves out when it names any.
+   */
+  routedDomain(userId: string): string | undefined {
+    if (this.route === undefined) return undefined;
+    const at = userId.lastIndexOf("@");
+    if (at <= 0 || at === userId.length - 1) return undefined;
+    const domain = userId.slice(at + 1).toLowerCase();
+    return this.routeDomains.size === 0 || this.routeDomains.has(domain) ? domain : undefined;
   }
 
   /**
