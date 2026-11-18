@@ -25,6 +25,7 @@ import { NativeAppBridge } from '../features/native-app/NativeAppBridge'
 import { PageUpdateNotice } from '../features/stale-session/PageUpdateNotice'
 import { LiveCallProvider } from '../features/live-call/LiveCallProvider'
 import { LiveCallSidebar } from '../features/live-call/LiveCallSidebar'
+import { VoiceProvider } from '../features/voice/VoiceContext'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -140,10 +141,14 @@ function RootComponent() {
               <PageUpdateNotice />
               {/* Above the shell, so a live call outlives navigating between pages. */}
               <LiveCallProvider>
-                <AuthenticatedShell
-                  authenticatedApi={authenticatedApi}
-                  isWorkspaceEditor={isWorkspaceEditor}
-                />
+                {/* Voice for every chat composer and gadget frame in the shell: the models offered,
+                    the person's choices, and the one player replies are read through. */}
+                <VoiceProvider>
+                  <AuthenticatedShell
+                    authenticatedApi={authenticatedApi}
+                    isWorkspaceEditor={isWorkspaceEditor}
+                  />
+                </VoiceProvider>
               </LiveCallProvider>
             </UnreadStateBridge>
           </Toasty>

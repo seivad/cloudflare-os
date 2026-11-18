@@ -15,6 +15,8 @@ Each agent reply also has a read-aloud button beside **Copy**. **Read replies al
 
 The choices are kept in the browser (`localStorage` key `voiceSettings`), like the composer's model choice.
 
+All of it hangs off `VoiceProvider` (`features/voice/VoiceContext.tsx`), mounted around the signed-in shell in the root route (`routes/__root.tsx`): without it `useVoice()` is null and every voice control renders nothing. `rootRoute.test.tsx` renders the root signed in and checks the shell has it.
+
 ## In gadgets
 
 A gadget's frame has an opaque origin, so it cannot open the microphone, and its content security policy lets it play only `data:` URLs. The Workshop page therefore records and speaks for it: `client.js` gets a `voice` global, an RPC stub to `GadgetVoiceHost` (`packages/workshop-frontend/src/features/voice/gadgetVoiceHost.ts`) over a MessagePort of its own, set up by the code `GadgetUI.tsx` injects before the gadget's.
