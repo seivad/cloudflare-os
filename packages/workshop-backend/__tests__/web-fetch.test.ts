@@ -230,6 +230,55 @@ describe("webFetch document conversion", () => {
     expect(result.body).toBe("PDF text content");
   });
 
+  it("reads a PDF larger than the default cap whole, and caps the Markdown instead", async () => {
+    // 2 MiB: over the 1 MiB default cap, under the 5 MiB hard limit. A PDF cut at the cap is not a
+    // shorter PDF but an invalid one (its cross-reference table is at the end).
+    const pdf = new Uint8Array(2 * 1024 * 1024).fill(0x20);
+    pdf.set([0x25, 0x50, 0x44, 0x46]);
+    mockResponse(pdf, "application/pdf");
+    const toMarkdown = vi.fn(async (doc: { name: string; blob: Blob }) => ({
+      id: "x", name: doc.name, mimeType: doc.blob.type, format: "markdown" as const, tokens: 1,
+      data: `# Title\n${"word ".repeat(100)}`,
+    }));
+
+    const whole = await webFetch(makeEnv(toMarkdown), { url: "https://example.com/paper.pdf" });
+    expect(toMarkdown.mock.calls[0][0].blob.size).toBe(pdf.byteLength);
+    expect(whole.truncated).toBe(false);
+    expect(whole.body.startsWith("# Title")).toBe(true);
+
+    // The caller's cap counts the Markdown's characters, and says so when it cut it.
+    mockResponse(pdf, "application/pdf");
+    const capped = await webFetch(makeEnv(toMarkdown), { url: "https://example.com/paper.pdf", maxBytes: 20 });
+    expect(toMarkdown.mock.calls[1][0].blob.size).toBe(pdf.byteLength);
+    expect(capped.body).toBe("# Title\nword word wo");
+    expect(capped.truncated).toBe(true);
+  });
+
+  it("refuses a document over the hard limit rather than converting a cut-off copy", async () => {
+    mockResponse(new Uint8Array(5 * 1024 * 1024 + 1), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    const toMarkdown = vi.fn();
+
+    await expect(webFetch(makeEnv(toMarkdown as unknown as ToMarkdownStub), { url: "https://example.com/big.docx" }))
+        .rejects.toThrow(/larger than 5 MB, the most that can be converted/);
+    expect(toMarkdown).not.toHaveBeenCalled();
+  });
+
+  it("still cuts HTML at the cap before converting it, and raw fetches of a PDF too", async () => {
+    mockResponse(`<html><body>${"x".repeat(5000)}</body></html>`, "text/html");
+    const toMarkdown = vi.fn(async (doc: { name: string; blob: Blob }) => ({
+      id: "x", name: doc.name, mimeType: doc.blob.type, format: "markdown" as const, tokens: 1, data: "cut page",
+    }));
+    const html = await webFetch(makeEnv(toMarkdown), { url: "https://example.com/long", maxBytes: 1000 });
+    expect(toMarkdown.mock.calls[0][0].blob.size).toBe(1000);
+    expect(html.truncated).toBe(true);
+
+    mockResponse(new Uint8Array(3000).fill(0x41), "application/pdf");
+    const raw = await webFetch(makeEnv(toMarkdown), { url: "https://example.com/doc.pdf", raw: true, maxBytes: 1000 });
+    expect(raw.body).toHaveLength(1000);
+    expect(raw.truncated).toBe(true);
+    expect(toMarkdown).toHaveBeenCalledTimes(1);
+  });
+
   it("passes plain text through unconverted", async () => {
     mockResponse("just some text", "text/plain");
 

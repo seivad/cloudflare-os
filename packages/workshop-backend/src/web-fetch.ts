@@ -266,6 +266,23 @@ function buildGatewayOptions(
   return { id: gateway.sameAccountGateway, metadata: { tool: "webFetch", automated: true } };
 }
 
+// The formats among those that are text a reader can use from its beginning alone. Every other
+// one is a container (a PDF's cross-reference table is at its end, an Office or OpenDocument file is
+// a zip whose directory is), so a cut copy is not a shorter document but an invalid one.
+const TRUNCATABLE_MIME_TYPES = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "application/xml",
+  "text/xml",
+  "text/csv",
+]);
+
+/** Whether a response of this type has to be read to its end before it can be converted. */
+function convertsWholeOnly(contentType: string): boolean {
+  const mime = baseContentType(contentType);
+  return TO_MARKDOWN_MIME_TYPES.has(mime) && !TRUNCATABLE_MIME_TYPES.has(mime);
+}
+
 // Attempt to convert a document to Markdown using the Workers AI binding. Returns the
 // Markdown body on success, or null if the document's MIME type isn't in the supported
 // allow-list. Throws (with a contextual error) if the conversion itself fails.
@@ -388,7 +405,18 @@ export async function webFetch(
     );
   }
 
-  const { bytes, truncated } = await readBodyCapped(response, maxBytes);
+  // A PDF or an Office document is converted whole or not at all, so it is read up to the hard
+  // limit whatever the caller's cap, and the cap is applied to the Markdown it becomes.
+  const whole = !input.raw && convertsWholeOnly(contentType);
+  const read = await readBodyCapped(response, whole ? HARD_MAX_BYTES : maxBytes);
+  const bytes = read.bytes;
+  let truncated = read.truncated;
+  if (whole && truncated) {
+    throw new Error(
+      `The document at ${finalUrl} is larger than ${HARD_MAX_BYTES / (1024 * 1024)} MB, the most that can be ` +
+        `converted to Markdown. A cut-off copy of this kind of file cannot be read.`,
+    );
+  }
 
   let body: string;
   if (input.raw) {
@@ -396,6 +424,12 @@ export async function webFetch(
   } else {
     const md = await convertToMarkdown(env, bytes, contentType, finalUrl);
     body = md !== null ? md : decodeUtf8(bytes);
+    if (whole && body.length > maxBytes) {
+      // Not on half of a surrogate pair: a lone surrogate is not valid Unicode.
+      const last = body.charCodeAt(maxBytes - 1);
+      body = body.slice(0, last >= 0xd800 && last <= 0xdbff ? maxBytes - 1 : maxBytes);
+      truncated = true;
+    }
   }
 
   return {
