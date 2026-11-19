@@ -2428,6 +2428,7 @@ export default function GadgetEditor() {
                 <GadgetUI
                   key={selectedGadgetId}
                   gadget={selectedGadgetStub}
+                  gadgetTitle={selectedGadgetSummary?.title}
                   height="100%"
                   reloadTrigger={uiReloadTrigger}
                   isVisible={activeTab === 'app'}

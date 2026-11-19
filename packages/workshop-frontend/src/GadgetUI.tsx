@@ -5,7 +5,8 @@ import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { GadgetClient, ConsoleLogEvent, type GadgetHost } from '@gadgets/workshop-shared/api'
 import { prepareUiPage, uiModuleKey, type UiPage } from '@gadgets/workshop-shared/ui-page'
 import { CAPNWEB_MODULE_URL, SANDBOX_HEAD } from './sandboxDocument'
-import { Microphone } from '@phosphor-icons/react'
+import { DownloadSimple, Microphone } from '@phosphor-icons/react'
+import { GadgetDownloadsHost } from './features/gadget-downloads/gadgetDownloadsHost'
 import { GadgetVoiceHost } from './features/voice/gadgetVoiceHost'
 import { useVoice } from './features/voice/VoiceContext'
 
@@ -52,6 +53,14 @@ globalThis.RpcStub = RpcStub;
   let {port1, port2} = new MessageChannel();
   window.parent.postMessage("voice-handshake", "*", [port2]);
   globalThis.voice = newMessagePortRpcSession(port1);
+}
+
+// Saving a file: the frame allows no downloads, so the Workshop page saves one of the Gadget's
+// export formats for it (gadgetDownloadsHost.ts). A global property, as voice is.
+{
+  let {port1, port2} = new MessageChannel();
+  window.parent.postMessage("downloads-handshake", "*", [port2]);
+  globalThis.downloads = newMessagePortRpcSession(port1);
 }
 
 // Monkey-patch console to forward logs to the page.
@@ -214,8 +223,13 @@ const createSandboxedHtml = (page: UiPage): string => {
 /** Answers a gadget's request for the microphone. */
 type MicRequest = (allowed: boolean) => void
 
+/** A gadget's request to save a file that no click started, and how the person's answer is given. */
+type SaveRequest = { fileName: string, answer: (allowed: boolean) => void }
+
 interface GadgetUIProps {
   gadget: RpcStub<GadgetClient>
+  // Names a file the gadget's page saves from an export format that names none.
+  gadgetTitle?: string
   height: string
   reloadTrigger?: number
   isVisible?: boolean
@@ -242,7 +256,7 @@ export default function GadgetUI(props: GadgetUIProps) {
   return <GadgetUISession key={props.chatId} {...props} />
 }
 
-function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange, onOpenAgentChat }: GadgetUIProps) {
+function GadgetUISession({ gadget, gadgetTitle = 'Gadget', height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange, onOpenAgentChat }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   // A connection failure is tied to the client it was tried on, so a replacement gets its own try.
@@ -299,6 +313,22 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
       return null
     })
     setStopListening(null)
+  }
+
+  // Saving files for the frame (gadgetDownloadsHost.ts): the title a file may be named after, and
+  // the frame's request to save one while the person is being asked.
+  const gadgetTitleRef = useRef(gadgetTitle)
+  gadgetTitleRef.current = gadgetTitle
+  const downloadsHostRef = useRef<{ host: GadgetDownloadsHost, port: MessagePort } | null>(null)
+  const [saveRequest, setSaveRequest] = useState<SaveRequest | null>(null)
+  const closeDownloadsHost = () => {
+    downloadsHostRef.current?.host[Symbol.dispose]()
+    downloadsHostRef.current?.port.close()
+    downloadsHostRef.current = null
+    setSaveRequest((pending: SaveRequest | null) => {
+      pending?.answer(false)
+      return null
+    })
   }
 
   // A code change invalidates the view without clearing `hasLoaded`, so the previous load's "no UI"
@@ -576,6 +606,24 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
         })
         voiceHostRef.current = { host, port }
         newMessagePortRpcSession(port, host)
+      } else if (event.data === 'downloads-handshake' && event.ports && event.ports[0]) {
+        closeDownloadsHost()
+        const port = event.ports[0]
+        const host = new GadgetDownloadsHost({
+          gadget: () => gadgetRef.current,
+          chatId,
+          title: () => gadgetTitleRef.current,
+          // A browser without the API cannot say, so the person is asked.
+          userActive: () => navigator.userActivation?.isActive ?? false,
+          askToSave: (fileName) => new Promise<boolean>((resolve) => {
+            setSaveRequest((pending: SaveRequest | null) => {
+              pending?.answer(false)
+              return { fileName, answer: resolve }
+            })
+          }),
+        })
+        downloadsHostRef.current = { host, port }
+        newMessagePortRpcSession(port, host)
       }
     }
 
@@ -584,6 +632,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
       cancelled = true
       window.removeEventListener('message', handleMessage)
       closeVoiceHost()
+      closeDownloadsHost()
       resetConnection(new Error('Gadget RPC session was closed.'))
     }
   }, [])
@@ -696,6 +745,14 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
           <span className="flex-1">This gadget wants to use your microphone. What it hears is transcribed and given to the gadget.</span>
           <button type="button" className="cursor-pointer rounded-md px-2 py-1 text-[12.5px] text-kumo-subtle hover:bg-kumo-tint" onClick={() => { micRequest(false); setMicRequest(null) }}>Don&apos;t allow</button>
           <button type="button" className="cursor-pointer rounded-md bg-kumo-contrast px-2.5 py-1 text-[12.5px] font-medium text-kumo-inverse hover:bg-kumo-strong" onClick={() => { micRequest(true); setMicRequest(null) }}>Allow</button>
+        </div>
+      )}
+      {saveRequest && (
+        <div role="alertdialog" aria-label="Save file request" className="absolute inset-x-2 top-2 z-10 flex flex-wrap items-center gap-2 rounded-lg border border-kumo-line bg-kumo-elevated px-3 py-2 text-[13px] text-kumo-default themed-floating-shadow">
+          <DownloadSimple size={16} />
+          <span className="min-w-0 flex-1 break-words">This gadget wants to save a file: {saveRequest.fileName}</span>
+          <button type="button" className="cursor-pointer rounded-md px-2 py-1 text-[12.5px] text-kumo-subtle hover:bg-kumo-tint" onClick={() => { saveRequest.answer(false); setSaveRequest(null) }}>Don&apos;t save</button>
+          <button type="button" className="cursor-pointer rounded-md bg-kumo-contrast px-2.5 py-1 text-[12.5px] font-medium text-kumo-inverse hover:bg-kumo-strong" onClick={() => { saveRequest.answer(true); setSaveRequest(null) }}>Save</button>
         </div>
       )}
       {stopListening && (

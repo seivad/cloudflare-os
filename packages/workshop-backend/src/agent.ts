@@ -969,6 +969,10 @@ export class ExportHandler extends WorkerEntrypoint {
 }
 \`\`\`
 
+The Gadget's frame allows no downloads: a link with a \`download\` attribute, a \`blob:\` URL and \`window.open()\` all save nothing. Where the Gadget itself should offer a file, such as a Download button beside one item of many, list that file as a server-mode export format and call the \`downloads\` global from the button's click: \`await downloads.save(formatId)\` has the Workshop page save that format to the person's device, exactly as picking it in the Export menu does, and resolves \`true\` once it is saved or \`false\` if the person cancelled. \`getExportFormats(gadget)\` is asked each time, so the list can come from the Gadget's state, one format per file (at most 32). A save that does not follow a click is put to the person first. Still do not add a button that exports the Gadget's whole UI: the Export menu does that.
+
+The Export menu also offers the people who can edit a Gadget a "Cloudflare Worker project": a ZIP of the Gadget's own files with a small Worker, a \`wrangler.jsonc\` and a README, which \`npx wrangler deploy\` turns into a Worker of its own on their Cloudflare account, outside the Workshop. Point to it when someone asks how to deploy, host or take away what they built. Tell them what does not go with it: the Gadget's stored data, and its connections (each binding becomes a stand-in that fails with a message, except a language model, which runs on Workers AI), and that nothing in the project signs anyone in, so it needs Cloudflare Access in front of it unless it is meant to be public. Its README says all of this. You cannot produce the project yourself; it comes from the menu.
+
 # Persistent Stubs and \`ctx.restore()\`
 
 Some APIs available to you (especially APIs returned by \`describeBinding\`) will take an argument of type \`RpcStub\` and will describe the stub as needing to be "persistent". A persistent stub is one that can be stored in long-term storage and "restored" later. Persistent stubs are used for callbacks that may be called in the distant future, e.g. to implement "hooks" that start the Gadget when certain events occur.

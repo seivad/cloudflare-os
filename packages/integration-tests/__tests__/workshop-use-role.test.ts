@@ -236,6 +236,12 @@ it("a use collaborator reaches only the mainline gadget UI", async () => {
   const gadgetCalls = deniedGadget(draft);
   expect(await outcomes(gadgetCalls, useGadget)).toEqual(allDenied(gadgetCalls));
   expect(await useGadget.getUiBundle()).toEqual({ jsCode: MAINLINE_UI });
+  // The gadget as a Cloudflare Worker project is its code, which a use collaborator may not read:
+  // its builders are offered it, a use collaborator is not, and asking for it by id is refused.
+  expect((await gadget.getExportFormats()).map(format => format.id)).toContain("cloudflare-project");
+  expect((await useGadget.getExportFormats()).map(format => format.id))
+      .not.toContain("cloudflare-project");
+  await expect(useGadget.export("cloudflare-project")).rejects.toThrow();
 
   expect(await useWs.listActions()).toEqual({ entries: [] });
   expect(await useWs.listActions({ filter: "pending" })).toEqual({ entries: [] });

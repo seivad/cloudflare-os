@@ -39,6 +39,23 @@ const sanitizerResult = await build({
   write: false,
 });
 
+// What an exported Cloudflare Worker project carries besides the gadget's own files
+// (src/project-export.ts): its Worker and page runtime, copied as they are, and Cap'n Web for each
+// side, with the version and licence it is redistributed under.
+const capnwebDir = resolve(dirname(fileURLToPath(import.meta.resolve("capnweb"))), "..");
+const projectRuntime = {
+  worker: readFileSync(resolve(packageDir, "project-runtime/worker.js"), "utf8"),
+  page: readFileSync(resolve(packageDir, "project-runtime/page.js"), "utf8"),
+  capnwebBrowser: readFileSync(resolve(capnwebDir, "dist/index.js"), "utf8"),
+  capnwebWorkers: readFileSync(resolve(capnwebDir, "dist/index-workers.js"), "utf8"),
+  capnwebVersion: JSON.parse(readFileSync(resolve(capnwebDir, "package.json"), "utf8")).version as string,
+  capnwebLicense: readFileSync(resolve(capnwebDir, "LICENSE.txt"), "utf8"),
+};
+writeIfChanged(
+  resolve(packageDir, "src/generated/project-runtime.txt"),
+  new TextEncoder().encode(JSON.stringify(projectRuntime)),
+);
+
 writeIfChanged(runtimeOutputFile, runtimeResult.outputFiles[0].contents);
 // Cap'n Web's browser build, which has no imports of its own. The live iframe embeds the same file.
 writeIfChanged(capnwebOutputFile, readFileSync(fileURLToPath(import.meta.resolve("capnweb"))));
