@@ -168,6 +168,7 @@ export default function GadgetUseView({
           <GadgetUI
             key={selectedGadgetId}
             gadget={gadget}
+            gadgetTitle={gadgets.find(g => g.id === selectedGadgetId)?.title}
             height="100%"
             isVisible={true}
           />

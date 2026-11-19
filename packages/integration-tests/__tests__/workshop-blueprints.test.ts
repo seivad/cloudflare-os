@@ -1,3 +1,4 @@
+import { inflateRawSync } from "node:zlib";
 import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { z } from "zod";
@@ -1009,10 +1010,95 @@ it.concurrent("a gadget's ExportHandler lists and streams its format", async () 
   await commitText(ws, workpieces, gadgetId, await headOf(workpieces, gadgetId),
       "server.js", undefined, CSV_EXPORT_SERVER);
 
+  // Its builder is offered the gadget as a Cloudflare Worker project after the gadget's own formats.
   expect(await app.getExportFormats()).toEqual([
     { id: "csv", label: "CSV", mode: "server", contentType: "text/csv", fileExtension: ".csv" },
+    {
+      id: "cloudflare-project", label: "Cloudflare Worker project", mode: "server",
+      contentType: "application/zip", fileExtension: ".zip",
+    },
   ]);
   expect(await new Response(await app.export("csv")).text()).toBe("a,b\n1,2\n");
+
+  await ws.deleteSelf();
+});
+
+const GREETING_SERVER =
+    `import { DurableObject } from "cloudflare:workers";\n` +
+    `export class Gadget extends DurableObject {\n` +
+    `  greet(name) { return \`Hello, \${name}!\`; }\n` +
+    `}\n`;
+
+/** A ZIP's entries by name, read from its central directory and inflated. */
+function unzip(bytes: Uint8Array): Map<string, string> {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const end = bytes.byteLength - 22;
+  expect(view.getUint32(end, true)).toBe(0x06054b50);
+  const entries = new Map<string, string>();
+  let at = view.getUint32(end + 16, true);
+  for (let i = view.getUint16(end + 10, true); i > 0; i--) {
+    const packedSize = view.getUint32(at + 20, true);
+    const nameLength = view.getUint16(at + 28, true);
+    const local = view.getUint32(at + 42, true);
+    const dataAt = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    entries.set(
+        new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLength)),
+        inflateRawSync(bytes.subarray(dataAt, dataAt + packedSize)).toString("utf8"));
+    at += 46 + nameLength;
+  }
+  return entries;
+}
+
+it.concurrent("a gadget is exported as a Cloudflare Worker project, with its files and the names of its bindings", async () => {
+  using publicApi = connect(requireHarness().url);
+  using api = await signUp(publicApi, username("projectexport"));
+  await api.provisionAmbientAccount(TEST_VENDOR_ID);
+  const account = await waitFor("the test account", async () =>
+    (await listConnectedAccounts(api)).find(a => a.vendorId === TEST_VENDOR_ID) ?? null);
+  using ws = await api.newWorkspace();
+  const workpieces = new WorkpieceRecorder();
+  using workpiecesStub = stubFor(workpieces);
+  using _subscription = await ws.subscribeToWorkpieces(workpiecesStub);
+  await workpieces.loaded;
+  using app = ws.createGadget("Stock Take!", undefined, "APP");
+  const gadgetId = await app.getId();
+  let head = await headOf(workpieces, gadgetId);
+
+  // A gadget with no code has nothing to make a project of.
+  expect(await app.getExportFormats()).toEqual([]);
+  await expect(app.export("cloudflare-project")).rejects.toThrow(/no code to export/);
+
+  const client = `document.body.append(await gadget.greet("you"));\n`;
+  head = await commitText(ws, workpieces, gadgetId, head, "client.js", undefined, client);
+  head = await commitText(ws, workpieces, gadgetId, head, "server.js", undefined, GREETING_SERVER);
+  using gatekeeper = await ws.newGatekeeper(
+      account.id, "https://gadgets-test.example/things/project-export");
+  if (!gatekeeper) throw new Error("Failed to create the test connection");
+  await app.bind("THINGS", await gatekeeper.getId());
+
+  // The Workshop's own HTML and PDF, then the project.
+  expect((await app.getExportFormats()).map(format => format.id))
+      .toEqual(["html", "pdf", "cloudflare-project"]);
+  const archive = new Uint8Array(
+      await new Response(await app.export("cloudflare-project")).arrayBuffer());
+  const entries = unzip(archive);
+  expect(entries.get("stock-take/src/gadget/server.js")).toBe(GREETING_SERVER);
+  expect(entries.get("stock-take/public/client.js")).toBe(client);
+  expect(JSON.parse(entries.get("stock-take/wrangler.jsonc")!.replace(/^\s*\/\/.*$/gm, "")))
+      .toMatchObject({
+        name: "stock-take",
+        main: "src/worker.js",
+        durable_objects: { bindings: [{ name: "GADGET_OBJECT", class_name: "Gadget" }] },
+        migrations: [{ tag: "v1", new_sqlite_classes: ["Gadget"] }],
+      });
+  // The binding is named, with what it was connected to, and nothing of the connection itself.
+  const project = entries.get("stock-take/src/project.js")!;
+  expect(JSON.parse(project.slice(project.indexOf("{"), project.lastIndexOf("}") + 1)).bindings)
+      .toEqual([{ name: "THINGS", title: expect.any(String), kind: "gatekeeper" }]);
+  expect(entries.get("stock-take/README.md")).toContain("| `THINGS` |");
+  expect(entries.get("stock-take/src/worker.js")).toContain("newWorkersRpcResponse");
+  expect(entries.get("stock-take/public/capnweb.js")!.length).toBeGreaterThan(10_000);
+  expect([...entries.values()].join("\n")).not.toContain("gadgets-test.example/things/project-export");
 
   await ws.deleteSelf();
 });

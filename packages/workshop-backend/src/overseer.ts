@@ -106,6 +106,12 @@ import {
   type GadgetExportEntrypoint,
   readCustomExportFormats,
 } from "./gadget-export";
+import {
+  hasProjectCode,
+  PROJECT_EXPORT_ID,
+  projectArchive,
+  withProjectFormat,
+} from "./project-export";
 
 const logger = createWorkshopLogger("workshop.overseer");
 
@@ -5254,17 +5260,26 @@ class OverseerImpl implements AgentHooks {
     return jsCode !== undefined ? {jsCode} : null;
   }
 
-  async getGadgetExportFormats(gadgetId: WorkpieceId, chatId?: number)
+  // `withProject` adds the gadget as a Cloudflare Workers project (project-export.ts) to the
+  // formats: the gadget's code and the names of its bindings, so only a caller that may read the
+  // code passes it.
+  async getGadgetExportFormats(gadgetId: WorkpieceId, chatId?: number, withProject = false)
       : Promise<GadgetExportFormat[]> {
     this.checkChatExistsAndMaterializeChanges(chatId);
     let resolved = await this.#resolveGadgetExportFormats(gadgetId, chatId);
     resolved.gadget?.[Symbol.dispose]();
-    return resolved.formats;
+    return withProject && hasProjectCode(await this.readGadgetFiles(gadgetId, chatId))
+        ? withProjectFormat(resolved.formats)
+        : resolved.formats;
   }
 
-  async exportGadget(gadgetId: WorkpieceId, formatId: string, chatId?: number)
+  async exportGadget(
+      gadgetId: WorkpieceId, formatId: string, chatId?: number, withProject = false)
       : Promise<ReadableStream<Uint8Array>> {
     this.checkChatExistsAndMaterializeChanges(chatId);
+    if (withProject && formatId === PROJECT_EXPORT_ID) {
+      return this.#exportGadgetProject(gadgetId, chatId);
+    }
     let {formats, handler, gadget} = await this.#resolveGadgetExportFormats(gadgetId, chatId);
     if (!gadget) throw new Error("The Gadget server stub is unavailable.");
     using exportGadget = gadget;
@@ -5283,6 +5298,27 @@ class OverseerImpl implements AgentHooks {
       let title = this.getGadgetRecord(gadgetId).title;
       return renderGadgetInBrowser(browser, bundle.jsCode, title, exportGadget.dup(), format);
     }
+  }
+
+  // The gadget's files as they stand (in `chatId`'s proposal, if given) with what a Worker of its
+  // own needs around them. A binding is described, never carried: each is a session of this
+  // workspace's.
+  async #exportGadgetProject(gadgetId: WorkpieceId, chatId?: number)
+      : Promise<ReadableStream<Uint8Array>> {
+    let files = await this.readGadgetFiles(gadgetId, chatId);
+    if (!hasProjectCode(files)) throw new Error("This Gadget has no code to export.");
+    let record = this.getGadgetRecord(gadgetId);
+    let bindings = this.visibleBindings(record, chatId).map(([name, edge]) => {
+      let gatekeeper = this.storage.gatekeepers.get(edge.target);
+      let spec = gatekeeper?.creationSpec;
+      return {
+        name,
+        title: gatekeeper?.resourceTitle || name,
+        kind: spec?.type ?? "unknown",
+        ...(spec?.type === "gatekeeper" ? {vendorId: spec.vendorId} : {}),
+      };
+    });
+    return exportServerFormat(() => projectArchive({title: record.title, files, bindings}));
   }
 
   checkChatExistsAndMaterializeChanges(chatId?: number): void {
@@ -13952,12 +13988,14 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
         () => gadgetViewer(this.impl, this.clientUserId, role));
   }
 
+  // The owner and "build" collaborators, who mint this class, may read the gadget's code, so
+  // they are offered it as a project too.
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
-    return this.impl.getGadgetExportFormats(this.id, chatId);
+    return this.impl.getGadgetExportFormats(this.id, chatId, true);
   }
 
   async export(formatId: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
-    return this.impl.exportGadget(this.id, formatId, chatId);
+    return this.impl.exportGadget(this.id, formatId, chatId, true);
   }
 
   async listBindings(chatId?: number): Promise<GadgetBindingInfo[]> {
