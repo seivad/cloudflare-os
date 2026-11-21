@@ -142,14 +142,14 @@ function summaryCounting(api: RpcStub<AuthenticatedApi>, total: number): Promise
 }
 
 /** A log AI Gateway made a minute ago, of a request whose metadata was `metadata`. */
-function setLog(logId: string, metadata: object) {
+function setLog(logId: string, metadata: object, cost = 0.94) {
   const createdAt = new Date(Date.now() - 60_000).toISOString();
-  logs.set(logId, { cost: 0.94, model: "google/veo-3", metadata, created_at: createdAt });
+  logs.set(logId, { cost, model: "google/veo-3", metadata, created_at: createdAt });
 }
 
 /** A log of this connection's, as AI Gateway records a request made with its tag. */
-async function logFor(resourceUrl: string, logId: string) {
-  setLog(logId, { tag: await costTag(resourceUrl) });
+async function logFor(resourceUrl: string, logId: string, cost?: number) {
+  setLog(logId, { tag: await costTag(resourceUrl) }, cost);
 }
 
 it("an approved spending action is counted from its gateway log", async () => {
@@ -228,6 +228,27 @@ it("an untagged log counts the capped estimate instead", async () => {
   const summary = await summaryCounting(workspace.api, 5);
   expect(summary.workspaces[0]!.lines).toEqual(
       [{ ...VIDEO_LINE, estimated: true, usd: 5, requests: 1 }]);
+});
+
+it("its own log that gives no cost counts the capped estimate, once", async () => {
+  using workspace = await testWorkspace("actioncostfree");
+  const { session, resourceUrl } = await workspace.bind();
+  const logId = crypto.randomUUID();
+  await spend(workspace, session, 1, spentVideo(logId, 9));
+  await logFor(resourceUrl, logId, 0);
+
+  await decide(workspace.ws, 1);
+  const summary = await summaryCounting(workspace.api, 5);
+  expect(summary.workspaces[0]!.lines).toEqual(
+      [{ ...VIDEO_LINE, estimated: true, usd: 5, requests: 1 }]);
+
+  // The log counted at the estimate counts no more, for any action.
+  const again = await spend(workspace, session, 2, spentVideo(logId, 9));
+  await decide(workspace.ws, 2);
+  await waitFor("the second action's poll", async () =>
+    await polls(workspace.label, again) > 0 || null);
+  await sleep(1_500);
+  expect((await workspace.api.getMyCostSummary()).totalCost).toBe(5);
 });
 
 it("falls back to the estimate once after the log stays unreadable", async () => {

@@ -14,7 +14,7 @@ A cost is counted from the AI Gateway log of the request that made it: the cost 
 | Cache-warm pings (the resend that keeps a prompt cache alive while a chat is viewed) | the workspace | `chat` | the same |
 | A model binding's requests (`creationSpec.type === "aiModel"`) | the workspace | `model-binding` | the binding reports each one (`ApprovalQueue.reportCost`): its log id, else its estimate |
 | An approved Gatekeeper action that spends | the workspace | `action` | the Gatekeeper's answer to `getActionCost` and the log it names (below) |
-| Voice: transcription, speech | the person's own ledger | `voice` | the call's gateway log; nothing is counted without one |
+| Voice: transcription, speech | the person's own ledger | `voice` | the call's gateway log, a $0 one as $0 (voice has no estimate); nothing is counted without one |
 
 The Overseer sets the source from the path a cost arrived by; a report never names it. Every line of a breakdown carries its source, so chat, model bindings and actions show apart.
 
@@ -49,11 +49,11 @@ For `spent` the Overseer reads the log (up to six attempts for a failure worth r
 
 | Case | Counted |
 | --- | --- |
-| Log carries this Gatekeeper's `tag` and is at most 31 days old | the log's cost, exactly |
+| Log carries this Gatekeeper's `tag` and is at most 31 days old | the log's cost, exactly; where the log gives no cost ($0), the Gatekeeper's `estimateUsd`, capped at US$5, as a chat request falls back to its estimate |
 | Log carries a different `tag` | nothing, with a warning: it is another Gatekeeper's, so its estimate is not trusted either |
 | No `gatewayLogId`, log unreadable, log without a tag, or log older than 31 days or of unknown age | the Gatekeeper's `estimateUsd`, capped at US$5, once for the approved action |
 
-A log id is counted once. The Overseer remembers the ids it counted and prunes them after 31 days, the age past which it refuses a log, so a repeated answer never counts twice. A Gatekeeper that does not set `reportsCost`, or does not implement `getActionCost`, is never polled. `reportCost` is for model bindings only and is refused for any other Gatekeeper.
+A log id is counted once, also where the estimate was counted for it because it stayed unreadable or gave no cost. The Overseer remembers the ids it counted and prunes them after 31 days, the age past which it refuses a log, so a repeated answer never counts twice. A Gatekeeper that does not set `reportsCost`, or does not implement `getActionCost`, is never polled. `reportCost` is for model bindings only and is refused for any other Gatekeeper.
 
 The Media Studio Gatekeeper of the custom Gatekeeper package is the example: it tags each job, records the log id when the model answers, and answers `getActionCost` from the job it kept.
 

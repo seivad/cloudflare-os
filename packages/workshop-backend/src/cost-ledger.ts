@@ -127,11 +127,23 @@ export function isActionCost(value: unknown): value is ActionCost {
 }
 
 /**
+ * Whether `log` is one an approved action's cost is counted from: it carries the tag the action's
+ * Gatekeeper was given (`tag`), and was made no more than MAX_REPORTED_LOG_AGE_DAYS before `now`.
+ */
+export function isActionLog(log: AiGatewayLogRecord | undefined, tag: string | undefined,
+                            now: number): log is AiGatewayLogRecord {
+  let logTag = log?.metadata?.tag;
+  return logTag !== undefined && logTag === tag && log?.createdAt !== undefined &&
+      now - log.createdAt.valueOf() <= MAX_REPORTED_LOG_AGE_MS;
+}
+
+/**
  * What an approved action that spent counts as, or null for nothing. The cost AI Gateway logged
- * for it, where `log` carries the tag its Gatekeeper was given (`tag`) and was made no more than
- * MAX_REPORTED_LOG_AGE_DAYS before `now`. Null where the log carries another tag: a Gatekeeper
- * reporting another's log has no estimate worth taking either. Otherwise (no log, an untagged log,
- * or one too old or of unknown age) the Gatekeeper's estimate, up to MAX_UNLOGGED_ACTION_COST_USD.
+ * for it, where `log` is an action log (isActionLog) with a positive cost. Null where the log
+ * carries another tag: a Gatekeeper reporting another's log has no estimate worth taking either.
+ * Otherwise (no log, an untagged log, one too old or of unknown age, or an action log that gives
+ * no cost, as a chat request's falls back to its estimate) the Gatekeeper's estimate, up to
+ * MAX_UNLOGGED_ACTION_COST_USD.
  */
 export function actionCostEntry(
     cost: Extract<ActionCost, { state: "spent" }>, log: AiGatewayLogRecord | undefined,
@@ -139,8 +151,7 @@ export function actionCostEntry(
   let { kind, model } = cost;
   let logTag = log?.metadata?.tag;
   if (logTag !== undefined && logTag !== tag) return null;
-  if (log === undefined || logTag === undefined || log.createdAt === undefined ||
-      now - log.createdAt.valueOf() > MAX_REPORTED_LOG_AGE_MS) {
+  if (!isActionLog(log, tag, now) || log.cost <= 0) {
     return { kind, model, estimated: true,
       usd: Math.min(cost.estimateUsd, MAX_UNLOGGED_ACTION_COST_USD) };
   }
