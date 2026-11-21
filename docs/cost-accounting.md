@@ -57,7 +57,7 @@ A log id is counted once, also where the estimate was counted for it because it 
 
 When the owner deletes the workspace, the Overseer first asks each action still to report once more, due or not, with the same 30 s, so that what a generation finished meanwhile spent is in the owner's final cost (`settleActionCosts`). Its answer counts by the rules above, except that nothing is asked again later: `pending`, a failure or no answer drops the action with a warning, and a log not yet readable counts the capped estimate. Deleting waits for these answers, up to 30 s.
 
-The Media Studio Gatekeeper of the custom Gatekeeper package is the example: it tags each job, records the log id when the model answers, and answers `getActionCost` from the job it kept.
+The Media Studio Gatekeeper of the custom Gatekeeper package is the example: it tags each job, records the log id when the model answers, and answers `getActionCost` from the job it kept. A job cut off while being made (an eviction or a deploy mid-run) may have been charged, so it answers `spent` at the job's estimate with no log id; a job whose model has left its catalog answers `none`.
 
 ### Voice
 
