@@ -35,7 +35,7 @@ import {
 } from "@gadgets/workshop-shared/api";
 import { traceChat } from "./agent-tracing.js";
 import {
-  AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, getAiGatewayConfig, getGatewayModels,
+  AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, gatewayLogRoute, getAiGatewayConfig, getGatewayModels,
   type AiGatewayLogRoute,
 } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
@@ -1198,12 +1198,7 @@ function getModelViaGateway(
   };
   const gatewayBase =
       `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}`;
-  // Cost-log reads are same-account, so the binding arm applies whenever the binding transport
-  // is active (gwConfig.binding is unset when CF_AI_GATEWAY_USE_BINDING=false opts out) --
-  // even for Google inference, which itself rides HTTPS (see AiGatewayConfig.bindingFor).
-  const logRoute = (gateway: string): AiGatewayLogRoute => gwConfig.binding
-      ? { gateway }
-      : { gateway, accountId: gwConfig.accountId, apiToken: gwConfig.apiToken! };
+  const logRoute = (gateway: string): AiGatewayLogRoute => gatewayLogRoute(gwConfig, gateway);
 
   // Every provider -- Workers AI included -- rides the same gateway, with the same log route
   // and attribution metadata. Binding-routed providers address it on the binding's host, which

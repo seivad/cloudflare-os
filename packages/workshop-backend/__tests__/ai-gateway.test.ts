@@ -13,6 +13,8 @@ import {
   gatewayKeyedProviders,
   gatewayModelConfig,
   gatewayRunConfig,
+  deploymentLogRoute,
+  getAiGatewayLog,
   getAiGatewayLogCost,
   getGatewayModels,
 } from "../src/ai-gateway.js";
@@ -1160,5 +1162,93 @@ describe("getAiGatewayLogCost", () => {
         .rejects.toBeInstanceOf(AiGatewayLogRetryableError);
     await expect(getAiGatewayLogCost(env(), route, "log-id"))
         .rejects.toBeInstanceOf(AiGatewayLogRetryableError);
+  });
+});
+
+describe("getAiGatewayLog", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const expected = {
+    cost: 0.75,
+    model: "google/veo-3",
+    metadata: { tag: "t1" },
+    tokensIn: 3,
+    tokensOut: 4,
+    createdAt: new Date("2026-11-20T00:00:00Z"),
+  };
+
+  it("returns cost, model, metadata, tokens and createdAt from the REST transport", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      success: true,
+      result: {
+        cost: 0.75, model: "google/veo-3", metadata: { tag: "t1" },
+        tokens_in: 3, tokens_out: 4, created_at: "2026-11-20T00:00:00Z",
+      },
+    })));
+
+    await expect(getAiGatewayLog(env(), {
+      accountId: "gateway-account-id",
+      gateway: "platform-gateway",
+      apiToken: "read-run-token",
+    }, "log-id")).resolves.toEqual(expected);
+  });
+
+  it("returns cost, model, metadata, tokens and createdAt from the binding transport", async () => {
+    const getLog = vi.fn(async () => ({
+      id: "log-id", cost: 0.75, model: "google/veo-3", metadata: { tag: "t1" },
+      tokens_in: 3, tokens_out: 4, created_at: new Date("2026-11-20T00:00:00Z"),
+    }));
+    const gateway = vi.fn(() => ({ getLog }));
+
+    await expect(getAiGatewayLog(env({
+      WORKERS_AI: { gateway } as unknown as Ai,
+    }), { gateway: "platform-gateway" }, "log-id")).resolves.toEqual(expected);
+  });
+
+  it("leaves out the fields a log does not carry", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      success: true,
+      result: { cost: 0.1 },
+    })));
+
+    const log = await getAiGatewayLog(env(), {
+      accountId: "a", gateway: "g", apiToken: "t",
+    }, "log-id");
+    expect(log.cost).toBe(0.1);
+    expect(log.model).toBeUndefined();
+    expect(log.createdAt).toBeUndefined();
+  });
+
+  it("is retryable while the log has no cost", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      success: true,
+      result: { model: "m" },
+    })));
+
+    await expect(getAiGatewayLog(env(), {
+      accountId: "a", gateway: "g", apiToken: "t",
+    }, "log-id")).rejects.toBeInstanceOf(AiGatewayLogRetryableError);
+  });
+});
+
+describe("deploymentLogRoute", () => {
+  it("is undefined without CF_AI_GATEWAY", () => {
+    expect(deploymentLogRoute(env({ CF_AI_GATEWAY: undefined }))).toBeUndefined();
+  });
+
+  it("is the gateway alone in binding mode", () => {
+    expect(deploymentLogRoute(env({
+      CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+      CF_AI_GATEWAY_PROVIDERS: "anthropic,openai",
+      WORKERS_AI: { gateway: () => ({}) } as unknown as Ai,
+    }))).toEqual({ gateway: "platform-gateway" });
+  });
+
+  it("carries the account and token over HTTPS", () => {
+    expect(deploymentLogRoute(env({
+      CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+      CF_AI_GATEWAY_API_TOKEN: "tok",
+      CF_AI_GATEWAY_USE_BINDING: "false",
+    }))).toEqual({ gateway: "platform-gateway", accountId: "account-id", apiToken: "tok" });
   });
 });
