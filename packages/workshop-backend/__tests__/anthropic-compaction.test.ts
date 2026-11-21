@@ -293,7 +293,7 @@ describe("Anthropic compaction in a chat", () => {
     // The summary request counts to the chat, at its estimate: the gateway named no log for it.
     const [compaction] = impl.getCostLines();
     expect(impl.getCostLines()).toEqual([{
-      kind: "text", model: "claude-sonnet-5-5", estimated: true, usd: expect.any(Number),
+      source: "compaction", kind: "text", model: "claude-sonnet-5-5", estimated: true, usd: expect.any(Number),
       requests: 1, inputTokens: 1200, outputTokens: 80,
     }]);
     expect(compaction?.usd).toBeGreaterThan(0);
