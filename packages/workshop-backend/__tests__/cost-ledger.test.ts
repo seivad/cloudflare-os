@@ -61,10 +61,16 @@ describe("cost ledger", () => {
   });
 
   it("withEarlier adds nothing when lines cover the total", () => {
-    // Each addition rounds, so a total summed request by request can differ from the lines' sum
-    // by far less than a cent.
-    let lines = addCost(addCost([], entry({ usd: 0.1 })), entry({ model: OPUS, usd: 0.2 }));
-    expect(withEarlier(0.1 + 0.2, lines)).toEqual(lines);
+    // The total is summed request by request and the lines line by line, and each addition
+    // rounds, so the two can differ by far less than a cent.
+    let lines = addCost(addCost(addCost([], entry({ usd: 0.1 })), entry({ model: OPUS, usd: 0.1 })),
+        entry({ usd: 0.6 }));
+    let total = 0.1 + 0.1 + 0.6;
+    expect(total).toBeGreaterThan(lines.reduce((sum, line) => sum + line.usd, 0));
+    expect(withEarlier(total, lines)).toEqual(lines);
+    // Just under the threshold is rounding; just over it is a remainder.
+    expect(withEarlier(1 + 0.0000009, [{ ...lines[0]!, usd: 1 }])).toHaveLength(1);
+    expect(withEarlier(1 + 0.0000011, [{ ...lines[0]!, usd: 1 }])).toHaveLength(2);
     expect(withEarlier(0, [])).toEqual([]);
   });
 

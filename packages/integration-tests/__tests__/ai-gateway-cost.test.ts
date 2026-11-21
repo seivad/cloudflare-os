@@ -36,9 +36,11 @@ const network = new NetworkInterceptor({
     if (method === "GET" && url.href === TITLE_LOG_URL) {
       return Response.json({ success: true, result: { cost: TITLE_COST } });
     }
-    const titles = model.auxiliaryRequests.length;
+    // A turn and its title are requested together, so each is told apart by its own attribution.
+    const metadata: unknown = JSON.parse(headers.get("cf-aig-metadata") ?? "{}");
+    const logId = (metadata as { source?: string }).source === "thread-title"
+      ? "title-log-id" : "scripted-log-id";
     const response = await model.handler(url, method, headers, request);
-    const logId = model.auxiliaryRequests.length > titles ? "title-log-id" : "scripted-log-id";
     return response && new Response(response.body, {
       status: response.status,
       headers: { ...Object.fromEntries(response.headers), "cf-aig-log-id": logId },
