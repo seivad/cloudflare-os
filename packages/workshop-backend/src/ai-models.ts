@@ -1699,7 +1699,7 @@ export class DecisionModelGatekeeper
 }
 
 @validateRpc()
-class DecisionModelBindingImpl extends RpcTarget implements DecisionModelBinding {
+export class DecisionModelBindingImpl extends RpcTarget implements DecisionModelBinding {
   constructor(private model: DecisionModel, private approvalQueue: RpcStub<ApprovalQueue>) {
     super();
   }
@@ -1707,9 +1707,9 @@ class DecisionModelBindingImpl extends RpcTarget implements DecisionModelBinding
   async decide(request: DecisionRequest): Promise<Record<string, DecisionAnswer>> {
     let result = await this.model(request);
     // The classifier's transport surfaces no AI Gateway log id, so a decision counts at its
-    // catalog-priced estimate.
+    // catalog-priced estimate (a free model's decisions still count as requests).
     let { usage } = result;
-    if (usage?.cost.total) {
+    if (usage) {
       await reportCost(this.approvalQueue, {
         model: result.model,
         estimateUsd: usage.cost.total,
