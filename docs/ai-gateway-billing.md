@@ -24,6 +24,8 @@ The balance shown to users is read live from their Cloudflare AI Gateway billing
 [Cloudflare dashboard](https://dash.cloudflare.com/?to=/:account/ai/ai-gateway) — the platform never
 holds money.
 
+What each request cost, and where it is counted (per workspace and per user, including Gatekeeper actions and voice), is described in [cost accounting](./cost-accounting.md). The free allowance counts calls; the cost accounting counts dollars.
+
 ## Connecting Cloudflare
 
 Billing is tied to the **Cloudflare gatekeeper**: the OAuth tokens live in that gatekeeper's
