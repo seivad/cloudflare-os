@@ -16,7 +16,7 @@ import { zeroUsage } from "../src/ai-invoke.js";
 import {
   DecisionModelGatekeeper, gatewayBuiltInReasoning, gatewayReasoningLevels, getDecisionModel,
   getModel, isRuntimeModel, LanguageModelGatekeeper, ROUTABLE_CATALOG_MODELS,
-  SKIPPED_THOUGHT_SIGNATURE, withThoughtSignatures, type ModelHandle,
+  SKIPPED_THOUGHT_SIGNATURE, withThoughtSignatures, LanguageModelBindingImpl, type ModelHandle,
 } from "../src/ai-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
@@ -2322,6 +2322,44 @@ describe("DecisionModelGatekeeper.startSession", () => {
     });
     await expect(gatekeeper.startSession(undefined as never)).rejects.toThrow(new Error(
         'The "Clef (Workers AI)" model is disabled on this deployment by an administrator.'));
+  });
+});
+
+describe("LanguageModelBindingImpl cost reports", () => {
+  // A handle that answers "hi", as a gateway request that logged `log-1` and was answered by
+  // `answered-by`, using 100 input and 10 output tokens priced at $0.002.
+  function handle(): ModelHandle {
+    const usage = {
+      ...zeroUsage(), input: 100, output: 10, totalTokens: 110,
+      cost: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.002 },
+    };
+    const self: ModelHandle = {
+      model: { id: "picked" } as ModelHandle["model"],
+      stream: (() => {
+        self.lastResponse = { status: 200, aiGatewayLogId: "log-1", routedModel: "answered-by" };
+        return { result: async () => ({
+          stopReason: "stop", content: [{ type: "text", text: "hi" }], usage,
+        }) };
+      }) as unknown as ModelHandle["stream"],
+    };
+    return self;
+  }
+
+  it("reports each run's model, log id and estimate to its queue", async () => {
+    const reportCost = vi.fn(async () => {});
+    const binding = new LanguageModelBindingImpl(handle(), { reportCost } as never);
+    expect(await binding.run({ prompt: "hello" })).toBe("hi");
+    expect(reportCost).toHaveBeenCalledExactlyOnceWith({
+      model: "picked", answeredBy: "answered-by", gatewayLogId: "log-1", estimateUsd: 0.002,
+      inputTokens: 100, outputTokens: 10,
+    });
+  });
+
+  it("does not fail the run when the report fails", async () => {
+    const reportCost = vi.fn(async () => { throw new Error("queue gone"); });
+    const binding = new LanguageModelBindingImpl(handle(), { reportCost } as never);
+    expect(await binding.run({ prompt: "hello" })).toBe("hi");
+    expect(reportCost).toHaveBeenCalledOnce();
   });
 });
 
