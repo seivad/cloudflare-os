@@ -13,6 +13,10 @@ import type { QueuedChange } from "../../src/slides-simulation";
 import { presentation, shape, slide, text } from "../slides-fixture";
 
 class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
+  // These Gatekeepers report no costs.
+  async getCostTag(): Promise<string> { return "test-tag"; }
+  async reportCost(): Promise<void> {}
+
   readonly observations: ObservationDescription[] = [];
 
   async authorizeObservation(description: ObservationDescription): Promise<void> {
