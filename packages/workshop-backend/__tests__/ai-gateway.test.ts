@@ -1205,6 +1205,21 @@ describe("getAiGatewayLog", () => {
     }), { gateway: "platform-gateway" }, "log-id")).resolves.toEqual(expected);
   });
 
+  it("reads metadata the REST transport gives as a JSON string, and drops it unparsed", async () => {
+    const route = { accountId: "a", gateway: "g", apiToken: "t" };
+    for (const [metadata, read] of [
+      [JSON.stringify({ tag: "t1", user: "ada@example.com" }), { tag: "t1", user: "ada@example.com" }],
+      ["{not json", undefined],
+      [JSON.stringify(["t1"]), undefined],
+      [JSON.stringify("t1"), undefined],
+    ] as const) {
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+        success: true, result: { cost: 0.1, metadata },
+      })));
+      expect((await getAiGatewayLog(env(), route, "log-id")).metadata).toEqual(read);
+    }
+  });
+
   it("leaves out the fields a log does not carry", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({
       success: true,
