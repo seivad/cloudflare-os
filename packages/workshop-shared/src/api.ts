@@ -25,6 +25,7 @@
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AgentCatalog, AvatarImage, GatekeeperUiFrame, GatekeeperUserSelection, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import type { CostKind } from "./gatekeeper.js";
 import type { BytesRef, CodeChange } from "./code-change.js";
 import type { GitOid } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
@@ -8208,4 +8209,42 @@ export type ShareLinkInfo = {
 
   /** Whether this is its creator's default link for what it grants (see `createShareLink`). */
   default?: true;
+};
+
+export type { CostKind } from "./gatekeeper.js";
+
+/** What an AI cost was incurred for. The Overseer sets it, never a report. */
+export type CostSource = "chat" | "title" | "compaction" | "model-binding" | "media" | "voice";
+
+/** One row of a cost breakdown: everything counted with the same kind, model, answering model and estimate flag. */
+export type CostLine = {
+  kind: CostKind;
+  /** The model picked, as the catalog names it (AUTO_ROUTER_MODEL_ID for Auto). "earlier" for pre-breakdown totals. */
+  model: string;
+  /** The model that answered, when `model` is a router and the gateway log says. */
+  answeredBy?: string;
+  /** True when `usd` is a catalog/studio estimate rather than AI Gateway's logged cost. */
+  estimated: boolean;
+  usd: number;
+  requests: number;
+  inputTokens?: number;
+  outputTokens?: number;
+};
+
+/** One workspace's cost: its total and the breakdown behind it. */
+export type WorkspaceCostSummary = {
+  workspaceId: string;
+  title?: string;
+  totalCost: number;
+  lines: CostLine[];
+};
+
+/** What a user is counted as having spent: their owned workspaces, deleted ones, and their own non-workspace use. */
+export type UserCostSummary = {
+  totalCost: number;
+  byKind: Partial<Record<CostKind, number>>;
+  byModel: Record<string, number>;
+  workspaces: WorkspaceCostSummary[];
+  deletedWorkspaces: { totalCost: number; lines: CostLine[] };
+  own: { totalCost: number; lines: CostLine[] };
 };

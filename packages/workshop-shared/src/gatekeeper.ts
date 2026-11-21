@@ -26,6 +26,35 @@ import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudf
  * batch does NOT mean exhaustion — a filtered page can be empty mid-walk — so drain
  * on `null`, never on `length`. Dispose the cursor when finished.
  */
+/** What an AI cost bought: the kind of output the model produced. */
+export type CostKind = "text" | "image" | "video" | "music" | "speech" | "transcription";
+
+/** What one approved action spent, as its Gatekeeper reports it (Gatekeeper.getActionCost). */
+export type ActionCost =
+  /** Not finished: ask again later. */
+  | { state: "pending" }
+  /** Nothing was spent: cancelled, failed before the model answered, or no longer known. */
+  | { state: "none" }
+  /**
+   * Spent. `estimateUsd` is the Gatekeeper's own estimate, counted only when `gatewayLogId` is
+   * absent or its AI Gateway log cannot be read.
+   */
+  | { state: "spent"; kind: CostKind; model: string; estimateUsd: number; gatewayLogId?: string };
+
+/**
+ * A request a model-binding Gatekeeper made, reported through its session
+ * (ApprovalQueue.reportCost). `answeredBy` names the model that answered when `model` is a router.
+ * `estimateUsd` is counted at most once per request, and only without a readable `gatewayLogId`.
+ */
+export type ModelRequestCost = {
+  model: string;
+  answeredBy?: string;
+  gatewayLogId?: string;
+  estimateUsd?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+};
+
 export interface Cursor<T> {
   next(): Promise<T[] | null>;
 }
@@ -1138,6 +1167,12 @@ export type GitShallowInfo = {
  */
 export interface Gatekeeper<Session> extends DurableObject {
   /**
+   * What an approved action spent, for a Gatekeeper whose actions set `ActionDescription.
+   * reportsCost`. The Overseer polls it once the action is approved, until it is not `pending`.
+   */
+  getActionCost?(action: number): Promise<ActionCost>;
+
+  /**
    * Get more info on the specific resource without actually granting access. This information is
    * to be presented to the user in the UI, before the user actually confirms they want to grant
    * access.
@@ -1555,6 +1590,19 @@ export interface ApprovalQueue extends ObservationAuthorizer {
   submitAction(action: number, description: ActionDescription): Promise<void>;
 
   /**
+   * The opaque tag this session's Gatekeeper puts in AI Gateway request metadata as `tag`, so the
+   * Overseer can tell which gateway logs belong to it.
+   */
+  getCostTag(): Promise<string>;
+
+  /**
+   * Reports a model request the Gatekeeper made, so its cost counts toward the workspace. Accepted
+   * only from the Overseer's own model-binding Gatekeepers (`creationSpec.type === "aiModel"`);
+   * refused for every other Gatekeeper.
+   */
+  reportCost(cost: ModelRequestCost): Promise<void>;
+
+  /**
    * Notifies the overseer that the gadget (or an agent) has requested to register a persistent
    * callback hook.
    *
@@ -1816,6 +1864,12 @@ export type ActionKind = {
  * - Store the action in an audit log.
  */
 export type ActionDescription = {
+  /**
+   * Set by a Gatekeeper whose action spends money. The Overseer polls `Gatekeeper.getActionCost`
+   * for it once the action is approved.
+   */
+  reportsCost?: true;
+
   /** Brief one-line summary of the action, like an email subject line, to display in a list. */
   title: string;
 

@@ -604,9 +604,59 @@ function validateLogCost(cost: unknown): number {
   return cost;
 }
 
+/**
+ * What an AI Gateway log says about one inference: its cost, plus the model that ran, the request
+ * metadata the gateway recorded, and token counts. Only the cost is always present.
+ */
+export type AiGatewayLogRecord = {
+  cost: number;
+  model?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
+  tokensIn?: number;
+  tokensOut?: number;
+};
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function optionalMetadata(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown> : undefined;
+}
+
+function optionalDate(value: unknown): Date | undefined {
+  if (typeof value !== "string" && !(value instanceof Date)) return undefined;
+  let date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+/** Reads a log's fields from either transport's shape (both name them in snake_case). */
+function toLogRecord(log: Record<string, unknown>): AiGatewayLogRecord {
+  return {
+    cost: validateLogCost(log.cost),
+    model: optionalString(log.model),
+    metadata: optionalMetadata(log.metadata),
+    createdAt: optionalDate(log.created_at),
+    tokensIn: optionalCount(log.tokens_in),
+    tokensOut: optionalCount(log.tokens_out),
+  };
+}
+
 /** Retrieve the cost recorded for an AI Gateway log. */
 export async function getAiGatewayLogCost(
     env: Cloudflare.Env, route: AiGatewayLogRoute, logId: string): Promise<number> {
+  return (await getAiGatewayLog(env, route, logId)).cost;
+}
+
+/** Retrieve an AI Gateway log: its cost, model, metadata, token counts and creation time. */
+export async function getAiGatewayLog(
+    env: Cloudflare.Env, route: AiGatewayLogRoute, logId: string): Promise<AiGatewayLogRecord> {
   if (!("accountId" in route)) {
     let log: AiGatewayLog;
     try {
@@ -616,7 +666,7 @@ export async function getAiGatewayLogCost(
         cause: error,
       });
     }
-    return validateLogCost(log.cost);
+    return toLogRecord(log as unknown as Record<string, unknown>);
   }
 
   let url = "https://api.cloudflare.com/client/v4/accounts/" +
@@ -654,6 +704,24 @@ export async function getAiGatewayLogCost(
     throw new Error("AI Gateway log response was malformed.");
   }
 
-  let cost = "cost" in body.result ? body.result.cost : undefined;
-  return validateLogCost(cost);
+  return toLogRecord(body.result as Record<string, unknown>);
+}
+
+/**
+ * The log route of a gateway configuration. Cost-log reads are same-account, so the binding arm
+ * applies whenever the binding transport is active (config.binding is unset when
+ * CF_AI_GATEWAY_USE_BINDING=false opts out) -- even for Google inference, which itself rides
+ * HTTPS (see AiGatewayConfig.bindingFor).
+ */
+export function gatewayLogRoute(config: AiGatewayConfig, gateway: string = config.gateway):
+    AiGatewayLogRoute {
+  return config.binding
+      ? { gateway }
+      : { gateway, accountId: config.accountId, apiToken: config.apiToken! };
+}
+
+/** The deployment gateway's log route, or undefined when AI Gateway mode is not enabled. */
+export function deploymentLogRoute(env: Cloudflare.Env): AiGatewayLogRoute | undefined {
+  let config = getAiGatewayConfig(env);
+  return config ? gatewayLogRoute(config) : undefined;
 }
