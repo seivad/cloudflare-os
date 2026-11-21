@@ -20,7 +20,7 @@ The Overseer sets the source from the path a cost arrived by; a report never nam
 
 ## Ledger and summary
 
-Each workspace keeps a **ledger**: one line per source, kind (`text`, `image`, `video`, `music`, `speech`, `transcription`), model picked, model that answered (when the picked model is a router) and estimate flag, each with a running dollar total, request count and token totals (`CostLine`, `cost-ledger.ts`). Its `totalCost` is the sum of the lines. Totals counted before the ledger existed have no breakdown and appear as one `chat` `text` line with the model `"earlier"` (shown as "earlier (not broken down)"), until the lines account for them.
+Each workspace keeps a **ledger**: one line per source, kind (`text`, `image`, `video`, `music`, `speech`, `transcription`), model picked, model that answered (when the picked model is the Auto Router, `cloudflare/auto`; no other model's line names one, since the gateway may spell a model asked for by name otherwise than the catalog) and estimate flag, each with a running dollar total, request count and token totals (`CostLine`, `cost-ledger.ts`). Its `totalCost` is the sum of the lines. Totals counted before the ledger existed have no breakdown and appear as one `chat` `text` line with the model `"earlier"` (shown as "earlier (not broken down)"), until the lines account for them.
 
 `AuthenticatedApi.getMyCostSummary()` answers the caller's own total, by kind and by model, with the lines behind it. A user is counted as having spent:
 

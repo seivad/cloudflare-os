@@ -8238,7 +8238,7 @@ export type CostLine = {
   kind: CostKind;
   /** The model picked, as the catalog names it (AUTO_ROUTER_MODEL_ID for Auto). "earlier" for pre-breakdown totals. */
   model: string;
-  /** The model that answered, when `model` is a router and the gateway log says. */
+  /** The model that answered, when `model` is AUTO_ROUTER_MODEL_ID and the gateway says which. */
   answeredBy?: string;
   /** True when `usd` is a catalog/studio estimate rather than AI Gateway's logged cost. */
   estimated: boolean;

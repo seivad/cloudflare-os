@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { env, RpcStub, RpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { AiChatMetadata, CostLine, CostSource } from "@gadgets/workshop-shared/api";
+import {
+  AUTO_ROUTER_MODEL_ID, type AiChatMetadata, type CostLine, type CostSource,
+} from "@gadgets/workshop-shared/api";
 import {
   actionCostEntry, addCost, byKind, byModel, costLineKey, isActionCost, mergeLines, textCostEntry,
   withEarlier, type CostAttribution, type CostEntry,
@@ -131,21 +133,33 @@ describe("a text request's cost", () => {
   };
 
   it("is the gateway log's, with its answering model and tokens, in place of the estimate", () => {
-    expect(textCostEntry({ model: "auto", answeredBy: KIMI, usage },
+    expect(textCostEntry({ model: AUTO_ROUTER_MODEL_ID, answeredBy: KIMI, usage },
         { cost: 0.5, model: OPUS, tokensIn: 120, tokensOut: 12 })).toEqual(
-        { kind: "text", model: "auto", answeredBy: OPUS, estimated: false, usd: 0.5,
+        { kind: "text", model: AUTO_ROUTER_MODEL_ID, answeredBy: OPUS, estimated: false, usd: 0.5,
           inputTokens: 120, outputTokens: 12 });
     // A log that names the picked model, and counts no tokens.
     expect(textCostEntry({ model: KIMI, usage }, { cost: 0.5, model: KIMI })).toEqual(
-        { kind: "text", model: KIMI, answeredBy: undefined, estimated: false, usd: 0.5,
+        { kind: "text", model: KIMI, estimated: false, usd: 0.5,
           inputTokens: 100, outputTokens: 10 });
   });
 
+  it("names the model that answered only for the Auto Router", () => {
+    // The gateway may spell a model it was asked for by name otherwise than the catalog does.
+    const entry = textCostEntry({ model: KIMI, answeredBy: "workers-ai/kimi", usage },
+        { cost: 0.5, model: "kimi-k2.6" });
+    expect(entry).toMatchObject({ model: KIMI, usd: 0.5 });
+    expect(entry?.answeredBy).toBeUndefined();
+    expect(textCostEntry({ model: KIMI, answeredBy: OPUS, usage }, undefined)?.answeredBy)
+        .toBeUndefined();
+  });
+
   it("is the estimate where there is no log, or it gives no cost", () => {
-    const estimate = { kind: "text", model: "auto", answeredBy: KIMI, estimated: true, usd: 0.001,
-      inputTokens: 100, outputTokens: 10 };
-    expect(textCostEntry({ model: "auto", answeredBy: KIMI, usage }, undefined)).toEqual(estimate);
-    expect(textCostEntry({ model: "auto", usage }, { cost: 0, model: KIMI })).toEqual(estimate);
+    const estimate = { kind: "text", model: AUTO_ROUTER_MODEL_ID, answeredBy: KIMI,
+      estimated: true, usd: 0.001, inputTokens: 100, outputTokens: 10 };
+    expect(textCostEntry({ model: AUTO_ROUTER_MODEL_ID, answeredBy: KIMI, usage }, undefined))
+        .toEqual(estimate);
+    expect(textCostEntry({ model: AUTO_ROUTER_MODEL_ID, usage }, { cost: 0, model: KIMI }))
+        .toEqual(estimate);
     expect(textCostEntry({ model: KIMI }, undefined)).toBeUndefined();
     expect(textCostEntry({ model: KIMI, usage: { ...usage, cost: { ...usage.cost, total: 0 } } },
         { cost: 0 })).toBeUndefined();
@@ -354,12 +368,15 @@ describe("what an approved action that spent counts as", () => {
     ...overrides,
   });
 
-  it("is its log's cost, answered by the model the log names where it isn't the one picked", () => {
+  it("is its log's cost, answered by the model the log names only for the Auto Router", () => {
     expect(actionCostEntry(SPENT, log({ model: "google/veo-3-fast", tokensOut: 10 }), "mine", NOW))
-        .toEqual({ kind: "video", model: "google/veo-3", answeredBy: "google/veo-3-fast",
-          estimated: false, usd: 0.94, outputTokens: 10 });
+        .toEqual({ kind: "video", model: "google/veo-3", estimated: false, usd: 0.94,
+          outputTokens: 10 });
     expect(actionCostEntry(SPENT, log(), "mine", NOW))
         .toEqual({ kind: "video", model: "google/veo-3", estimated: false, usd: 0.94 });
+    expect(actionCostEntry({ ...SPENT, kind: "text", model: AUTO_ROUTER_MODEL_ID },
+        log({ model: OPUS }), "mine", NOW)).toEqual({ kind: "text", model: AUTO_ROUTER_MODEL_ID,
+      answeredBy: OPUS, estimated: false, usd: 0.94 });
   });
 
   it("is the capped estimate for a log over 31 days old, or of unknown age", () => {
