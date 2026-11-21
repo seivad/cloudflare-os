@@ -15,14 +15,15 @@ import { keyString } from "@gadgets/typed-storage";
 import type { ListOptions } from "@gadgets/typed-storage";
 import {
   actionLastChangedKey, chatChangeClientKey, chatKey, chatKeyPrefix, connectionVendorId,
-  makeOverseerStorage,
+  makeOverseerStorage, newPendingActionCost,
   type ActionRecord, type ActiveAgentRecord, type AgentSpawnerBindingProps,
   type AiChatAgentContext, type BindingRecord,
   type BlueprintGadgetRecord, type BoundHookRecord, type ChatBindingEntry,
   type ChatChangeBoundaryRecord, type ChatChangeRecord, type ChatFanoutStart, type CompactionCheckpoint,
   type ExternalChatRecord, type ExternalMessageRecord, type GadgetRecord, type GatekeeperCaller,
   type GatekeeperClass, type GatekeeperRecord, type ObserverRecord, type OverseerStorage,
-  type StoredAssistantMessage, type StoredChatMessage, type StoredChatMetadata,
+  type PendingActionCost, type StoredAssistantMessage, type StoredChatMessage,
+  type StoredChatMetadata,
   type WorkpieceRecord, type WorktreeRecord,
 } from "./storage-schema/overseer-storage";
 import type { UserAiModelRecord, WorkspaceOutputEntry } from "./storage-schema/user-storage";
@@ -30,8 +31,9 @@ import { filesEqual, threeWayMerge, type MergeResult } from "./three-way-merge";
 import { GitCacheImpl, WorkspaceGitCache, assertNoNul, commitIdentityForAuthor } from "./git-cache";
 import type { BlobReader } from "./git-chunked-blob";
 import {
-  OVERSEER_STORAGE_VERSION, migrateToActionIndexes, migrateToBlueprintUpstreams,
-  migrateToGitStorage, migrateToMultiGadget, migrateToSpawnerBindings, migrateToWorkpieceTypes,
+  OVERSEER_STORAGE_VERSION, backfillActionCosts, migrateToActionIndexes,
+  migrateToBlueprintUpstreams, migrateToGitStorage, migrateToMultiGadget, migrateToSpawnerBindings,
+  migrateToWorkpieceTypes,
 } from "./storage-schema/overseer-migrations";
 import {
   AiModelGatekeeperProps,
@@ -48,7 +50,8 @@ import {
   type AiGatewayLogRoute,
 } from "./ai-gateway";
 import {
-  addToLine, costLineKey, textCostEntry, withEarlier, type CostAttribution, type CostEntry,
+  actionCostEntry, addToLine, costLineKey, isActionCost, MAX_REPORTED_LOG_AGE_DAYS, textCostEntry,
+  withEarlier, type CostAttribution, type CostEntry,
 } from "./cost-ledger";
 import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
@@ -307,6 +310,32 @@ type PreparedScratchWorktree = {
 // shape to call it — same optional-method-on-a-stub pattern as user.ts's SingletonAccountStub.
 type CatalogGatekeeperFacet =
     Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "getAgentCatalog">>>;
+
+// getActionCost is optional on Gatekeeper too. One whose action set `reportsCost` implements it,
+// unless it predates the method, when the call fails as isMissingMethodError() recognizes.
+type ActionCostGatekeeperFacet =
+    Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "getActionCost">>>;
+
+// Whether `error` is what Workers RPC throws for a call to a method its receiver lacks.
+function isMissingMethodError(error: unknown, method: string): boolean {
+  return error instanceof Error &&
+      error.message.includes(`does not implement the method "${method}"`);
+}
+
+// How long after an action is approved its Gatekeeper is first asked what it spent: the first
+// poll's delay, which doubles with each poll up to ACTION_COST_MAX_POLL_MS. A local test
+// instance may shorten it with ACTION_COST_FIRST_POLL_MS, so a test sees several polls in
+// seconds; a deployment can't.
+function firstActionCostPollMs(env: Cloudflare.Env): number {
+  let ms = env.WORKSHOP_ENVIRONMENT === "test" ? Number(env.ACTION_COST_FIRST_POLL_MS) : NaN;
+  return ms > 0 ? ms : 30_000;
+}
+const ACTION_COST_MAX_POLL_MS = 60 * 60 * 1000;
+// How long a Gatekeeper is asked about an action before the Overseer gives up on it.
+const ACTION_COST_GIVE_UP_MS = 7 * 24 * 60 * 60 * 1000;
+// How many times an action's AI Gateway log is read, failing in a way worth retrying, before its
+// Gatekeeper's estimate is counted instead.
+const ACTION_COST_LOG_ATTEMPTS = 6;
 
 function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: string): string {
   return record.resourceTitle || bindingName || "Connection";
@@ -1087,6 +1116,8 @@ class OverseerImpl implements AgentHooks {
     if ([...this.storage.dirtyChats.list({limit: 1})].length) {
       times.push(this.#unreadRetryAt || Date.now() + 1_000);
     }
+    let nextActionCost = [...this.storage.pendingActionCosts.byNextPollAt.list({limit: 1})][0];
+    if (nextActionCost) times.push(nextActionCost.nextPollAt);
 
     // Outstanding agent work: see #agentKeepAliveTime for why it is set once and held.
     let hasAgentWork = this.#runningAgents.size > 0 ||
@@ -1152,6 +1183,7 @@ class OverseerImpl implements AgentHooks {
           this.deliverDirtyChats(),
           this.deliverUserUpdates(),
           this.liveCalls.deliverCleanup(),
+          this.pollActionCosts(),
         ]);
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
@@ -1712,6 +1744,7 @@ class OverseerImpl implements AgentHooks {
       migrateToWorkpieceTypes(this);
       migrateToBlueprintUpstreams(this);
       migrateToSpawnerBindings(this);
+      backfillActionCosts(this, Date.now() + firstActionCostPollMs(this.env));
       // Do not replace an existing alarm during constructor recovery: setAlarm would reset the
       // platform's retry budget. Cache its time before registering any recovered executions.
       this.#scheduledAlarm = await this.ctx.storage.getAlarm();
@@ -1721,6 +1754,10 @@ class OverseerImpl implements AgentHooks {
       this.#initializeUnreadTracking();
       if (this.storage.deleting.get() || this.#hasUserUpdates()) {
         this.#userUpdatesRetryAt = this.#scheduledAlarm ?? Date.now() + 1_000;
+        this.#updateAlarm();
+      } else if (this.#scheduledAlarm === null &&
+                 [...this.storage.pendingActionCosts.list({limit: 1})].length) {
+        // Costs the backfill just queued, which nothing else has scheduled.
         this.#updateAlarm();
       }
     // Resume outside the critical section, before blocked events are delivered. On failure,
@@ -5528,12 +5565,20 @@ class OverseerImpl implements AgentHooks {
     // One durable step for the completion record and the mark conversion (pushed objects are
     // now proven on the remote), so a crash between the push and here strands nothing locally
     // -- the remote side of that window is the gatekeeper's applyAction idempotency
-    // responsibility.
+    // responsibility. An action that spends is queued, in the same step, for its Gatekeeper to
+    // be asked what it spent (see pollActionCosts).
+    let action = record.action;
     this.storage.transaction(() => {
       this.gitCache.convertPushMarksToOnRemote(record.id);
       this.storage.actions.put(record);
       if (gatekeeperRecord) this.storage.gatekeepers.put(gatekeeperRecord);
+      if (record.description.reportsCost && action !== "create") {
+        let now = Date.now();
+        this.storage.pendingActionCosts.put(newPendingActionCost(
+            {...record, action}, now, now + firstActionCostPollMs(this.env)));
+      }
     });
+    if (record.description.reportsCost) this.#updateAlarm();
     // No await between the decision write and the durable execution claim. This also covers
     // auto-approval, rather than relying on a client's continuation after this promise resolves.
     if (record.caller.from === "agent" && record.description.awaitDecision) {
@@ -9799,6 +9844,135 @@ class OverseerImpl implements AgentHooks {
     this.#recordTextCost(request, log, to);
   }
 
+  // The opaque tag Gatekeeper `gatekeeperId` puts in the AI Gateway metadata of requests it makes
+  // for this workspace (ApprovalQueue.getCostTag): 128 random bits, minted on first request.
+  getCostTag(gatekeeperId: WorkpieceId): string {
+    let existing = this.storage.costTags.get(gatekeeperId);
+    if (existing) return existing.tag;
+    let tag = crypto.getRandomValues(new Uint8Array(16)).toHex();
+    this.storage.costTags.put({gatekeeperId, tag});
+    return tag;
+  }
+
+  #actionCostPoll?: Promise<void>;
+
+  // Asks the Gatekeepers of approved actions that spend (pendingActionCosts) what each spent,
+  // where it is time to, and counts what they report. Run by the alarm alone, which #updateAlarm
+  // schedules for the next action due; it never throws, so a Gatekeeper can't fail the alarm.
+  // Dedupe records past the age at which a log is refused anyway are pruned here too.
+  pollActionCosts(): Promise<void> {
+    if (this.storage.deleting.get()) return Promise.resolve();
+    return this.#actionCostPoll ??= (async () => {
+      let now = Date.now();
+      let expired = now - MAX_REPORTED_LOG_AGE_DAYS * 24 * 60 * 60 * 1000;
+      // Listed in full before deleting, so that nothing is deleted under the cursor.
+      let stale = Array.from(this.storage.countedCostLogs.byCountedAt.list({end: expired}));
+      for (let {logId} of stale) this.storage.countedCostLogs.delete(logId);
+      let due = [...this.storage.pendingActionCosts.byNextPollAt.list({end: now + 1})];
+      await Promise.all(due.map(async pending => {
+        try {
+          await this.#pollActionCost(pending, now);
+        } catch (error) {
+          this.logger.warn("approved action's cost poll failed", {
+            event: "action.cost.poll.failed", gatekeeperId: pending.gatekeeperId, error,
+          });
+          this.#repollActionCost(pending);
+        }
+      }));
+    })().finally(() => {
+      this.#actionCostPoll = undefined;
+      this.#updateAlarm();
+    });
+  }
+
+  // Asks one action's Gatekeeper what it spent, and acts on the answer: counts what it spent,
+  // forgets it when it spent nothing, or asks again later. A spent action counts the cost its AI
+  // Gateway log gives, where the log is this Gatekeeper's, recent, and not counted before (see
+  // actionCostEntry); else the Gatekeeper's capped estimate, once. A log already counted counts
+  // nothing.
+  async #pollActionCost(pending: PendingActionCost, now: number): Promise<void> {
+    if (now - pending.enqueuedAt > ACTION_COST_GIVE_UP_MS) {
+      return this.#dropActionCost(pending, "action cost dropped: unreported for a week");
+    }
+    if (!this.storage.gatekeepers.get(pending.gatekeeperId)) {
+      return this.#dropActionCost(pending, "action cost dropped: its connection was removed");
+    }
+    let cost: unknown;
+    try {
+      let facet = await this.getGatekeeperFacet(pending.gatekeeperId) as unknown as
+          ActionCostGatekeeperFacet;
+      cost = await facet.getActionCost(pending.action);
+    } catch (error) {
+      if (isMissingMethodError(error, "getActionCost")) {
+        return this.#dropActionCost(pending, "action cost dropped: no getActionCost()");
+      }
+      throw error;
+    }
+    if (!this.#actionCostStillPending(pending)) return;
+    if (!isActionCost(cost)) {
+      return this.#dropActionCost(pending, "action cost dropped: a malformed answer");
+    }
+    if (cost.state === "pending") return this.#repollActionCost(pending);
+    if (cost.state === "none") {
+      this.storage.pendingActionCosts.delete(pending.actionRecordId);
+      return;
+    }
+
+    let logId = cost.gatewayLogId;
+    let log: AiGatewayLogRecord | undefined;
+    let route = deploymentLogRoute(this.env);
+    if (logId !== undefined && route && !this.storage.countedCostLogs.get(logId)) {
+      try {
+        log = await getAiGatewayLog(this.env, route, logId);
+      } catch (error) {
+        if (error instanceof AiGatewayLogRetryableError &&
+            pending.logAttempts + 1 < ACTION_COST_LOG_ATTEMPTS) {
+          return this.#repollActionCost(pending, pending.logAttempts + 1);
+        }
+        this.logger.warn("approved action's AI Gateway log unreadable; counting its estimate", {
+          event: "action.cost.log.unreadable", gatekeeperId: pending.gatekeeperId, error,
+        });
+      }
+      if (!this.#actionCostStillPending(pending)) return;
+    }
+
+    // One synchronous step, so the action counts once and its log never again.
+    this.storage.pendingActionCosts.delete(pending.actionRecordId);
+    if (logId !== undefined && this.storage.countedCostLogs.get(logId)) return;
+    let entry = actionCostEntry(cost, log, this.storage.costTags.get(pending.gatekeeperId)?.tag,
+        Date.now());
+    if (!entry.estimated && logId !== undefined) {
+      this.storage.countedCostLogs.put({logId, countedAt: Date.now()});
+    }
+    this.recordCost({...entry, source: "media", isActivity: false});
+  }
+
+  // Whether `pending` is still to be counted after an await: not deleted from the queue, and the
+  // workspace not being deleted.
+  #actionCostStillPending(pending: PendingActionCost): boolean {
+    return !this.storage.deleting.get() &&
+        this.storage.pendingActionCosts.get(pending.actionRecordId) !== undefined;
+  }
+
+  // Asks about `pending` again after the next delay of its backoff, with `logAttempts` failed log
+  // reads behind it.
+  #repollActionCost(pending: PendingActionCost, logAttempts = pending.logAttempts): void {
+    if (!this.#actionCostStillPending(pending)) return;
+    let attempts = pending.attempts + 1;
+    let delay = Math.min(firstActionCostPollMs(this.env) * 2 ** attempts, ACTION_COST_MAX_POLL_MS);
+    this.storage.pendingActionCosts.put(
+        {...pending, attempts, logAttempts, nextPollAt: Date.now() + delay});
+  }
+
+  // Forgets `pending` uncounted, logging `message`, which says why.
+  #dropActionCost(pending: PendingActionCost, message: string): void {
+    this.logger.warn(message, {
+      event: "action.cost.dropped", gatekeeperId: pending.gatekeeperId,
+      actionId: pending.actionRecordId,
+    });
+    this.storage.pendingActionCosts.delete(pending.actionRecordId);
+  }
+
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
   #codeModeOutputSubscribers = new Map<string, (delta: string) => void>();
 
@@ -11283,8 +11457,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl.storage.codeVersion.put(1);
 
     // A workspace initialized by this version of the code is born at the current schema version;
-    // there is nothing to migrate.
+    // there is nothing to migrate, nor any action to backfill a cost for.
     this.impl.storage.version.put(OVERSEER_STORAGE_VERSION);
+    this.impl.storage.actionCostsBackfilled.put(true);
   }
 
   /**
@@ -14629,9 +14804,9 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
     return this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
   }
 
-  // Cost tags are not wired into the Overseer yet, so a Gatekeeper asking for one gets an error.
-  getCostTag(): Promise<string> {
-    throw new Error("Cost tags are not available yet.");
+  async getCostTag(): Promise<string> {
+    if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
+    return this.impl.getCostTag(this.gatekeeperId);
   }
 
   // Counts a request this Gatekeeper's binding made for its gadget. Only the Overseer's own model

@@ -25,6 +25,10 @@ declare global {
       // docs/admin-access.md, which also says where each kind of deployment sets it). An
       // environment variable so that a compromised admin session cannot shorten it.
       ADMIN_AUDIT_RETENTION_MIN_DAYS?: string;
+      // For the integration harness only, read only where WORKSHOP_ENVIRONMENT is "test": how many
+      // milliseconds after approval a spending action's Gatekeeper is first asked what it spent,
+      // in place of 30 seconds (see firstActionCostPollMs in overseer.ts).
+      ACTION_COST_FIRST_POLL_MS?: string;
 
       // Workers AI binding (injected by generate-wrangler-prod / run-dev-server; not in base wrangler.jsonc).
       WORKERS_AI: Ai;

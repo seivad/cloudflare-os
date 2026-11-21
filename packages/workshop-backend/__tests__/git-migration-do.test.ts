@@ -431,3 +431,35 @@ describe("the spawner-bindings move via the Overseer constructor", () => {
     });
   });
 });
+
+describe("the action-cost backfill via the Overseer constructor", () => {
+  it("enqueues approved generateMedia actions from the last 31 days only", async () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const daysAgo = (days: number) => new Date(Date.now() - days * DAY);
+    const media = (state: "approved" | "rejected", days: number, gatekeeperId = 1) =>
+      ({ state, actionTag: "generateMedia", appliedAt: daysAgo(days), gatekeeperId });
+    await inOverseer("action-cost-backfill", async impl => {
+      expect(impl.storage.version.get()).toBe(0);
+      putAction(impl.storage, 1, media("approved", 3));
+      putAction(impl.storage, 2, media("approved", 30));
+      putAction(impl.storage, 3, media("approved", 32));
+      putAction(impl.storage, 4, media("rejected", 3));
+      putAction(impl.storage, 5, { actionTag: "generateMedia", createdAt: daysAgo(3) });
+      putAction(impl.storage, 6, { state: "approved", actionTag: "edit", appliedAt: daysAgo(3) });
+      putAction(impl.storage, 7, media("approved", 1, 4));
+      // Last write: a workspace at the current version, from before the backfill.
+      impl.storage.version.put(OVERSEER_STORAGE_VERSION);
+    });
+
+    await abortAllDurableObjects();
+
+    await inOverseer("action-cost-backfill", async impl => {
+      expect(impl.storage.actionCostsBackfilled.get()).toBe(true);
+      expect([...impl.storage.pendingActionCosts.list()]).toMatchObject([
+        { actionRecordId: 1, gatekeeperId: 1, action: 1, attempts: 0, logAttempts: 0 },
+        { actionRecordId: 2, gatekeeperId: 1, action: 2, attempts: 0, logAttempts: 0 },
+        { actionRecordId: 7, gatekeeperId: 4, action: 7, attempts: 0, logAttempts: 0 },
+      ]);
+    });
+  });
+});

@@ -1373,6 +1373,36 @@ export function costLineKey(
   return JSON.stringify([line.kind, line.model, line.answeredBy ?? null, line.estimated]);
 }
 
+/**
+ * An approved action whose Gatekeeper reports what it spent (ActionDescription.reportsCost), and
+ * has yet to say: Overseer.pollActionCosts asks it, on a schedule, until it does.
+ */
+export type PendingActionCost = {
+  /** The action's record in `actions`. */
+  actionRecordId: number;
+  gatekeeperId: WorkpieceId;
+  /** The Gatekeeper's own key for the action (ActionRecord.action). */
+  action: number;
+  /** How many times the Gatekeeper has been asked. */
+  attempts: number;
+  /** When it is next asked, in milliseconds since the epoch. */
+  nextPollAt: number;
+  /** How many reads of the action's AI Gateway log have failed in a way worth retrying. */
+  logAttempts: number;
+  /** When asking began, in milliseconds since the epoch, from which polling gives up in time. */
+  enqueuedAt: number;
+};
+
+/** The PendingActionCost of `action`, approved (or found approved) at `now`. */
+export function newPendingActionCost(
+    action: {id: number; gatekeeperId: WorkpieceId; action: number}, now: number,
+    firstPollAt: number): PendingActionCost {
+  return {
+    actionRecordId: action.id, gatekeeperId: action.gatekeeperId, action: action.action,
+    attempts: 0, nextPollAt: firstPollAt, logAttempts: 0, enqueuedAt: now,
+  };
+}
+
 // =======================================================================================
 // Schema
 
@@ -1486,6 +1516,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // its `ObservationDescription`. Share links stop working and only the owner can add
       // collaborators (enforced by SharingManager).
       ownerInvitesOnly: singleton(false),
+
+      // Whether the Media Studio jobs approved before Gatekeepers reported action costs have
+      // been queued to be asked what they spent (see backfillActionCosts). A flag rather than a
+      // `version`, which this fork shares with upstream: a version of its own would be skipped
+      // by, or skip, upstream's next migration.
+      actionCostsBackfilled: false,
 
       // A random string, created on the workspace's first agent turn, that leads the
       // project-specific part of the agent's system prompt, so nobody without that prompt can
@@ -1885,6 +1921,35 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // estimate flag, so it stays a few dozen rows however many requests there are. Written only
       // by Overseer.recordCost, in the same step as `totalCost`.
       costLines: collection<CostLine>()({primaryKey: costLineKey}),
+
+      // Approved actions whose cost their Gatekeeper is still to report, by when each is next
+      // asked (see Overseer.pollActionCosts).
+      pendingActionCosts: collection<PendingActionCost>()({
+        primaryKey: "actionRecordId",
+        nonUniqueIndexes: {
+          byNextPollAt(record: PendingActionCost) {
+            return record.nextPollAt;
+          },
+        },
+      }),
+
+      // The Gatekeeper-reported AI Gateway logs already counted, so that none counts twice, by
+      // when each was counted (`countedAt`, in milliseconds since the epoch). Kept for
+      // MAX_REPORTED_LOG_AGE_DAYS, past which a log is refused anyway.
+      countedCostLogs: collection<{logId: string; countedAt: number}>()({
+        primaryKey: "logId",
+        nonUniqueIndexes: {
+          byCountedAt(record: {countedAt: number}) {
+            return record.countedAt;
+          },
+        },
+      }),
+
+      // The opaque tag each Gatekeeper puts in the AI Gateway metadata of requests it makes for
+      // this workspace (ApprovalQueue.getCostTag), so that its logs can be told from any other's.
+      costTags: collection<{gatekeeperId: WorkpieceId; tag: string}>()({
+        primaryKey: "gatekeeperId",
+      }),
     }
   });
 }

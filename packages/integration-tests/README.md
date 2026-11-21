@@ -56,6 +56,11 @@ Adding a test hook to those workers was considered and rejected: a "mark observe
 very state the tracker maintains, and an injected dev credential for an OAuth gatekeeper would bypass
 exactly the flow that makes a real vendor worth testing.
 
+A Test Thing bound under `/things/spending-` is a `TestSpendingGatekeeper`, whose writes may spend:
+its `getActionCost()` answers what a test sets through `/control/action-cost`. A plain one has no
+`getActionCost()`, as a gatekeeper from before the method. `__tests__/action-costs.test.ts` uses
+both.
+
 One deliberate departure from a shipping gatekeeper, to keep the fixture cheap:
 
 - One control knob, `allow`. A settled denial and an expired credential reach the overseer identically

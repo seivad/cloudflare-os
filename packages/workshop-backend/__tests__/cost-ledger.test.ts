@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vitest";
+import { env, RpcStub, RpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AiChatMetadata, CostLine } from "@gadgets/workshop-shared/api";
@@ -8,6 +8,9 @@ import {
   type CostAttribution, type CostEntry,
 } from "../src/cost-ledger.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
+import {
+  newPendingActionCost, type PendingActionCost,
+} from "../src/storage-schema/overseer-storage.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -220,6 +223,66 @@ describe("a model binding's cost report", () => {
             "Only model bindings report costs this way.");
       }
       expect(impl.getCostLines()).toEqual([]);
+    });
+  });
+});
+
+// More of the OverseerImpl, for polling an approved action's cost with its Gatekeeper faked.
+interface ActionCostPolling {
+  storage: {
+    gatekeepers: { put(record: unknown): void };
+    pendingActionCosts: {
+      put(record: PendingActionCost): void;
+      list(): Iterable<PendingActionCost>;
+    };
+  };
+  getGatekeeperFacet: (id: number) => Promise<unknown>;
+  pollActionCosts(): Promise<void>;
+}
+
+describe("an approved action's cost", () => {
+  // `impl` with gatekeeper 1 answering through `facet`, and its action 3 (record 7) due now,
+  // queued at `queuedAt`.
+  function queue(impl: ActionCostPolling, facet: object, queuedAt = Date.now()) {
+    impl.storage.gatekeepers.put({ id: 1, class: {} });
+    impl.storage.pendingActionCosts.put(
+        newPendingActionCost({ id: 7, gatekeeperId: 1, action: 3 }, queuedAt, Date.now()));
+    impl.getGatekeeperFacet = async () => facet;
+  }
+
+  it("is dropped at once when the gatekeeper has no getActionCost", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-no-method");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      // Workers RPC's own refusal of a method the receiver lacks.
+      queue(impl, new RpcStub(new RpcTarget()));
+      await impl.pollActionCosts();
+      expect([...impl.storage.pendingActionCosts.list()]).toEqual([]);
+    });
+  });
+
+  it("is asked for again, later, after any other failure", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-failure");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      queue(impl, { getActionCost: async () => { throw new Error("The studio is down."); } });
+      const before = Date.now();
+      await impl.pollActionCosts();
+      const [pending] = [...impl.storage.pendingActionCosts.list()];
+      expect(pending).toMatchObject({ actionRecordId: 7, attempts: 1, logAttempts: 0 });
+      expect(pending!.nextPollAt).toBeGreaterThanOrEqual(before + 60_000);
+    });
+  });
+
+  it("is given up on a week after it was queued", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-give-up");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      const getActionCost = vi.fn(async () => ({ state: "pending" }));
+      queue(impl, { getActionCost }, Date.now() - 7 * 24 * 60 * 60 * 1000 - 1);
+      await impl.pollActionCosts();
+      expect(getActionCost).not.toHaveBeenCalled();
+      expect([...impl.storage.pendingActionCosts.list()]).toEqual([]);
     });
   });
 });
