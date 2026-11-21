@@ -1,3 +1,4 @@
+import type { Usage } from "@earendil-works/pi-ai";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import type { ChatTimelineHead, CostLine, GadgetViewer } from "@gadgets/workshop-shared/api";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
@@ -49,6 +50,7 @@ import { AgentTurnError, completeTextMetered, type MeteredRequest } from "./ai-i
 import {
   AiGatewayLogRetryableError,
   getAiGatewayConfig,
+  deploymentLogRoute,
   getAiGatewayLog,
   type AiGatewayLogRecord,
   type AiGatewayLogRoute,
@@ -10371,6 +10373,26 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Counts a request a model binding reported (ApprovalQueue.reportCost) to this workspace, like
+  // a chat request: at the cost AI Gateway logged for it where it names a log, else at its
+  // estimate.
+  addReportedModelCost(cost: ModelRequestCost) {
+    let route = deploymentLogRoute(this.env);
+    let {inputTokens = 0, outputTokens = 0, estimateUsd = 0} = cost;
+    let usage: Usage = {
+      input: inputTokens, output: outputTokens, cacheRead: 0, cacheWrite: 0,
+      totalTokens: inputTokens + outputTokens,
+      cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: estimateUsd},
+    };
+    this.addRequestCost({
+      model: cost.model,
+      answeredBy: cost.answeredBy,
+      usage,
+      aiGatewayLogId: route ? cost.gatewayLogId : undefined,
+      aiGatewayLogRoute: route,
+    }, {source: "model-binding", isActivity: false});
+  }
+
   getChatModelData(chatId: number, sequence: number): StoredAssistantMessage | undefined {
     return this.storage.chatModelData.get(chatKey(chatId, sequence))?.message;
   }
@@ -15850,14 +15872,20 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
     return this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
   }
 
-  // Cost capture is not wired into the Overseer yet, so a Gatekeeper asking for either gets an
-  // error rather than a tag or an accepted report that nothing counts.
+  // Cost tags are not wired into the Overseer yet, so a Gatekeeper asking for one gets an error.
   getCostTag(): Promise<string> {
     throw new Error("Cost tags are not available yet.");
   }
 
-  reportCost(_cost: ModelRequestCost): Promise<void> {
-    throw new Error("Cost reports are not accepted yet.");
+  // Counts a request this Gatekeeper's binding made for its gadget. Only the Overseer's own model
+  // bindings report this way: their requests go out under the Overseer's gateway credentials, so
+  // the Overseer can read what they cost; any other Gatekeeper's word for its spend is not taken
+  // here. Resolves once the report is accepted, not once its log has been read.
+  async reportCost(cost: ModelRequestCost): Promise<void> {
+    if (this.impl.storage.gatekeepers.get(this.gatekeeperId)?.creationSpec?.type !== "aiModel") {
+      throw new Error("Only model bindings report costs this way.");
+    }
+    this.impl.addReportedModelCost(cost);
   }
 
   bindHook<Hook extends RpcTarget>(

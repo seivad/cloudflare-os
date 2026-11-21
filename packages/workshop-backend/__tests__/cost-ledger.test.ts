@@ -173,3 +173,53 @@ describe("a workspace's cost ledger", () => {
     });
   });
 });
+
+// More of the OverseerImpl, for reaching an approval queue the way a Gatekeeper's session does.
+interface GatekeeperSessions {
+  storage: { gatekeepers: { put(record: unknown): void } };
+  openGatekeeperSession(id: number, facet: unknown, caller: unknown): Promise<unknown>;
+  getCostLines(): CostLine[];
+}
+
+describe("a model binding's cost report", () => {
+  // The approval queue the session of a gatekeeper created as `creationSpec` is given.
+  async function queueOf(impl: GatekeeperSessions, id: number, creationSpec: unknown) {
+    impl.storage.gatekeepers.put({ id, class: {}, creationSpec });
+    const facet = { startSession: async (queue: unknown) => queue };
+    return await impl.openGatekeeperSession(id, facet, { from: "gadget" }) as
+        { reportCost(cost: unknown): Promise<void> };
+  }
+
+  it("counts a model binding's request to its workspace", async () => {
+    const stub = env.TEST_OVERSEER.getByName("model-binding-cost");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: GatekeeperSessions }).impl;
+      const queue = await queueOf(impl, 1,
+          { type: "aiModel", modelId: "m", provider: "anthropic", modelName: OPUS });
+      await queue.reportCost({ model: OPUS, estimateUsd: 0.25, inputTokens: 100, outputTokens: 10 });
+      // A report that names no log id, and has no gateway to read one from, counts as its estimate.
+      await queue.reportCost({ model: OPUS, gatewayLogId: "log-1", estimateUsd: 0.25 });
+      expect(impl.getCostLines()).toEqual([
+        { kind: "text", model: OPUS, estimated: true, usd: 0.5, requests: 2,
+          inputTokens: 100, outputTokens: 10 },
+      ]);
+    });
+  });
+
+  it("is refused for a gatekeeper that is not a model binding", async () => {
+    const stub = env.TEST_OVERSEER.getByName("other-gatekeeper-cost");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: GatekeeperSessions }).impl;
+      for (const [id, creationSpec] of [
+        [1, { type: "gatekeeper", vendorId: "google", typeUrlPattern: "https://*" }],
+        [2, { type: "modelCatalog" }],
+        [3, undefined],
+      ] as const) {
+        const queue = await queueOf(impl, id, creationSpec);
+        await expect(queue.reportCost({ model: OPUS, estimateUsd: 4 })).rejects.toThrow(
+            "Only model bindings report costs this way.");
+      }
+      expect(impl.getCostLines()).toEqual([]);
+    });
+  });
+});

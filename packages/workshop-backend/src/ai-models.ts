@@ -25,7 +25,7 @@ import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { OPENROUTER_MODELS } from "@earendil-works/pi-ai/providers/openrouter.models";
 import { AMAZON_BEDROCK_MODELS } from "@earendil-works/pi-ai/providers/amazon-bedrock.models";
-import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
+import { ApprovalQueue, Gatekeeper, ModelRequestCost, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { DecisionAnswer, DecisionModelBinding, DecisionRequest } from "./decision-model-binding";
@@ -39,7 +39,7 @@ import {
   AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, gatewayLogRoute, getAiGatewayConfig, getGatewayModels,
   type AiGatewayLogRoute,
 } from "./ai-gateway.js";
-import { completeText } from "./ai-invoke.js";
+import { completeTextMetered } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 import {
   estimateSharedHeadTokens, hasGpt56PromptCaching, splitSystemPrompt,
@@ -1585,7 +1585,7 @@ export class LanguageModelGatekeeper
     let model = getModel(this.env, config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
     });
-    return new LanguageModelBindingImpl(model);
+    return new LanguageModelBindingImpl(model, approvalQueue);
   }
 
   applyAction(action: number): Promise<void> {
@@ -1609,22 +1609,41 @@ export class LanguageModelGatekeeper
   }
 }
 
+// Tells the Overseer, through the binding's session, what a request made for its gadget cost, so
+// that the gadget's workspace counts it. A request is never failed over its report.
+async function reportCost(queue: RpcStub<ApprovalQueue>, cost: ModelRequestCost): Promise<void> {
+  try {
+    await queue.reportCost(cost);
+  } catch (err) {
+    console.warn("failed to report a model request's cost", err);
+  }
+}
+
 @validateRpc()
-class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding {
-  constructor(private model: ModelHandle) {
+export class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding {
+  constructor(private model: ModelHandle, private approvalQueue: RpcStub<ApprovalQueue>) {
     super();
   }
 
   async run(options: {prompt: string, systemPrompt?: string}): Promise<string> {
     // TODO: Should we be calling authorizeObservation() here? It's not really observing anything,
     //   but you might want the audit logs?
-    // TODO: Account LLM costs back to the calling gadget.
     // A gadget may call its binding many times with the same system prompt.
-    return await completeText(this.model, {
+    let result = await completeTextMetered(this.model, {
       prompt: options.prompt,
       systemPrompt: options.systemPrompt,
       cache: true,
     });
+    let { usage } = result;
+    await reportCost(this.approvalQueue, {
+      model: result.model,
+      answeredBy: result.answeredBy,
+      gatewayLogId: result.aiGatewayLogId,
+      estimateUsd: usage?.cost.total,
+      inputTokens: usage && usage.input + usage.cacheRead + usage.cacheWrite,
+      outputTokens: usage?.output,
+    });
+    return result.text;
   }
 }
 
@@ -1654,7 +1673,8 @@ export class DecisionModelGatekeeper
       : Promise<DecisionModelBinding> {
     let { initiator, metadata } = this.ctx.props;
     let config = await bindingConfig(this.env, this.ctx.props);
-    return new DecisionModelBindingImpl(getDecisionModel(this.env, config, initiator, metadata));
+    return new DecisionModelBindingImpl(
+        getDecisionModel(this.env, config, initiator, metadata), approvalQueue);
   }
 
   applyAction(action: number): Promise<void> {
@@ -1680,12 +1700,23 @@ export class DecisionModelGatekeeper
 
 @validateRpc()
 class DecisionModelBindingImpl extends RpcTarget implements DecisionModelBinding {
-  constructor(private model: DecisionModel) {
+  constructor(private model: DecisionModel, private approvalQueue: RpcStub<ApprovalQueue>) {
     super();
   }
 
   async decide(request: DecisionRequest): Promise<Record<string, DecisionAnswer>> {
     let result = await this.model(request);
+    // The classifier's transport surfaces no AI Gateway log id, so a decision counts at its
+    // catalog-priced estimate.
+    let { usage } = result;
+    if (usage?.cost.total) {
+      await reportCost(this.approvalQueue, {
+        model: result.model,
+        estimateUsd: usage.cost.total,
+        inputTokens: usage.input + usage.cacheRead + usage.cacheWrite,
+        outputTokens: usage.output,
+      });
+    }
     // pi reports a failure in the result; gadget code expects a rejection, as completeText()
     // gives the LLM binding.
     if (result.stopReason !== "stop") throw new Error(result.errorMessage);
