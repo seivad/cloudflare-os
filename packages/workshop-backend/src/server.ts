@@ -17,7 +17,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 export { PendingLogin, LoginConnectCallbackImpl };
 import { GatekeeperUiFrame, GatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { DecisionModelGatekeeper, LanguageModelGatekeeper } from "./ai-models";
-import { listVoiceModels, speak as speakText, transcribe as transcribeSpeech } from "./voice.js";
+import { listVoiceModels, speak as speakText, transcribe as transcribeSpeech, type VoiceCost } from "./voice.js";
 import type { SpeakOptions, TranscribeOptions, VoiceModelInfo, VoiceSpeech, VoiceTranscript } from "@gadgets/workshop-shared/api";
 import { ModelCatalogGatekeeper } from "./model-catalog";
 import { getGatewayModels } from "./ai-gateway.js";
@@ -305,12 +305,28 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return Promise.resolve(listVoiceModels(this.env, this.#userId.name!));
   }
 
-  transcribe(audio: Uint8Array, contentType: string, options?: TranscribeOptions): Promise<VoiceTranscript> {
-    return transcribeSpeech(this.env, this.#userId.name!, audio, contentType, options);
+  async transcribe(audio: Uint8Array, contentType: string, options?: TranscribeOptions): Promise<VoiceTranscript> {
+    const { cost, ...transcript } = await transcribeSpeech(this.env, this.#userId.name!, audio, contentType, options);
+    this.#countVoiceCost(cost);
+    return transcript;
   }
 
-  speak(text: string, options?: SpeakOptions): Promise<VoiceSpeech> {
-    return speakText(this.env, this.#userId.name!, text, options);
+  async speak(text: string, options?: SpeakOptions): Promise<VoiceSpeech> {
+    const { cost, ...speech } = await speakText(this.env, this.#userId.name!, text, options);
+    this.#countVoiceCost(cost);
+    return speech;
+  }
+
+  // Hands a voice call's cost to the user's own ledger without holding up the call: the User DO
+  // reads the gateway log in the background, and a failure here is logged, never the caller's.
+  #countVoiceCost(cost: VoiceCost): void {
+    this.ctx.waitUntil((async () => {
+      try {
+        await this.#user.recordVoiceCost(cost);
+      } catch (error) {
+        logger.warn("voice cost not handed to the user's ledger", {event: "voice.cost.handoff.failed", error});
+      }
+    })());
   }
 
   async getAiConfig(): Promise<AiGatewayInfo> {
