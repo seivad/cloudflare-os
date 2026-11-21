@@ -2335,15 +2335,48 @@ describe("LanguageModelBindingImpl cost reports", () => {
     };
     const self: ModelHandle = {
       model: { id: "picked" } as ModelHandle["model"],
-      stream: (() => {
-        self.lastResponse = { status: 200, aiGatewayLogId: "log-1", routedModel: "answered-by" };
-        return { result: async () => ({
-          stopReason: "stop", content: [{ type: "text", text: "hi" }], usage,
-        }) };
-      }) as unknown as ModelHandle["stream"],
+      stream: ((_model, _context, options) => {
+        const response = {
+          status: 200, headers: { "cf-aig-log-id": "log-1", "cf-aig-routed-model": "answered-by" },
+        };
+        return { result: async () => {
+          await options?.onResponse?.(response, self.model);
+          return { stopReason: "stop", content: [{ type: "text", text: "hi" }], usage };
+        } };
+      }) as ModelHandle["stream"],
     };
     return self;
   }
+
+  it("reports each of two overlapping runs on one handle with its own log id", async () => {
+    // Both responses arrive before either request ends, as when a gadget runs its binding on
+    // several prompts at once, so the handle's lastResponse is the second one's by then.
+    let requests = 0;
+    let responded = 0;
+    let bothResponded!: () => void;
+    const both = new Promise<void>(resolve => { bothResponded = resolve; });
+    const self: ModelHandle = {
+      model: { id: "picked" } as ModelHandle["model"],
+      stream: ((_model, _context, options) => {
+        const n = ++requests;
+        const response = { status: 200, headers: { "cf-aig-log-id": `log-${n}` } };
+        return { result: async () => {
+          await options?.onResponse?.(response, self.model);
+          self.lastResponse = { status: 200, aiGatewayLogId: `log-${n}` };
+          if (++responded === 2) bothResponded();
+          await both;
+          return { stopReason: "stop", content: [{ type: "text", text: `answer ${n}` }],
+            usage: zeroUsage() };
+        } };
+      }) as ModelHandle["stream"],
+    };
+    const reportCost = vi.fn(async () => {});
+    const binding = new LanguageModelBindingImpl(self, { reportCost } as never);
+    expect(await Promise.all([binding.run({ prompt: "one" }), binding.run({ prompt: "two" })]))
+        .toEqual(["answer 1", "answer 2"]);
+    expect(reportCost.mock.calls.map(([cost]) => (cost as { gatewayLogId?: string }).gatewayLogId)
+        .sort()).toEqual(["log-1", "log-2"]);
+  });
 
   it("reports each run's model, log id and estimate to its queue", async () => {
     const reportCost = vi.fn(async () => {});

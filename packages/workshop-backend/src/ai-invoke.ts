@@ -1,4 +1,4 @@
-import type { Message, ProviderHeaders, Usage } from "@earendil-works/pi-ai";
+import type { Message, ProviderHeaders, ProviderResponse, Usage } from "@earendil-works/pi-ai";
 import type { AiGatewayLogRoute } from "./ai-gateway.js";
 import type { ModelHandle } from "./ai-models.js";
 
@@ -46,6 +46,31 @@ export function httpStatusFromError(errorMessage: string, response: ModelHandle[
 }
 
 /**
+ * What a handle observed of a model request's HTTP response: its status, its AI Gateway log id,
+ * and for the Auto Router model the gateway model that answered (see ModelHandle.lastResponse).
+ */
+export type ObservedResponse = { status: number; aiGatewayLogId?: string; routedModel?: string };
+
+/** `response` as an ObservedResponse, from its status and the gateway's headers. */
+export function observeResponse(response: ProviderResponse): ObservedResponse {
+  return {
+    status: response.status,
+    aiGatewayLogId: getHeader(response.headers, "cf-aig-log-id"),
+    routedModel: getHeader(response.headers, "cf-aig-routed-model"),
+  };
+}
+
+// A response header, whatever the case of its name.
+function getHeader(headers: Record<string, string>, name: string): string | undefined {
+  if (headers[name] !== undefined) return headers[name];
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lower) return value;
+  }
+  return undefined;
+}
+
+/**
  * A model request as its cost is counted (see Overseer.addRequestCost): the model picked, the one
  * that answered where a router picked it, pi's catalog-priced usage, and the AI Gateway log that
  * prices it where the request went through a gateway.
@@ -59,15 +84,17 @@ export type MeteredRequest = {
 };
 
 /**
- * The request `handle` last completed, which used `usage`, as a MeteredRequest. Read it right
- * after the request, as ModelHandle.lastResponse says.
+ * A request on `handle` that used `usage` and was answered with `response`, as a MeteredRequest.
+ * `response` defaults to the one the handle last observed, for a caller that runs one request at
+ * a time and reads it right after the request, as ModelHandle.lastResponse says.
  */
-export function meteredRequest(handle: ModelHandle, usage: Usage | undefined): MeteredRequest {
+export function meteredRequest(handle: ModelHandle, usage: Usage | undefined,
+                               response = handle.lastResponse): MeteredRequest {
   return {
     model: handle.model.id,
-    answeredBy: handle.lastResponse?.routedModel,
+    answeredBy: response?.routedModel,
     usage,
-    aiGatewayLogId: handle.lastResponse?.aiGatewayLogId,
+    aiGatewayLogId: response?.aiGatewayLogId,
     aiGatewayLogRoute: handle.aiGatewayLogRoute,
   };
 }
@@ -114,10 +141,15 @@ export async function completeTextMetered(handle: ModelHandle, args: CompleteTex
     : Promise<MeteredRequest & { text: string }> {
   const messages: Message[] = args.messages ??
       [{ role: "user", content: args.prompt ?? "", timestamp: Date.now() }];
+  // This request's own response, not the handle's lastResponse: a handle may serve overlapping
+  // requests (a gadget's model binding running several prompts at once), and its lastResponse is
+  // then whichever was answered last.
+  let response: ObservedResponse | undefined;
   const stream = await handle.stream(handle.model, {
     systemPrompt: args.systemPrompt,
     messages,
   }, {
+    onResponse: received => { response = observeResponse(received); },
     maxTokens: args.maxTokens,
     signal: args.signal,
     headers: args.headers,
@@ -129,10 +161,10 @@ export async function completeTextMetered(handle: ModelHandle, args: CompleteTex
     // Surface a cancellation as the abort reason, like a directly-aborted request would.
     args.signal?.throwIfAborted();
     const errorMessage = message.errorMessage ?? "The model request failed.";
-    throw new AgentTurnError(errorMessage, httpStatusFromError(errorMessage, handle.lastResponse));
+    throw new AgentTurnError(errorMessage, httpStatusFromError(errorMessage, response));
   }
   return {
-    ...meteredRequest(handle, message.usage),
+    ...meteredRequest(handle, message.usage, response),
     text: message.content
         .filter(block => block.type === "text")
         .map(block => block.text)
