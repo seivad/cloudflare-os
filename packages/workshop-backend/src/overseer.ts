@@ -370,6 +370,18 @@ const ACTION_COST_GIVE_UP_MS = 7 * 24 * 60 * 60 * 1000;
 // How many times an action's AI Gateway log is read, failing in a way worth retrying, before its
 // Gatekeeper's estimate is counted instead.
 const ACTION_COST_LOG_ATTEMPTS = 6;
+// How long a Gatekeeper has to answer getActionCost() before it is asked again later, so one that
+// never answers can't hold up the alarm, and every other action's cost with it.
+const ACTION_COST_ANSWER_TIMEOUT_MS = 30_000;
+
+// `promise`, or a rejection once `ms` milliseconds pass without it settling.
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: string): string {
   return record.resourceTitle || bindingName || "Connection";
@@ -10548,7 +10560,8 @@ class OverseerImpl implements AgentHooks {
   // where it is time to, and counts what they report. Run by the alarm alone, which #updateAlarm
   // schedules for the next action due; it never throws, so a Gatekeeper can't fail the alarm.
   // Dedupe records past the age at which a log is refused anyway are pruned here too.
-  pollActionCosts(): Promise<void> {
+  // `answerTimeoutMs` is how long each Gatekeeper has to answer.
+  pollActionCosts(answerTimeoutMs = ACTION_COST_ANSWER_TIMEOUT_MS): Promise<void> {
     if (this.storage.deleting.get()) return Promise.resolve();
     return this.#actionCostPoll ??= (async () => {
       let now = Date.now();
@@ -10559,7 +10572,7 @@ class OverseerImpl implements AgentHooks {
       let due = [...this.storage.pendingActionCosts.byNextPollAt.list({end: now + 1})];
       await Promise.all(due.map(async pending => {
         try {
-          await this.#pollActionCost(pending, now);
+          await this.#pollActionCost(pending, now, answerTimeoutMs);
         } catch (error) {
           this.logger.warn("approved action's cost poll failed", {
             event: "action.cost.poll.failed", gatekeeperId: pending.gatekeeperId, error,
@@ -10574,11 +10587,14 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Asks one action's Gatekeeper what it spent, and acts on the answer: counts what it spent,
-  // forgets it when it spent nothing, or asks again later. A spent action counts the cost its AI
-  // Gateway log gives, where the log is this Gatekeeper's, recent, and not counted before (see
-  // actionCostEntry); else the Gatekeeper's capped estimate, once. A log already counted counts
-  // nothing.
-  async #pollActionCost(pending: PendingActionCost, now: number): Promise<void> {
+  // forgets it when it spent nothing, or asks again later (also when it doesn't answer within
+  // `answerTimeoutMs`, which the caller's catch reschedules). A spent action counts what
+  // actionCostEntry says, once: the cost its AI Gateway log gives where the log is this
+  // Gatekeeper's and recent, nothing where it is another's, else the capped estimate. A log
+  // already counted counts nothing, and one counted at the estimate because it stayed unreadable
+  // is marked counted too, so that a later report of it adds nothing.
+  async #pollActionCost(pending: PendingActionCost, now: number, answerTimeoutMs: number)
+      : Promise<void> {
     if (now - pending.enqueuedAt > ACTION_COST_GIVE_UP_MS) {
       return this.#dropActionCost(pending, "action cost dropped: unreported for a week");
     }
@@ -10589,7 +10605,8 @@ class OverseerImpl implements AgentHooks {
     try {
       let facet = await this.getGatekeeperFacet(pending.gatekeeperId) as unknown as
           ActionCostGatekeeperFacet;
-      cost = await facet.getActionCost(pending.action);
+      cost = await withTimeout<unknown>(facet.getActionCost(pending.action), answerTimeoutMs,
+          "The gatekeeper did not answer getActionCost() in time.");
     } catch (error) {
       if (isMissingMethodError(error, "getActionCost")) {
         return this.#dropActionCost(pending, "action cost dropped: no getActionCost()");
@@ -10608,6 +10625,7 @@ class OverseerImpl implements AgentHooks {
 
     let logId = cost.gatewayLogId;
     let log: AiGatewayLogRecord | undefined;
+    let unreadable = false;
     let route = deploymentLogRoute(this.env);
     if (logId !== undefined && route && !this.storage.countedCostLogs.get(logId)) {
       try {
@@ -10617,6 +10635,7 @@ class OverseerImpl implements AgentHooks {
             pending.logAttempts + 1 < ACTION_COST_LOG_ATTEMPTS) {
           return this.#repollActionCost(pending, pending.logAttempts + 1);
         }
+        unreadable = true;
         this.logger.warn("approved action's AI Gateway log unreadable; counting its estimate", {
           event: "action.cost.log.unreadable", gatekeeperId: pending.gatekeeperId, error,
         });
@@ -10629,7 +10648,14 @@ class OverseerImpl implements AgentHooks {
     if (logId !== undefined && this.storage.countedCostLogs.get(logId)) return;
     let entry = actionCostEntry(cost, log, this.storage.costTags.get(pending.gatekeeperId)?.tag,
         Date.now());
-    if (!entry.estimated && logId !== undefined) {
+    if (!entry) {
+      this.logger.warn("action cost refused: its log carries another gatekeeper's tag", {
+        event: "action.cost.log.refused", gatekeeperId: pending.gatekeeperId,
+        actionId: pending.actionRecordId,
+      });
+      return;
+    }
+    if (logId !== undefined && (!entry.estimated || unreadable)) {
       this.storage.countedCostLogs.put({logId, countedAt: Date.now()});
     }
     this.recordCost({...entry, source: "media", isActivity: false});

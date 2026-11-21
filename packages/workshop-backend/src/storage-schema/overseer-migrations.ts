@@ -9,7 +9,8 @@
 // checks the version itself in order to run it under blockConcurrencyWhile.
 //
 // A change to what a workspace has stored needs a new version, a migration here, and a matching
-// bump of OVERSEER_STORAGE_VERSION.
+// bump of OVERSEER_STORAGE_VERSION. The exception is backfillActionCosts, which this fork gates on
+// its own flag so that its versions stay upstream's (see `actionCostsBackfilled`).
 
 import type {
   AgentSpawnerConfig, CollaboratorRole, CommitIdentity, GadgetUpstream, WorkpieceId,
