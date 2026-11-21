@@ -19,7 +19,7 @@ import { recordAnalytics } from "./analytics";
 import { addCost, byKind, byModel, MAX_REPORTED_LOG_AGE_DAYS, mergeLines, withEarlier, type CostEntry } from "./cost-ledger.js";
 import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
-import { voiceCostEntry, type VoiceCost } from "./voice.js";
+import { voiceCostEntry, type VoiceCost, type VoiceCostOutcome } from "./voice.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import type { AdminSettings } from "./admin-settings.js";
@@ -61,6 +61,16 @@ const NOTIFICATION_SERVICE_CALLS_PER_MINUTE = 20;
 // A user's notifications go to at most this many of their phones and as many browsers, the most
 // recently registered of each kind, as the service keeps that many of each.
 const NOTIFICATION_DEVICES_PER_KIND = 10;
+
+// The warning logged for a voice call whose cost is not counted, by why (see voiceCostEntry).
+const VOICE_COST_SKIPPED: Record<Extract<VoiceCostOutcome, {skipped: unknown}>["skipped"],
+    {message: string, event: string}> = {
+  "no-log": {message: "voice call has no AI Gateway log; nothing counted", event: "voice.cost.no_log"},
+  "other-user": {message: "voice call's AI Gateway log is another user's; nothing counted",
+    event: "voice.cost.log.other_user"},
+  "not-voice": {message: "voice call's AI Gateway log is of a request that was not voice; nothing counted",
+    event: "voice.cost.log.not_voice"},
+};
 
 /** Server-enforced lifetime of a Workshop session issued to a native device. */
 export const DEVICE_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60_000;
@@ -1889,8 +1899,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /**
    * Counts what a voice call cost, once its AI Gateway log gives it. Returns at once: the log is
    * read in the background. Nothing is counted (and a warning logged) for a call with no readable
-   * log (voice has no estimate), for a log recorded for another user, or for a log already
-   * counted: the log id comes from a binding shared by overlapping calls (see voice.ts).
+   * log (voice has no estimate), for a log recorded for another user or for a request of theirs
+   * that was not voice, or for a log already counted: the log id comes from a binding shared by
+   * overlapping calls (see voice.ts).
    */
   recordVoiceCost(cost: VoiceCost): void {
     this.ctx.waitUntil((async () => {
@@ -1898,10 +1909,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         const userId = this.storage.profile.get().id;
         const outcome = await voiceCostEntry(this.env, userId, cost);
         if ("skipped" in outcome) {
-          logger.warn(outcome.skipped === "other-user"
-              ? "voice call's AI Gateway log is another user's; nothing counted"
-              : "voice call has no AI Gateway log; nothing counted",
-              {event: outcome.skipped === "other-user" ? "voice.cost.log.other_user" : "voice.cost.no_log", modelId: cost.model});
+          let {message, event} = VOICE_COST_SKIPPED[outcome.skipped];
+          logger.warn(message, {event, modelId: cost.model});
           return;
         }
         // One synchronous step, so a log counts once however many calls name it.

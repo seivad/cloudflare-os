@@ -59,7 +59,7 @@ The Media Studio Gatekeeper of the custom Gatekeeper package is the example: it 
 
 ### Voice
 
-Voice calls run in the Workshop's own code, so no Gatekeeper is asked. The log id is read from the AI binding after the call, a binding overlapping calls share, so it can belong to another call. A log therefore counts only when its metadata `user` is the person recording it, and each log id counts once (pruned after 31 days). Under heavy concurrency a call can go uncounted; it is never charged to someone else.
+Voice calls run in the Workshop's own code, so no Gatekeeper is asked. The log id is read from the AI binding after the call, a binding overlapping calls share, so it can belong to another call. A log therefore counts only when its metadata `user` is the person recording it and its `source` is `voice` (a chat request's log carries the user too, and is the workspace's), and each log id counts once (pruned after 31 days). Under heavy concurrency a call can go uncounted; it is never charged to someone else.
 
 ## Not counted
 
