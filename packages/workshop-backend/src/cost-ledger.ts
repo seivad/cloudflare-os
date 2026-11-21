@@ -2,7 +2,9 @@
 // per source, kind, model, answering model and estimate flag (see CostLine). Pure functions over arrays of
 // lines; where they are stored is the caller's business (Overseer.recordCost, `costLines`).
 
-import type { CostKind, CostLine, CostSource } from "@gadgets/workshop-shared/api";
+import {
+  AUTO_ROUTER_MODEL_ID, type CostKind, type CostLine, type CostSource,
+} from "@gadgets/workshop-shared/api";
 import type { ActionCost } from "@gadgets/workshop-shared/gatekeeper";
 import type { AiGatewayLogRecord } from "./ai-gateway";
 import type { MeteredRequest } from "./ai-invoke";
@@ -66,16 +68,27 @@ export function withEarlier(totalCost: number, lines: CostLine[]): CostLine[] {
 }
 
 /**
+ * The model that answered a request for `model`, as a line names it: `answered` (the log's, else
+ * the response's) where `model` is the Auto Router, which picks another; otherwise none, since
+ * the gateway may spell a model asked for by name otherwise than the catalog does.
+ */
+function answeredBy(model: string, answered: string | undefined): string | undefined {
+  return model === AUTO_ROUTER_MODEL_ID && answered !== model ? answered : undefined;
+}
+
+/**
  * What a text request costs: AI Gateway's logged cost where `log` gives a positive one, else the
- * catalog-priced estimate in its usage; undefined when there is neither. It was answered by the
- * model the log names, else the response, where that is not the one picked. Tokens are the log's
- * where it counts them.
+ * catalog-priced estimate in its usage; undefined when there is neither. For the Auto Router it
+ * was answered by the model the log names, else the response. Tokens are the log's where it
+ * counts them.
  */
 export function textCostEntry(request: MeteredRequest, log: AiGatewayLogRecord | undefined)
     : CostEntry | undefined {
   let { model, usage } = request;
-  let answered = log?.model ?? request.answeredBy;
-  let picked = { kind: "text" as const, model, answeredBy: answered !== model ? answered : undefined };
+  let answered = answeredBy(model, log?.model ?? request.answeredBy);
+  let picked = {
+    kind: "text" as const, model, ...(answered !== undefined ? { answeredBy: answered } : {}),
+  };
   let inputTokens = usage && usage.input + usage.cacheRead + usage.cacheWrite;
   if (log?.cost) {
     return { ...picked, estimated: false, usd: log.cost,
@@ -131,9 +144,10 @@ export function actionCostEntry(
     return { kind, model, estimated: true,
       usd: Math.min(cost.estimateUsd, MAX_UNLOGGED_ACTION_COST_USD) };
   }
+  let answered = answeredBy(model, log.model);
   return {
     kind, model, estimated: false, usd: log.cost,
-    ...(log.model !== undefined && log.model !== model ? { answeredBy: log.model } : {}),
+    ...(answered !== undefined ? { answeredBy: answered } : {}),
     ...(log.tokensIn !== undefined ? { inputTokens: log.tokensIn } : {}),
     ...(log.tokensOut !== undefined ? { outputTokens: log.tokensOut } : {}),
   };
