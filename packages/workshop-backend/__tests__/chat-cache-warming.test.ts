@@ -307,7 +307,7 @@ describe("a workspace's warm pings", () => {
       expect(impl.storage.totalCost.get() - workspaceCost).toBe(0.5);
       // Each ping is one request to the turn's model, at its estimate: it has no gateway log.
       expect(impl.getCostLines()).toContainEqual({
-        kind: "text", model: MODEL, estimated: true, usd: 0.5, requests: 2,
+        source: "chat", kind: "text", model: MODEL, estimated: true, usd: 0.5, requests: 2,
         inputTokens: 200_020, outputTokens: 2,
       });
     });
