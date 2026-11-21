@@ -10586,16 +10586,40 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  // Asks the Gatekeeper of every approved action still to say what it spent, once, before the
+  // workspace is deleted, so that the owner's final cost includes what a generation that finished
+  // meanwhile spent. Each answer counts as #pollActionCost says, except that nothing is asked again
+  // later: an action still pending, or whose Gatekeeper fails or doesn't answer within
+  // `answerTimeoutMs`, is dropped with a warning, and a log not yet readable counts the estimate.
+  async settleActionCosts(answerTimeoutMs = ACTION_COST_ANSWER_TIMEOUT_MS): Promise<void> {
+    // A poll under way finishes first, so that an action is not asked twice at once.
+    await this.#actionCostPoll;
+    let now = Date.now();
+    let all = [...this.storage.pendingActionCosts.list()];
+    await Promise.all(all.map(async pending => {
+      try {
+        await this.#pollActionCost(pending, now, answerTimeoutMs, true);
+      } catch (error) {
+        this.logger.warn("approved action's cost unanswered as its workspace is deleted; dropped", {
+          event: "action.cost.dropped", gatekeeperId: pending.gatekeeperId,
+          actionId: pending.actionRecordId, error,
+        });
+        this.storage.pendingActionCosts.delete(pending.actionRecordId);
+      }
+    }));
+  }
+
   // Asks one action's Gatekeeper what it spent, and acts on the answer: counts what it spent,
   // forgets it when it spent nothing, or asks again later (also when it doesn't answer within
-  // `answerTimeoutMs`, which the caller's catch reschedules). A spent action counts what
+  // `answerTimeoutMs`, which the caller's catch reschedules). When `last`, nothing is asked again:
+  // a pending answer drops the action, and a log not yet readable counts as unreadable. A spent action counts what
   // actionCostEntry says, once: the cost its AI Gateway log gives where the log is this
   // Gatekeeper's and recent, nothing where it is another's, else the capped estimate. A log
   // already counted counts nothing, and one counted at the estimate because it stayed unreadable,
   // or because it was this Gatekeeper's but gave no cost, is marked counted too, so that a later
   // report of it adds nothing.
-  async #pollActionCost(pending: PendingActionCost, now: number, answerTimeoutMs: number)
-      : Promise<void> {
+  async #pollActionCost(pending: PendingActionCost, now: number, answerTimeoutMs: number,
+                        last = false): Promise<void> {
     if (now - pending.enqueuedAt > ACTION_COST_GIVE_UP_MS) {
       return this.#dropActionCost(pending, "action cost dropped: unreported for a week");
     }
@@ -10620,7 +10644,11 @@ class OverseerImpl implements AgentHooks {
     if (!isActionCost(cost)) {
       return this.#dropActionCost(pending, "action cost dropped: a malformed answer");
     }
-    if (cost.state === "pending") return this.#repollActionCost(pending);
+    if (cost.state === "pending") {
+      return last
+        ? this.#dropActionCost(pending, "action cost dropped: pending as its workspace is deleted")
+        : this.#repollActionCost(pending);
+    }
     if (cost.state === "none") {
       this.storage.pendingActionCosts.delete(pending.actionRecordId);
       return;
@@ -10634,7 +10662,7 @@ class OverseerImpl implements AgentHooks {
       try {
         log = await getAiGatewayLog(this.env, route, logId);
       } catch (error) {
-        if (error instanceof AiGatewayLogRetryableError &&
+        if (!last && error instanceof AiGatewayLogRetryableError &&
             pending.logAttempts + 1 < ACTION_COST_LOG_ATTEMPTS) {
           return this.#repollActionCost(pending, pending.logAttempts + 1);
         }
@@ -13485,8 +13513,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     }
 
+    // What an approved generation spent but hasn't reported yet goes into the owner's final cost.
+    await this.impl.settleActionCosts();
+
     let sharing = await this.impl.getSharingManager();
-    if (!this.impl.ownerId) return; // Another deletion may have committed while hooks were disabled.
+    // Another deletion may have committed while hooks were disabled or costs were settled.
+    if (!this.impl.ownerId) return;
     let readers = new Set([this.impl.ownerId, ...sharing.listCollaborators()
       .map(reader => this.impl.users.idFromName(reader.profile.id).toString())]);
     this.impl.beginDeletion(readers);
