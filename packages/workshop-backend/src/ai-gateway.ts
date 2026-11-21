@@ -625,7 +625,16 @@ function optionalCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+// A log's metadata: an object from the binding, and from the REST API either an object or the
+// JSON text of one. Anything else, text that doesn't parse included, is no metadata.
 function optionalMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
   return typeof value === "object" && value !== null && !Array.isArray(value)
       ? value as Record<string, unknown> : undefined;
 }
