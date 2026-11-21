@@ -32,6 +32,10 @@ declare global {
       // The fewest days the admin audit log keeps a record, whatever admins choose: a positive
       // whole number. 90 when unset, blank or invalid.
       ADMIN_AUDIT_RETENTION_MIN_DAYS?: string;
+      // For the integration harness only, read only where WORKSHOP_ENVIRONMENT is "test": how many
+      // milliseconds after approval a spending action's Gatekeeper is first asked what it spent,
+      // in place of 30 seconds (see firstActionCostPollMs in overseer.ts).
+      ACTION_COST_FIRST_POLL_MS?: string;
 
       // Workers AI binding (injected by generate-wrangler-prod / run-dev-server; not in base wrangler.jsonc).
       WORKERS_AI: Ai;

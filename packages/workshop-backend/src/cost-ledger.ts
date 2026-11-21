@@ -3,6 +3,7 @@
 // lines; where they are stored is the caller's business (Overseer.recordCost, `costLines`).
 
 import type { CostKind, CostLine, CostSource } from "@gadgets/workshop-shared/api";
+import type { ActionCost } from "@gadgets/workshop-shared/gatekeeper";
 import type { AiGatewayLogRecord } from "./ai-gateway";
 import type { MeteredRequest } from "./ai-invoke";
 import { costLineKey } from "./storage-schema/overseer-storage";
@@ -80,6 +81,53 @@ export function textCostEntry(request: MeteredRequest, log: AiGatewayLogRecord |
       inputTokens, outputTokens: usage.output };
   }
   return undefined;
+}
+
+/** The most a Gatekeeper's estimate counts for, for one approved action whose log can't be read. */
+export const MAX_UNLOGGED_ACTION_COST_USD = 5;
+
+/** How old a Gatekeeper-reported AI Gateway log may be and still count. */
+export const MAX_REPORTED_LOG_AGE_DAYS = 31;
+
+const MAX_REPORTED_LOG_AGE_MS = MAX_REPORTED_LOG_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+const COST_KINDS: ReadonlySet<string> =
+    new Set<CostKind>(["text", "image", "video", "music", "speech", "transcription"]);
+
+/**
+ * Whether a Gatekeeper's getActionCost() answer is an ActionCost. Nothing checks what a Gatekeeper
+ * returns on the way back, and its estimate is counted.
+ */
+export function isActionCost(value: unknown): value is ActionCost {
+  if (typeof value !== "object" || value === null) return false;
+  let cost = value as Record<string, unknown>;
+  if (cost.state === "pending" || cost.state === "none") return true;
+  return cost.state === "spent" && typeof cost.kind === "string" && COST_KINDS.has(cost.kind) &&
+      typeof cost.model === "string" && typeof cost.estimateUsd === "number" &&
+      Number.isFinite(cost.estimateUsd) && cost.estimateUsd >= 0 &&
+      (cost.gatewayLogId === undefined || typeof cost.gatewayLogId === "string");
+}
+
+/**
+ * What an approved action that spent counts as: the cost AI Gateway logged for it, where `log`
+ * carries the tag its Gatekeeper was given (`tag`) and is no older than MAX_REPORTED_LOG_AGE_DAYS
+ * at `now`; else the Gatekeeper's estimate, up to MAX_UNLOGGED_ACTION_COST_USD.
+ */
+export function actionCostEntry(
+    cost: Extract<ActionCost, { state: "spent" }>, log: AiGatewayLogRecord | undefined,
+    tag: string | undefined, now: number): CostEntry {
+  let { kind, model } = cost;
+  if (log === undefined || tag === undefined || log.metadata?.tag !== tag ||
+      (log.createdAt !== undefined && now - log.createdAt.valueOf() > MAX_REPORTED_LOG_AGE_MS)) {
+    return { kind, model, estimated: true,
+      usd: Math.min(cost.estimateUsd, MAX_UNLOGGED_ACTION_COST_USD) };
+  }
+  return {
+    kind, model, estimated: false, usd: log.cost,
+    ...(log.model !== undefined && log.model !== model ? { answeredBy: log.model } : {}),
+    ...(log.tokensIn !== undefined ? { inputTokens: log.tokensIn } : {}),
+    ...(log.tokensOut !== undefined ? { outputTokens: log.tokensOut } : {}),
+  };
 }
 
 /** Dollars by kind. */

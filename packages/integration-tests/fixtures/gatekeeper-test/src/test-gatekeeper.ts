@@ -26,7 +26,8 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { HookRegistry, type HookCapabilities, type HookDelivery } from "@gadgets/gatekeeper-kit/hook-registry";
 import type {
-  AccountDescription, ActionDescription, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff,
+  AccountDescription, ActionCost, ActionDescription, ActionKind, AgentCatalog, ApprovalQueue,
+  ConnectHandoff,
   Gatekeeper, GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController,
   HookInitiator, HookTargetMetadata, ObservationAuthorizer, ResourceDescription,
   ResourceConfiguratorFrame, SupportedResource, VendorDescription,
@@ -40,6 +41,9 @@ import type {ReplicableWorktree, WorktreeReplicator} from "@gadgets/workshop-sha
 // Nothing but classes and the default handler may be exported from a Worker entry module: workerd
 // treats every named export as an entrypoint and rejects anything that isn't one.
 const VENDOR_HOST = "gadgets-test.example";
+
+// Things bound under this path are TestSpendingGatekeepers.
+const SPENDING_PATH = "/things/spending-";
 
 const SUPPORTED_RESOURCES: SupportedResource[] = [{
   id: "thing",
@@ -242,6 +246,32 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 
   getCreations(label: string): (string | null)[] {
     return this.ctx.storage.kv.get<(string | null)[]>(`creations:${label}`) ?? [];
+  }
+
+  /** The cost tag the binding at `resourceUrl` was given for its last spending write. */
+  setCostTag(resourceUrl: string, tag: string): void {
+    this.ctx.storage.kv.put(`cost-tag:${resourceUrl}`, tag);
+  }
+
+  getCostTag(resourceUrl: string): string | null {
+    return this.ctx.storage.kv.get<string>(`cost-tag:${resourceUrl}`) ?? null;
+  }
+
+  /** What getActionCost() answers for action `id` of account `label` from now on. */
+  setActionCost(label: string, id: number, cost: ActionCost): void {
+    this.ctx.storage.kv.put(`action-cost:${label}:${id}`, cost);
+  }
+
+  /** Answers one getActionCost() call, counting it: pending until the test sets otherwise. */
+  answerActionCost(label: string, id: number): ActionCost {
+    const key = `action-cost-polls:${label}:${id}`;
+    this.ctx.storage.kv.put(key, (this.ctx.storage.kv.get<number>(key) ?? 0) + 1);
+    return this.ctx.storage.kv.get<ActionCost>(`action-cost:${label}:${id}`)
+        ?? { state: "pending" };
+  }
+
+  getActionCostPolls(label: string, id: number): number {
+    return this.ctx.storage.kv.get<number>(`action-cost-polls:${label}:${id}`) ?? 0;
   }
 
   failNextApply(label: string, reason: string): void {
@@ -671,10 +701,11 @@ export class TestAccount
     if (parsed.host !== VENDOR_HOST || !parsed.pathname.startsWith("/things/")) {
       throw new Error(`Not a test-gatekeeper resource URL: ${url}`);
     }
+    const props = { label: this.ctx.props.label, resourceUrl: url };
     return {
-      class: this.ctx.exports.TestGatekeeper({
-        props: { label: this.ctx.props.label, resourceUrl: url },
-      }),
+      class: parsed.pathname.startsWith(SPENDING_PATH)
+        ? this.ctx.exports.TestSpendingGatekeeper({ props })
+        : this.ctx.exports.TestGatekeeper({ props }),
       resource: SUPPORTED_RESOURCES[0],
     };
   }
@@ -767,13 +798,21 @@ export interface TestSession {
    */
   readValue(restricted?: boolean, ownerInvitesOnly?: boolean, excludeObservers?: string[],
             subresources?: string[]): Promise<number>;
-  /** `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would. */
-  writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number>;
+  /**
+   * `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would.
+   * `reportsCost` marks the write as one that spends, first asking for the binding's cost tag
+   * (read back through `/control/cost-tag`), with which a Gatekeeper tags such an action's
+   * requests.
+   */
+  writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean;
+                                     reportsCost?: boolean }): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
   /** Exercises worktree capability delegation through the real code-mode bridge. */
   mountWorktree(worktree: RpcStub<ReplicableWorktree>): Promise<string>;
   /** Runs a command in the worktree mountWorktree() kept, in a later execution. */
   runCommand(path: string, text: string): Promise<string>;
+  /** Reports a model request through the session's approval queue, as a model binding does. */
+  reportCost(): Promise<void>;
   watch(key: string, callback: RpcStub<ValueHook>): Promise<void>;
   /** Binds a hook kept in a `HookRegistry`, which `/control/queue-hook` delivers to by `name`. */
   subscribe(name: string, callback: RpcStub<ValueHook>): Promise<void>;
@@ -823,10 +862,16 @@ class TestSessionTarget extends RpcTarget implements TestSession {
   }
 
   async writeValue(
-      value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number> {
+      value: number,
+      opts?: { autoApprovable?: boolean; incomplete?: boolean; reportsCost?: boolean })
+      : Promise<number> {
     const id = await this.state.stageAction(this.label, value);
     try {
+      if (opts?.reportsCost) {
+        await this.state.setCostTag(this.resourceUrl, await this.approvalQueue.getCostTag());
+      }
       await this.approvalQueue.submitAction(id, {
+        ...(opts?.reportsCost ? { reportsCost: true as const } : {}),
         title: `Set the test value to ${value}`,
         description: `Set the deterministic integration-test value to **${value}**.`,
         // The number is the whole content of the write.
@@ -853,6 +898,10 @@ class TestSessionTarget extends RpcTarget implements TestSession {
 
   async runCommand(path: string, text: string): Promise<string> {
     return this.state.runCommand(this.approvalQueue, path, text);
+  }
+
+  async reportCost(): Promise<void> {
+    await this.approvalQueue.reportCost({ model: "test-model", estimateUsd: 1 });
   }
 
   async watch(key: string, callback: RpcStub<ValueHook>): Promise<void> {
@@ -1040,6 +1089,18 @@ export class TestGatekeeper
 
   async revertAction(_action: number): Promise<void> {
     throw new Error("Test actions do not support revert.");
+  }
+}
+
+/**
+ * A Test Thing whose approved writes spend, bound from a URL under SPENDING_PATH: getActionCost()
+ * answers what the test set through `/control/action-cost`, pending until it does. A plain
+ * TestGatekeeper has no getActionCost(), as a Gatekeeper from before the method existed.
+ */
+@validateRpc()
+export class TestSpendingGatekeeper extends TestGatekeeper {
+  async getActionCost(action: number): Promise<ActionCost> {
+    return control(this.ctx.exports).answerActionCost(this.ctx.props.label, action);
   }
 }
 
@@ -1275,6 +1336,39 @@ export default {
       await control(ctx.exports).failNextApply(
           label, reason ?? "The test gatekeeper failed to apply this action.");
       return new Response(null, { status: 204 });
+    }
+
+    // What a spending binding's getActionCost() answers for action `action` of account `label`.
+    // Body: {"label": "...", "action": number, "cost": ActionCost}
+    if (url.pathname === "/control/action-cost" && req.method === "POST") {
+      const { label, action, cost } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      if (typeof action !== "number") return badRequest("`action` must be a number");
+      const state = typeof cost === "object" && cost !== null
+        ? (cost as { state?: unknown }).state : undefined;
+      if (state !== "pending" && state !== "none" && state !== "spent") {
+        return badRequest("`cost` must be an ActionCost");
+      }
+      await control(ctx.exports).setActionCost(label, action, cost as ActionCost);
+      return new Response(null, { status: 204 });
+    }
+
+    // Body: {"label": "...", "action": number} -> {"polls": number}, one per getActionCost() call.
+    if (url.pathname === "/control/action-cost-polls" && req.method === "POST") {
+      const { label, action } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      if (typeof action !== "number") return badRequest("`action` must be a number");
+      return Response.json({ polls: await control(ctx.exports).getActionCostPolls(label, action) });
+    }
+
+    // Body: {"resourceUrl": "..."} -> {"tag": string | null}, from the binding's last spending
+    // write.
+    if (url.pathname === "/control/cost-tag" && req.method === "POST") {
+      const { resourceUrl } = body as Record<string, unknown>;
+      if (!isNonEmptyString(resourceUrl)) {
+        return badRequest("`resourceUrl` must be a non-empty string");
+      }
+      return Response.json({ tag: await control(ctx.exports).getCostTag(resourceUrl) });
     }
 
     // Submit an external chat message through the Workshop's ExternalMessageGateway entrypoint,

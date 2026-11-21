@@ -14,11 +14,13 @@
 import type {
   AgentSpawnerConfig, CollaboratorRole, CommitIdentity, GadgetUpstream, WorkpieceId,
 } from "@gadgets/workshop-shared/api";
+import { keyString } from "@gadgets/typed-storage";
 import {
-  chatKeyPrefix, type AgentSpawnerBindingProps, type BindingRecord, type GadgetRecord,
-  type LegacyAgentSpawnerConfig, type OverseerStorage,
+  chatKeyPrefix, newPendingActionCost, type AgentSpawnerBindingProps, type BindingRecord,
+  type GadgetRecord, type LegacyAgentSpawnerConfig, type OverseerStorage,
 } from "./overseer-storage";
 import { migrateCodeLogToGit } from "./overseer-git-migration";
+import { MAX_REPORTED_LOG_AGE_DAYS } from "../cost-ledger";
 import { retryOnDoReset } from "../do-retry";
 import { commitIdentityForAuthor, type WorkspaceGitCache } from "../git-cache";
 import type { createWorkshopLogger } from "../observability";
@@ -426,5 +428,36 @@ export function migrateToFrozenGadgetGrants(host: OverseerMigrationHost): void {
   });
   host.logger.info("froze grants of every gadget", {
     event: "storage.migration.gadget-grants.completed",
+  });
+}
+
+/**
+ * The Media Studio jobs (actions of kind "generateMedia") approved in the last
+ * MAX_REPORTED_LOG_AGE_DAYS, before Gatekeepers reported what an approved action spent: queues
+ * each to be asked, like an action approved since (see Overseer.pollActionCosts), so that recent
+ * spend is counted. Runs once, after the versioned migrations (see `actionCostsBackfilled`);
+ * never-initialized and deleting workspaces are left unwritten. Each is first asked at
+ * `firstPollAt`.
+ */
+export function backfillActionCosts(host: OverseerMigrationHost, firstPollAt: number): void {
+  if (host.storage.version.get() === 0 || host.storage.deleting.get() ||
+      host.storage.actionCostsBackfilled.get()) {
+    return;
+  }
+  let now = Date.now();
+  let since = now - MAX_REPORTED_LOG_AGE_DAYS * 24 * 60 * 60 * 1000;
+  host.ctx.storage.transactionSync(() => {
+    // Listed in full before writing, so that nothing is written under the cursor.
+    let changed = Array.from(host.storage.actions.byLastChanged.list({start: keyString(since)}));
+    for (let record of changed) {
+      if (record.type !== "action" || record.state !== "approved" ||
+          typeof record.action !== "number" ||
+          record.description.actionKind?.tag !== "generateMedia") {
+        continue;
+      }
+      host.storage.pendingActionCosts.put(
+          newPendingActionCost({...record, action: record.action}, now, firstPollAt));
+    }
+    host.storage.actionCostsBackfilled.put(true);
   });
 }
