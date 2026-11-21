@@ -105,19 +105,28 @@ it("keeps a removed workspace's final cost in the deleted bucket, and forgets a 
 // The integration harness runs no Workers AI binding, so voice can't be called there: the User DO
 // is given a stand-in binding that answers the gateway's log read.
 it("voice spend lands on the user's own ledger, not a workspace", async () => {
-  let user = await signedUp(person("Speaker"));
+  let profile = person("Speaker");
+  let user = await signedUp(profile);
   let workspace = crypto.randomUUID();
   await user.newWorkspace(workspace, "Mine");
   await runInDurableObject(user, async (instance, ctx) => {
     let bound = instance as unknown as {env: Record<string, unknown>};
     bound.env = {...instance.env, CF_AI_GATEWAY: "platform-gateway", CF_AI_GATEWAY_ACCOUNT_ID: "account",
-      WORKERS_AI: {gateway: () => ({getLog: async (id: string) => ({cost: id === "v-1" ? 0.0125 : undefined})})}};
+      WORKERS_AI: {gateway: () => ({getLog: async (id: string) => id === "v-1" ? {cost: 0.0125, metadata: {user: profile.id}} : id === "theirs" ? {cost: 9, metadata: {user: "bo@example.com"}} : {cost: undefined}})}};
     instance.recordVoiceCost({kind: "transcription", model: "@cf/openai/whisper", gatewayLogId: "v-1"});
-    // No log id: nothing is counted.
+    // The same log twice counts once, another user's log counts nothing, and no log id counts nothing.
+    instance.recordVoiceCost({kind: "transcription", model: "@cf/openai/whisper", gatewayLogId: "v-1"});
+    instance.recordVoiceCost({kind: "speech", model: "@cf/deepgram/aura-2-en", gatewayLogId: "theirs"});
     instance.recordVoiceCost({kind: "speech", model: "@cf/deepgram/aura-2-en"});
     await ctx.waitUntil(Promise.resolve());
   });
   await expect.poll(async () => (await user.getCostSummary()).own.totalCost).toBe(0.0125);
+
+  // A stale id naming the counted log again, later, counts nothing.
+  await runInDurableObject(user, (instance) => {
+    instance.recordVoiceCost({kind: "transcription", model: "@cf/openai/whisper", gatewayLogId: "v-1"});
+  });
+  await new Promise(resolve => setTimeout(resolve, 100));
 
   let summary = await user.getCostSummary();
   expect(summary.own.lines).toEqual([{kind: "transcription", model: "@cf/openai/whisper",

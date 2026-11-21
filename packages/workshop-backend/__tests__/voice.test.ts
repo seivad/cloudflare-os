@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MAX_SPEAK_CHARS, MAX_VOICE_AUDIO_BYTES } from "@gadgets/workshop-shared/api";
 import { AiGatewayLogRetryableError } from "../src/ai-gateway.js";
-import { listVoiceModels, speak, transcribe, voiceCostEntry, type VoiceCost } from "../src/voice.js";
+import { listVoiceModels, speak, transcribe, voiceCostEntry, voiceCostOf, type VoiceCost } from "../src/voice.js";
 
 const USER = "ada@example.com";
 
@@ -93,6 +93,30 @@ describe("transcribe cost", () => {
   });
 });
 
+describe("a call that fails after the model ran", () => {
+  it("carries what it cost on the error, for a transcript and for audio", async () => {
+    const { bound } = voiceEnv(() => ({}), {}, "v-2");
+    const failed = await transcribe(bound, USER, recording, "audio/webm").catch((e) => e);
+    expect(failed.message).toMatch(/without a transcript/);
+    expect(voiceCostOf(failed)).toEqual({ kind: "transcription", model: "@cf/openai/whisper-large-v3-turbo", gatewayLogId: "v-2" });
+    const mute = voiceEnv(() => ({}), {}, "s-2").bound;
+    const unspoken = await speak(mute, USER, "Hi").catch((e) => e);
+    expect(voiceCostOf(unspoken)).toEqual({ kind: "speech", model: "@cf/deepgram/aura-2-en", gatewayLogId: "s-2" });
+  });
+
+  it("carries it when the catalog model's file cannot be fetched", async () => {
+    const { bound } = voiceEnv(() => ({ state: "Completed", result: { audio: "https://files.example.test/x.mp3" } }), {}, "s-3");
+    const fetcher = vi.fn(async () => new Response("no", { status: 500 }));
+    const failed = await speak(bound, USER, "Hi", { model: "openai/tts-1" }, fetcher as unknown as typeof fetch).catch((e) => e);
+    expect(voiceCostOf(failed)?.gatewayLogId).toBe("s-3");
+  });
+
+  it("carries nothing for a refusal before the model ran", async () => {
+    const { bound } = voiceEnv(() => null);
+    expect(voiceCostOf(await speak(bound, USER, "  ").catch((e) => e))).toBeUndefined();
+  });
+});
+
 describe("speak", () => {
   it("returns kind speech and its model", async () => {
     const { bound } = voiceEnv(() => new Response(new Uint8Array([1])).body, {}, "s-1");
@@ -137,35 +161,42 @@ describe("voiceCostEntry", () => {
   const { bound } = voiceEnv(() => null);
 
   it("counts the log's cost as logged, not estimated", async () => {
-    const readLog = vi.fn(async () => ({ cost: 0.002 }));
-    expect(await voiceCostEntry(bound, cost, readLog, async () => {}))
-        .toEqual({ kind: "transcription", model: cost.model, estimated: false, usd: 0.002, source: "voice" });
+    const readLog = vi.fn(async () => ({ cost: 0.002, metadata: { user: USER, source: "voice" } }));
+    expect(await voiceCostEntry(bound, USER, cost, readLog, async () => {}))
+        .toEqual({ entry: { kind: "transcription", model: cost.model, estimated: false, usd: 0.002, source: "voice" } });
     expect(readLog).toHaveBeenCalledWith(bound, { gateway: "platform-gateway" }, "v-1");
   });
 
   it("waits 1, 2 and 4 seconds while the log is not ready, and gives up after four reads", async () => {
     const waits: number[] = [];
     const readLog = vi.fn(async () => { throw new AiGatewayLogRetryableError("not yet"); });
-    await expect(voiceCostEntry(bound, cost, readLog, async (ms) => { waits.push(ms); })).rejects.toThrow("not yet");
+    await expect(voiceCostEntry(bound, USER, cost, readLog, async (ms) => { waits.push(ms); })).rejects.toThrow("not yet");
     expect(readLog).toHaveBeenCalledTimes(4);
     expect(waits).toEqual([1000, 2000, 4000]);
   });
 
   it("counts a log that becomes ready on a later read", async () => {
     let reads = 0;
-    const readLog = vi.fn(async () => { if (++reads < 3) throw new AiGatewayLogRetryableError("not yet"); return { cost: 0.5 }; });
-    expect((await voiceCostEntry(bound, cost, readLog, async () => {}))?.usd).toBe(0.5);
+    const readLog = vi.fn(async () => { if (++reads < 3) throw new AiGatewayLogRetryableError("not yet"); return { cost: 0.5, metadata: { user: USER } }; });
+    expect(await voiceCostEntry(bound, USER, cost, readLog, async () => {})).toMatchObject({ entry: { usd: 0.5 } });
   });
 
   it("does not retry a refusal", async () => {
     const readLog = vi.fn(async () => { throw new Error("invalid cost"); });
-    await expect(voiceCostEntry(bound, cost, readLog, async () => {})).rejects.toThrow("invalid cost");
+    await expect(voiceCostEntry(bound, USER, cost, readLog, async () => {})).rejects.toThrow("invalid cost");
     expect(readLog).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts nothing for a log recorded for another user, or for none", async () => {
+    for (const metadata of [{ user: "bo@example.com" }, undefined]) {
+      const readLog = vi.fn(async () => ({ cost: 1, metadata }));
+      expect(await voiceCostEntry(bound, USER, cost, readLog, async () => {})).toEqual({ skipped: "other-user" });
+    }
   });
 
   it("counts nothing for a call with no log id", async () => {
     const readLog = vi.fn();
-    expect(await voiceCostEntry(bound, { ...cost, gatewayLogId: undefined }, readLog, async () => {})).toBeUndefined();
+    expect(await voiceCostEntry(bound, USER, { ...cost, gatewayLogId: undefined }, readLog, async () => {})).toEqual({ skipped: "no-log" });
     expect(readLog).not.toHaveBeenCalled();
   });
 });

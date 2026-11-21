@@ -17,7 +17,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 export { PendingLogin, LoginConnectCallbackImpl };
 import { GatekeeperUiFrame, GatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { DecisionModelGatekeeper, LanguageModelGatekeeper } from "./ai-models";
-import { listVoiceModels, speak as speakText, transcribe as transcribeSpeech, type VoiceCost } from "./voice.js";
+import { listVoiceModels, speak as speakText, transcribe as transcribeSpeech, voiceCostOf, type VoiceCost } from "./voice.js";
 import type { SpeakOptions, TranscribeOptions, VoiceModelInfo, VoiceSpeech, VoiceTranscript } from "@gadgets/workshop-shared/api";
 import { ModelCatalogGatekeeper } from "./model-catalog";
 import { getGatewayModels } from "./ai-gateway.js";
@@ -306,15 +306,26 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async transcribe(audio: Uint8Array, contentType: string, options?: TranscribeOptions): Promise<VoiceTranscript> {
-    const { cost, ...transcript } = await transcribeSpeech(this.env, this.#userId.name!, audio, contentType, options);
-    this.#countVoiceCost(cost);
+    const { cost, ...transcript } = await this.#spent(() => transcribeSpeech(this.env, this.#userId.name!, audio, contentType, options));
     return transcript;
   }
 
   async speak(text: string, options?: SpeakOptions): Promise<VoiceSpeech> {
-    const { cost, ...speech } = await speakText(this.env, this.#userId.name!, text, options);
-    this.#countVoiceCost(cost);
+    const { cost, ...speech } = await this.#spent(() => speakText(this.env, this.#userId.name!, text, options));
     return speech;
+  }
+
+  // Runs a voice call and counts what it cost, whether it answered or failed after the model ran.
+  async #spent<T extends { cost: VoiceCost }>(call: () => Promise<T>): Promise<T> {
+    try {
+      const result = await call();
+      this.#countVoiceCost(result.cost);
+      return result;
+    } catch (error) {
+      const cost = voiceCostOf(error);
+      if (cost) this.#countVoiceCost(cost);
+      throw error;
+    }
   }
 
   // Hands a voice call's cost to the user's own ledger without holding up the call: the User DO

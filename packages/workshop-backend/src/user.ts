@@ -15,7 +15,7 @@ import {
 } from "./storage-schema/user-storage.js";
 import { chatKey, chatKeyPrefix } from "./storage-schema/overseer-storage.js";
 import { recordAnalytics } from "./analytics";
-import { addCost, byKind, byModel, mergeLines, withEarlier, type CostEntry } from "./cost-ledger.js";
+import { addCost, byKind, byModel, MAX_REPORTED_LOG_AGE_DAYS, mergeLines, withEarlier, type CostEntry } from "./cost-ledger.js";
 import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
 import { voiceCostEntry, type VoiceCost } from "./voice.js";
@@ -1733,15 +1733,32 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * Counts what a voice call cost, once its AI Gateway log gives it. Returns at once: the log is
-   * read in the background, and a call whose log can't be read counts nothing (voice has no
-   * estimate) and is warned about.
+   * read in the background. Nothing is counted (and a warning logged) for a call with no readable
+   * log (voice has no estimate), for a log recorded for another user, or for a log already
+   * counted: the log id comes from a binding shared by overlapping calls (see voice.ts).
    */
   recordVoiceCost(cost: VoiceCost): void {
     this.ctx.waitUntil((async () => {
       try {
-        const entry = await voiceCostEntry(this.env, cost);
-        if (entry) this.addOwnCost(entry);
-        else logger.warn("voice call has no AI Gateway log; nothing counted", {event: "voice.cost.no_log", modelId: cost.model});
+        const userId = this.storage.profile.get().id;
+        const outcome = await voiceCostEntry(this.env, userId, cost);
+        if ("skipped" in outcome) {
+          logger.warn(outcome.skipped === "other-user"
+              ? "voice call's AI Gateway log is another user's; nothing counted"
+              : "voice call has no AI Gateway log; nothing counted",
+              {event: outcome.skipped === "other-user" ? "voice.cost.log.other_user" : "voice.cost.no_log", modelId: cost.model});
+          return;
+        }
+        // One synchronous step, so a log counts once however many calls name it.
+        let logId = cost.gatewayLogId!;
+        let now = Date.now();
+        let expired = now - MAX_REPORTED_LOG_AGE_DAYS * 24 * 60 * 60 * 1000;
+        for (let {logId: stale} of Array.from(this.storage.countedVoiceLogs.byCountedAt.list({end: expired}))) {
+          this.storage.countedVoiceLogs.delete(stale);
+        }
+        if (this.storage.countedVoiceLogs.get(logId)) return;
+        this.storage.countedVoiceLogs.put({logId, countedAt: now});
+        this.addOwnCost(outcome.entry);
       } catch (error) {
         logger.warn("voice call's AI Gateway log unreadable; nothing counted", {event: "voice.cost.log.unreadable", modelId: cost.model, error});
       }
