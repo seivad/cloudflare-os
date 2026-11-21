@@ -35,27 +35,48 @@ export type SpeakResult = VoiceSpeech & { cost: VoiceCost };
 /** How many times a voice call's log is read before its cost is given up on, as the Overseer does for a chat request. */
 const VOICE_LOG_ATTEMPTS = 4;
 
+/** What a voice call's log gave: the entry to count, or why nothing is counted. */
+export type VoiceCostOutcome =
+  | { entry: CostEntry & { source: "voice" } }
+  | { skipped: "no-log" | "other-user" };
+
 /**
- * The cost a voice call's AI Gateway log gives, as an entry for the user's own ledger. Reads the
+ * The cost a voice call's AI Gateway log gives, as an entry for `userId`'s own ledger. Reads the
  * log up to VOICE_LOG_ATTEMPTS times, waiting 1, 2 then 4 seconds between reads while the gateway
- * says the log is not ready. Voice has no estimate: with no log id or no readable log the result
- * is undefined and nothing is counted.
+ * says the log is not ready. Voice has no estimate: with no log id or no route nothing is counted.
+ * A log whose recorded user is not `userId` counts nothing either: see `aiGatewayLogId` below.
  */
 export async function voiceCostEntry(
-  env: Cloudflare.Env, cost: VoiceCost,
+  env: Cloudflare.Env, userId: string, cost: VoiceCost,
   readLog: (env: Cloudflare.Env, route: AiGatewayLogRoute, logId: string) => Promise<AiGatewayLogRecord> = getAiGatewayLog,
   wait: (ms: number) => Promise<void> = (ms) => scheduler.wait(ms),
-): Promise<(CostEntry & { source: "voice" }) | undefined> {
+): Promise<VoiceCostOutcome> {
   const route = deploymentLogRoute(env);
-  if (!cost.gatewayLogId || !route) return undefined;
+  if (!cost.gatewayLogId || !route) return { skipped: "no-log" };
   for (let attempt = 0; ; ++attempt) {
     try {
       const log = await readLog(env, route, cost.gatewayLogId);
-      return { kind: cost.kind, model: cost.model, estimated: false, usd: log.cost, source: "voice" };
+      if (log.metadata?.user !== userId) return { skipped: "other-user" };
+      return { entry: { kind: cost.kind, model: cost.model, estimated: false, usd: log.cost, source: "voice" } };
     } catch (error) {
       if (!(error instanceof AiGatewayLogRetryableError) || attempt === VOICE_LOG_ATTEMPTS - 1) throw error;
       await wait(1000 * 2 ** attempt);
     }
+  }
+}
+
+/** An error from a voice call that had already run, carrying what that run cost (see `withCost`). */
+export function voiceCostOf(error: unknown): VoiceCost | undefined {
+  return typeof error === "object" && error !== null ? (error as { voiceCost?: VoiceCost }).voiceCost : undefined;
+}
+
+/** Runs what follows a model's answer; a failure carries `cost`, since the request was spent all the same. */
+async function afterRun<T>(cost: VoiceCost, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (typeof error === "object" && error !== null) (error as { voiceCost?: VoiceCost }).voiceCost = cost;
+    throw error;
   }
 }
 
@@ -190,11 +211,16 @@ export async function transcribe(env: Cloudflare.Env, userId: string, audio: Uin
   // A model that takes no recording of this type gives way to the default, which takes any.
   if (model.accepts && !model.accepts.some((a) => type.startsWith(a))) model = pick(models, "transcribe", undefined);
   const answer = await ai.run(model.id, model.input({ audio, contentType: type === "video/webm" ? "audio/webm" : type, language }), { gateway: { id: gw.gateway, metadata: metadata(userId) } });
+  // Best-effort: the binding keeps one id for the last call it made, and it serves every user's
+  // calls in this isolate, so overlapping calls can read each other's. A wrong id is harmless: the
+  // User DO counts a log only when its recorded user is this one, and never the same log twice.
   const cost: VoiceCost = { kind: "transcription", model: model.id, gatewayLogId: ai.aiGatewayLogId ?? undefined };
-  const result = answer as { text?: unknown; result?: { text?: unknown } } | null;
-  const text = result?.text ?? result?.result?.text;
-  if (typeof text !== "string") throw new Error(`${model.name} answered without a transcript.`);
-  return { text: text.trim(), model: model.id, cost };
+  return afterRun(cost, async () => {
+    const result = answer as { text?: unknown; result?: { text?: unknown } } | null;
+    const text = result?.text ?? result?.result?.text;
+    if (typeof text !== "string") throw new Error(`${model.name} answered without a transcript.`);
+    return { text: text.trim(), model: model.id, cost };
+  });
 }
 
 /** Text as spoken audio. See `AuthenticatedApi.speak`. */
@@ -206,20 +232,25 @@ export async function speak(env: Cloudflare.Env, userId: string, text: string, o
   const model = pick(modelsFor(gw, userId), "speak", options.model);
   const voice = options.voice && model.voices?.some((v) => v.id === options.voice) ? options.voice : model.defaultVoice;
   const answer = await ai.run(model.id, model.input({ text: said, voice }), { gateway: { id: gw.gateway, metadata: metadata(userId) } });
+  // Best-effort: the binding keeps one id for the last call it made, and it serves every user's
+  // calls in this isolate, so overlapping calls can read each other's. A wrong id is harmless: the
+  // User DO counts a log only when its recorded user is this one, and never the same log twice.
   const cost: VoiceCost = { kind: "speech", model: model.id, gatewayLogId: ai.aiGatewayLogId ?? undefined };
-  if (answer instanceof ReadableStream) {
-    return { audio: new Uint8Array(await new Response(answer).arrayBuffer()), contentType: "audio/mpeg", model: model.id, cost };
-  }
-  const shaped = answer as { audio?: unknown; result?: { audio?: unknown } } | null;
-  if (typeof shaped?.audio === "string") {
-    return { audio: Uint8Array.from(atob(shaped.audio), (c) => c.charCodeAt(0)), contentType: "audio/wav", model: model.id, cost };
-  }
-  const url = shaped?.result?.audio;
-  if (typeof url === "string" && url.startsWith("https://")) {
-    const response = await fetcher(url);
-    if (!response.ok) throw new Error(`${model.name}'s audio could not be fetched (HTTP ${response.status}).`);
-    const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim();
-    return { audio: new Uint8Array(await response.arrayBuffer()), contentType: type.startsWith("audio/") ? type : "audio/mpeg", model: model.id, cost };
-  }
-  throw new Error(`${model.name} answered without audio.`);
+  return afterRun(cost, async () => {
+    if (answer instanceof ReadableStream) {
+      return { audio: new Uint8Array(await new Response(answer).arrayBuffer()), contentType: "audio/mpeg", model: model.id, cost };
+    }
+    const shaped = answer as { audio?: unknown; result?: { audio?: unknown } } | null;
+    if (typeof shaped?.audio === "string") {
+      return { audio: Uint8Array.from(atob(shaped.audio), (c) => c.charCodeAt(0)), contentType: "audio/wav", model: model.id, cost };
+    }
+    const url = shaped?.result?.audio;
+    if (typeof url === "string" && url.startsWith("https://")) {
+      const response = await fetcher(url);
+      if (!response.ok) throw new Error(`${model.name}'s audio could not be fetched (HTTP ${response.status}).`);
+      const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim();
+      return { audio: new Uint8Array(await response.arrayBuffer()), contentType: type.startsWith("audio/") ? type : "audio/mpeg", model: model.id, cost };
+    }
+    throw new Error(`${model.name} answered without audio.`);
+  });
 }

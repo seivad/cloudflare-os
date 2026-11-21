@@ -303,6 +303,17 @@ export function makeUserStorage(storage: DurableObjectStorage) {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
       }),
+      // The voice AI Gateway logs already counted on `ownCostLines`, so that none counts twice, by
+      // when each was counted (`countedAt`, in milliseconds since the epoch). Kept for
+      // MAX_REPORTED_LOG_AGE_DAYS.
+      countedVoiceLogs: collection<{logId: string; countedAt: number}>()({
+        primaryKey: "logId",
+        nonUniqueIndexes: {
+          byCountedAt(record: {countedAt: number}) {
+            return record.countedAt;
+          },
+        },
+      }),
     },
     singletons: {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
