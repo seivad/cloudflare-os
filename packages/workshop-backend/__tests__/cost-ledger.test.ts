@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { env, RpcStub, RpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { AiChatMetadata, CostLine } from "@gadgets/workshop-shared/api";
+import type { AiChatMetadata, CostLine, CostSource } from "@gadgets/workshop-shared/api";
 import {
   actionCostEntry, addCost, byKind, byModel, costLineKey, isActionCost, mergeLines, textCostEntry,
   withEarlier, type CostAttribution, type CostEntry,
@@ -21,8 +21,9 @@ declare module "cloudflare:workers" {
 const KIMI = "@cf/moonshotai/kimi-k2.6";
 const OPUS = "claude-opus-5-5";
 
-function entry(overrides: Partial<CostEntry> = {}): CostEntry {
-  return { kind: "text", model: KIMI, estimated: false, usd: 0.5, ...overrides };
+function entry(overrides: Partial<CostEntry & { source: CostSource }> = {})
+    : CostEntry & { source: CostSource } {
+  return { source: "chat", kind: "text", model: KIMI, estimated: false, usd: 0.5, ...overrides };
 }
 
 describe("cost ledger", () => {
@@ -34,12 +35,27 @@ describe("cost ledger", () => {
     lines = addCost(lines, entry({ model: "auto", answeredBy: KIMI, usd: 0.125 }));
 
     expect(lines).toEqual([
-      { kind: "text", model: KIMI, estimated: false, usd: 0.75, requests: 2,
+      { source: "chat", kind: "text", model: KIMI, estimated: false, usd: 0.75, requests: 2,
         inputTokens: 150, outputTokens: 15 },
-      { kind: "text", model: OPUS, estimated: false, usd: 2, requests: 1 },
-      { kind: "text", model: "auto", answeredBy: OPUS, estimated: false, usd: 1, requests: 1 },
-      { kind: "text", model: "auto", answeredBy: KIMI, estimated: false, usd: 0.125, requests: 1 },
+      { source: "chat", kind: "text", model: OPUS, estimated: false, usd: 2, requests: 1 },
+      { source: "chat", kind: "text", model: "auto", answeredBy: OPUS, estimated: false, usd: 1, requests: 1 },
+      { source: "chat", kind: "text", model: "auto", answeredBy: KIMI, estimated: false, usd: 0.125, requests: 1 },
     ]);
+  });
+
+  it("addCost keeps each source's lines apart", () => {
+    let lines = addCost([], entry({ usd: 0.5 }));
+    lines = addCost(lines, entry({ source: "title", usd: 0.25 }));
+    lines = addCost(lines, entry({ source: "model-binding", usd: 0.125 }));
+    lines = addCost(lines, entry({ usd: 0.5 }));
+
+    expect(lines).toEqual([
+      { source: "chat", kind: "text", model: KIMI, estimated: false, usd: 1, requests: 2 },
+      { source: "title", kind: "text", model: KIMI, estimated: false, usd: 0.25, requests: 1 },
+      { source: "model-binding", kind: "text", model: KIMI, estimated: false, usd: 0.125,
+        requests: 1 },
+    ]);
+    expect(new Set(lines.map(costLineKey)).size).toBe(3);
   });
 
   it("addCost keeps estimated and logged lines apart", () => {
@@ -48,9 +64,9 @@ describe("cost ledger", () => {
     lines = addCost(lines, entry({ kind: "image", estimated: true, usd: 0.25 }));
 
     expect(lines).toEqual([
-      { kind: "text", model: KIMI, estimated: false, usd: 0.5, requests: 1 },
-      { kind: "text", model: KIMI, estimated: true, usd: 0.25, requests: 1 },
-      { kind: "image", model: KIMI, estimated: true, usd: 0.25, requests: 1 },
+      { source: "chat", kind: "text", model: KIMI, estimated: false, usd: 0.5, requests: 1 },
+      { source: "chat", kind: "text", model: KIMI, estimated: true, usd: 0.25, requests: 1 },
+      { source: "chat", kind: "image", model: KIMI, estimated: true, usd: 0.25, requests: 1 },
     ]);
     expect(new Set(lines.map(costLineKey)).size).toBe(3);
   });
@@ -59,7 +75,7 @@ describe("cost ledger", () => {
     let lines = addCost([], entry({ usd: 0.5 }));
     expect(withEarlier(2.75, lines)).toEqual([
       ...lines,
-      { kind: "text", model: "earlier", estimated: false, usd: 2.25, requests: 0 },
+      { source: "chat", kind: "text", model: "earlier", estimated: false, usd: 2.25, requests: 0 },
     ]);
   });
 
@@ -95,10 +111,10 @@ describe("cost ledger", () => {
         entry({ kind: "speech", model: "aura", estimated: true, usd: 0.25 }));
 
     expect(mergeLines(a, b)).toEqual([
-      { kind: "text", model: KIMI, estimated: false, usd: 1.5, requests: 2,
+      { source: "chat", kind: "text", model: KIMI, estimated: false, usd: 1.5, requests: 2,
         inputTokens: 10, outputTokens: 4 },
-      { kind: "text", model: OPUS, estimated: false, usd: 2, requests: 1 },
-      { kind: "speech", model: "aura", estimated: true, usd: 0.25, requests: 1 },
+      { source: "chat", kind: "text", model: OPUS, estimated: false, usd: 2, requests: 1 },
+      { source: "chat", kind: "speech", model: "aura", estimated: true, usd: 0.25, requests: 1 },
     ]);
     // Neither input is changed.
     expect(a[0]?.usd).toBe(1);
@@ -147,8 +163,8 @@ interface OverseerInternals {
 }
 
 describe("a workspace's cost ledger", () => {
-  it("counts each cost to its total, its line and its chat, and shows the total from before " +
-      "as earlier", async () => {
+  it("counts each cost to its total, its source's line and its chat, and shows the total from " +
+      "before as earlier", async () => {
     const stub = env.TEST_OVERSEER.getByName("cost-ledger");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       const impl = (instance as unknown as { impl: OverseerInternals }).impl;
@@ -169,9 +185,10 @@ describe("a workspace's cost ledger", () => {
       expect(chat?.lastActive.valueOf()).toBeGreaterThan(0);
       expect(impl.storage.chatMeta.get(4)).toBeUndefined();
       expect(impl.getCostLines()).toEqual([
-        { kind: "text", model: KIMI, estimated: false, usd: 1.5, requests: 2 },
-        { kind: "text", model: OPUS, estimated: true, usd: 0.5, requests: 1 },
-        { kind: "text", model: "earlier", estimated: false, usd: 2, requests: 0 },
+        { source: "chat", kind: "text", model: KIMI, estimated: false, usd: 1.25, requests: 1 },
+        { source: "compaction", kind: "text", model: OPUS, estimated: true, usd: 0.5, requests: 1 },
+        { source: "title", kind: "text", model: KIMI, estimated: false, usd: 0.25, requests: 1 },
+        { source: "chat", kind: "text", model: "earlier", estimated: false, usd: 2, requests: 0 },
       ]);
     });
   });
@@ -203,7 +220,7 @@ describe("a model binding's cost report", () => {
       // A report that names no log id, and has no gateway to read one from, counts as its estimate.
       await queue.reportCost({ model: OPUS, gatewayLogId: "log-1", estimateUsd: 0.25 });
       expect(impl.getCostLines()).toEqual([
-        { kind: "text", model: OPUS, estimated: true, usd: 0.5, requests: 2,
+        { source: "model-binding", kind: "text", model: OPUS, estimated: true, usd: 0.5, requests: 2,
           inputTokens: 100, outputTokens: 10 },
       ]);
     });

@@ -1396,8 +1396,8 @@ export type CallStartRecord = {
  * one whose `answeredBy` is undefined are the same line.
  */
 export function costLineKey(
-    line: Pick<CostLine, "kind" | "model" | "answeredBy" | "estimated">): string {
-  return JSON.stringify([line.kind, line.model, line.answeredBy ?? null, line.estimated]);
+    line: Pick<CostLine, "source" | "kind" | "model" | "answeredBy" | "estimated">): string {
+  return JSON.stringify([line.source, line.kind, line.model, line.answeredBy ?? null, line.estimated]);
 }
 
 /**

@@ -13,14 +13,14 @@ A cost is counted from the AI Gateway log of the request that made it: the cost 
 | Compaction | the workspace | `compaction` | the same |
 | Cache-warm pings (the resend that keeps a prompt cache alive while a chat is viewed) | the workspace | `chat` | the same |
 | A model binding's requests (`creationSpec.type === "aiModel"`) | the workspace | `model-binding` | the binding reports each one (`ApprovalQueue.reportCost`): its log id, else its estimate |
-| An approved Gatekeeper action that spends | the workspace | `media` | the Gatekeeper's answer to `getActionCost` and the log it names (below) |
+| An approved Gatekeeper action that spends | the workspace | `action` | the Gatekeeper's answer to `getActionCost` and the log it names (below) |
 | Voice: transcription, speech | the person's own ledger | `voice` | the call's gateway log; nothing is counted without one |
 
-The Overseer sets the source from the path a cost arrived by; a report never names it.
+The Overseer sets the source from the path a cost arrived by; a report never names it. Every line of a breakdown carries its source, so chat, model bindings and actions show apart.
 
 ## Ledger and summary
 
-Each workspace keeps a **ledger**: one line per kind (`text`, `image`, `video`, `music`, `speech`, `transcription`), model picked, model that answered (when the picked model is a router) and estimate flag, each with a running dollar total, request count and token totals (`CostLine`, `cost-ledger.ts`). Its `totalCost` is the sum of the lines. Totals counted before the ledger existed have no breakdown and appear as one `text` line with the model `"earlier"` (shown as "earlier (not broken down)"), until the lines account for them.
+Each workspace keeps a **ledger**: one line per source, kind (`text`, `image`, `video`, `music`, `speech`, `transcription`), model picked, model that answered (when the picked model is a router) and estimate flag, each with a running dollar total, request count and token totals (`CostLine`, `cost-ledger.ts`). Its `totalCost` is the sum of the lines. Totals counted before the ledger existed have no breakdown and appear as one `chat` `text` line with the model `"earlier"` (shown as "earlier (not broken down)"), until the lines account for them.
 
 `AuthenticatedApi.getMyCostSummary()` answers the caller's own total, by kind and by model, with the lines behind it. A user is counted as having spent:
 

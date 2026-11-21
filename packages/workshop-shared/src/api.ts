@@ -8221,11 +8221,20 @@ export type ShareLinkInfo = {
 
 export type { CostKind } from "./gatekeeper.js";
 
-/** What an AI cost was incurred for. The Overseer sets it, never a report. */
-export type CostSource = "chat" | "title" | "compaction" | "model-binding" | "media" | "voice";
+/**
+ * What an AI cost was incurred for: a chat turn, a title, a compaction, a gadget's model binding,
+ * an approved Gatekeeper action (a generated image, say), or voice. The Overseer sets it from the
+ * path the cost arrived by, never from a report.
+ */
+export type CostSource = "chat" | "title" | "compaction" | "model-binding" | "action" | "voice";
 
-/** One row of a cost breakdown: everything counted with the same kind, model, answering model and estimate flag. */
+/**
+ * One row of a cost breakdown: everything counted with the same source, kind, model, answering
+ * model and estimate flag.
+ */
 export type CostLine = {
+  /** What the cost was incurred for. "chat" for pre-breakdown totals. */
+  source: CostSource;
   kind: CostKind;
   /** The model picked, as the catalog names it (AUTO_ROUTER_MODEL_ID for Auto). "earlier" for pre-breakdown totals. */
   model: string;

@@ -10658,7 +10658,7 @@ class OverseerImpl implements AgentHooks {
     if (logId !== undefined && (!entry.estimated || unreadable)) {
       this.storage.countedCostLogs.put({logId, countedAt: Date.now()});
     }
-    this.recordCost({...entry, source: "media", isActivity: false});
+    this.recordCost({...entry, source: "action", isActivity: false});
   }
 
   // Whether `pending` is still to be counted after an await: not deleted from the queue, and the

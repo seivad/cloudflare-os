@@ -1,5 +1,5 @@
 // A cost breakdown: the lines a workspace's (or a user's) spend is counted in, one running total
-// per kind, model, answering model and estimate flag (see CostLine). Pure functions over arrays of
+// per source, kind, model, answering model and estimate flag (see CostLine). Pure functions over arrays of
 // lines; where they are stored is the caller's business (Overseer.recordCost, `costLines`).
 
 import type { CostKind, CostLine, CostSource } from "@gadgets/workshop-shared/api";
@@ -10,7 +10,10 @@ import { costLineKey } from "./storage-schema/overseer-storage";
 
 export { costLineKey };
 
-/** One request's cost, as it is counted into a line. */
+/**
+ * One request's cost, as it is counted into a line once its source is known (see
+ * CostAttribution).
+ */
 export type CostEntry = {
   kind: CostKind;
   model: string;
@@ -35,12 +38,13 @@ export const EARLIER_MODEL = "earlier";
 const ROUNDING_USD = 0.000001;
 
 /** `line` (absent for a new one) with `entry`'s cost counted into it as one more request. */
-export function addToLine(line: CostLine | undefined, entry: CostEntry): CostLine {
+export function addToLine(line: CostLine | undefined, entry: CostEntry & { source: CostSource })
+    : CostLine {
   return combine(line, { ...entry, requests: 1 });
 }
 
 /** `lines` with `entry` counted into its line, appended when it has none. */
-export function addCost(lines: CostLine[], entry: CostEntry): CostLine[] {
+export function addCost(lines: CostLine[], entry: CostEntry & { source: CostSource }): CostLine[] {
   return addLine(lines, { ...entry, requests: 1 });
 }
 
@@ -50,13 +54,14 @@ export function mergeLines(a: CostLine[], b: CostLine[]): CostLine[] {
 }
 
 /**
- * `lines` and, when they count less than `totalCost`, a text line with model "earlier" holding
- * the rest: what was counted before costs were broken down, all of which was chat.
+ * `lines` and, when they count less than `totalCost`, a chat text line with model "earlier"
+ * holding the rest: what was counted before costs were broken down, all of which was chat.
  */
 export function withEarlier(totalCost: number, lines: CostLine[]): CostLine[] {
   let rest = totalCost - lines.reduce((sum, line) => sum + line.usd, 0);
   return rest > ROUNDING_USD
-    ? [...lines, { kind: "text", model: EARLIER_MODEL, estimated: false, usd: rest, requests: 0 }]
+    ? [...lines, { source: "chat", kind: "text", model: EARLIER_MODEL, estimated: false, usd: rest,
+      requests: 0 }]
     : lines;
 }
 
@@ -162,6 +167,7 @@ function combine(line: CostLine | undefined, add: CostLine): CostLine {
   let inputTokens = sumKnown(line?.inputTokens, add.inputTokens);
   let outputTokens = sumKnown(line?.outputTokens, add.outputTokens);
   return {
+    source: add.source,
     kind: add.kind,
     model: add.model,
     ...(add.answeredBy !== undefined ? { answeredBy: add.answeredBy } : {}),
