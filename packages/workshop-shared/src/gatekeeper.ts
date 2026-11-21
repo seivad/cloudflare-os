@@ -18,14 +18,6 @@
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
-/**
- * A pagination cursor.
- *
- * This is an RPC object. Call `next()` repeatedly on the same cursor to fetch
- * subsequent batches of results. `next()` returns `null` once exhausted. An empty
- * batch does NOT mean exhaustion — a filtered page can be empty mid-walk — so drain
- * on `null`, never on `length`. Dispose the cursor when finished.
- */
 /** What an AI cost bought: the kind of output the model produced. */
 export type CostKind = "text" | "image" | "video" | "music" | "speech" | "transcription";
 
@@ -55,6 +47,14 @@ export type ModelRequestCost = {
   outputTokens?: number;
 };
 
+/**
+ * A pagination cursor.
+ *
+ * This is an RPC object. Call `next()` repeatedly on the same cursor to fetch
+ * subsequent batches of results. `next()` returns `null` once exhausted. An empty
+ * batch does NOT mean exhaustion — a filtered page can be empty mid-walk — so drain
+ * on `null`, never on `length`. Dispose the cursor when finished.
+ */
 export interface Cursor<T> {
   next(): Promise<T[] | null>;
 }
