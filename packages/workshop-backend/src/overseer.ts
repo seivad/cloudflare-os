@@ -50,8 +50,8 @@ import {
   type AiGatewayLogRoute,
 } from "./ai-gateway";
 import {
-  actionCostEntry, addToLine, costLineKey, isActionCost, MAX_REPORTED_LOG_AGE_DAYS, textCostEntry,
-  withEarlier, type CostAttribution, type CostEntry,
+  actionCostEntry, addToLine, costLineKey, isActionCost, isActionLog, MAX_REPORTED_LOG_AGE_DAYS,
+  textCostEntry, withEarlier, type CostAttribution, type CostEntry,
 } from "./cost-ledger";
 import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
@@ -9903,8 +9903,9 @@ class OverseerImpl implements AgentHooks {
   // `answerTimeoutMs`, which the caller's catch reschedules). A spent action counts what
   // actionCostEntry says, once: the cost its AI Gateway log gives where the log is this
   // Gatekeeper's and recent, nothing where it is another's, else the capped estimate. A log
-  // already counted counts nothing, and one counted at the estimate because it stayed unreadable
-  // is marked counted too, so that a later report of it adds nothing.
+  // already counted counts nothing, and one counted at the estimate because it stayed unreadable,
+  // or because it was this Gatekeeper's but gave no cost, is marked counted too, so that a later
+  // report of it adds nothing.
   async #pollActionCost(pending: PendingActionCost, now: number, answerTimeoutMs: number)
       : Promise<void> {
     if (now - pending.enqueuedAt > ACTION_COST_GIVE_UP_MS) {
@@ -9958,8 +9959,9 @@ class OverseerImpl implements AgentHooks {
     // One synchronous step, so the action counts once and its log never again.
     this.storage.pendingActionCosts.delete(pending.actionRecordId);
     if (logId !== undefined && this.storage.countedCostLogs.get(logId)) return;
-    let entry = actionCostEntry(cost, log, this.storage.costTags.get(pending.gatekeeperId)?.tag,
-        Date.now());
+    let tag = this.storage.costTags.get(pending.gatekeeperId)?.tag;
+    let countedAt = Date.now();
+    let entry = actionCostEntry(cost, log, tag, countedAt);
     if (!entry) {
       this.logger.warn("action cost refused: its log carries another gatekeeper's tag", {
         event: "action.cost.log.refused", gatekeeperId: pending.gatekeeperId,
@@ -9967,8 +9969,8 @@ class OverseerImpl implements AgentHooks {
       });
       return;
     }
-    if (logId !== undefined && (!entry.estimated || unreadable)) {
-      this.storage.countedCostLogs.put({logId, countedAt: Date.now()});
+    if (logId !== undefined && (unreadable || isActionLog(log, tag, countedAt))) {
+      this.storage.countedCostLogs.put({logId, countedAt});
     }
     this.recordCost({...entry, source: "action", isActivity: false});
   }

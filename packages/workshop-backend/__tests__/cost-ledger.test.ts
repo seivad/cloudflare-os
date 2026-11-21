@@ -6,7 +6,8 @@ import {
   AUTO_ROUTER_MODEL_ID, type AiChatMetadata, type CostLine, type CostSource,
 } from "@gadgets/workshop-shared/api";
 import {
-  actionCostEntry, addCost, byKind, byModel, costLineKey, isActionCost, mergeLines, textCostEntry,
+  actionCostEntry, addCost, byKind, byModel, costLineKey, isActionCost, isActionLog, mergeLines,
+  textCostEntry,
   withEarlier, type CostAttribution, type CostEntry,
 } from "../src/cost-ledger.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
@@ -383,6 +384,19 @@ describe("what an approved action that spent counts as", () => {
     expect(actionCostEntry(SPENT, log({ createdAt: new Date(NOW - 32 * DAY) }), "mine", NOW))
         .toEqual(ESTIMATE);
     expect(actionCostEntry(SPENT, log({ createdAt: undefined }), "mine", NOW)).toEqual(ESTIMATE);
+  });
+
+  it("is the capped estimate for its own recent log when the log gives no cost", () => {
+    expect(actionCostEntry(SPENT, log({ cost: 0 }), "mine", NOW)).toEqual(ESTIMATE);
+    expect(isActionLog(log({ cost: 0 }), "mine", NOW)).toBe(true);
+  });
+
+  it("is counted from a log that is this gatekeeper's and recent", () => {
+    expect(isActionLog(log(), "mine", NOW)).toBe(true);
+    expect(isActionLog(log({ metadata: { tag: "theirs" } }), "mine", NOW)).toBe(false);
+    expect(isActionLog(log({ metadata: {} }), undefined, NOW)).toBe(false);
+    expect(isActionLog(log({ createdAt: new Date(NOW - 32 * DAY) }), "mine", NOW)).toBe(false);
+    expect(isActionLog(undefined, "mine", NOW)).toBe(false);
   });
 
   it("is the capped estimate with no log, or an untagged one", () => {
