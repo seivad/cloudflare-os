@@ -104,6 +104,14 @@ describe("a call that fails after the model ran", () => {
     expect(voiceCostOf(unspoken)).toEqual({ kind: "speech", model: "@cf/deepgram/aura-2-en", gatewayLogId: "s-2" });
   });
 
+  it("keeps the cost off the error itself, which goes back to the caller as it is", async () => {
+    const { bound } = voiceEnv(() => ({}), {}, "v-2");
+    const failed = await transcribe(bound, USER, recording, "audio/webm").catch((e) => e);
+    expect(voiceCostOf(failed)).toBeDefined();
+    expect(Object.keys(failed)).toEqual([]);
+    expect(JSON.stringify(failed)).not.toContain("v-2");
+  });
+
   it("carries it when the catalog model's file cannot be fetched", async () => {
     const { bound } = voiceEnv(() => ({ state: "Completed", result: { audio: "https://files.example.test/x.mp3" } }), {}, "s-3");
     const fetcher = vi.fn(async () => new Response("no", { status: 500 }));
@@ -177,7 +185,7 @@ describe("voiceCostEntry", () => {
 
   it("counts a log that becomes ready on a later read", async () => {
     let reads = 0;
-    const readLog = vi.fn(async () => { if (++reads < 3) throw new AiGatewayLogRetryableError("not yet"); return { cost: 0.5, metadata: { user: USER } }; });
+    const readLog = vi.fn(async () => { if (++reads < 3) throw new AiGatewayLogRetryableError("not yet"); return { cost: 0.5, metadata: { user: USER, source: "voice" } }; });
     expect(await voiceCostEntry(bound, USER, cost, readLog, async () => {})).toMatchObject({ entry: { usd: 0.5 } });
   });
 
@@ -188,9 +196,17 @@ describe("voiceCostEntry", () => {
   });
 
   it("counts nothing for a log recorded for another user, or for none", async () => {
-    for (const metadata of [{ user: "bo@example.com" }, undefined]) {
+    for (const metadata of [{ user: "bo@example.com", source: "voice" }, undefined]) {
       const readLog = vi.fn(async () => ({ cost: 1, metadata }));
       expect(await voiceCostEntry(bound, USER, cost, readLog, async () => {})).toEqual({ skipped: "other-user" });
+    }
+  });
+
+  it("counts nothing for this user's log of a request that was not voice", async () => {
+    // A chat request through the same binding carries the user too, and counts to its workspace.
+    for (const metadata of [{ user: USER, source: "chat" }, { user: USER }]) {
+      const readLog = vi.fn(async () => ({ cost: 1, metadata }));
+      expect(await voiceCostEntry(bound, USER, cost, readLog, async () => {})).toEqual({ skipped: "not-voice" });
     }
   });
 

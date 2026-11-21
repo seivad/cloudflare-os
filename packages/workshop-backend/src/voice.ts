@@ -23,7 +23,8 @@ import type { CostEntry } from "./cost-ledger.js";
 
 /**
  * What a voice call ran as, for counting its cost on the user's own ledger: the gateway log the
- * call was made under, if the binding reported one. Internal: the client never gets it.
+ * call was made under, if the binding reported one. Internal: the client never gets it, neither
+ * with an answer nor on the error of a call that failed (see `voiceCostOf`).
  */
 export type VoiceCost = { kind: "transcription" | "speech"; model: string; gatewayLogId?: string };
 
@@ -38,13 +39,15 @@ const VOICE_LOG_ATTEMPTS = 4;
 /** What a voice call's log gave: the entry to count, or why nothing is counted. */
 export type VoiceCostOutcome =
   | { entry: CostEntry & { source: "voice" } }
-  | { skipped: "no-log" | "other-user" };
+  | { skipped: "no-log" | "other-user" | "not-voice" };
 
 /**
  * The cost a voice call's AI Gateway log gives, as an entry for `userId`'s own ledger. Reads the
  * log up to VOICE_LOG_ATTEMPTS times, waiting 1, 2 then 4 seconds between reads while the gateway
  * says the log is not ready. Voice has no estimate: with no log id or no route nothing is counted.
- * A log whose recorded user is not `userId` counts nothing either: see `aiGatewayLogId` below.
+ * A log whose recorded user is not `userId` counts nothing either, nor does one of theirs whose
+ * source is not `voice`, such as a chat request through the same binding, which its workspace
+ * counts: see `aiGatewayLogId` below.
  */
 export async function voiceCostEntry(
   env: Cloudflare.Env, userId: string, cost: VoiceCost,
@@ -57,6 +60,7 @@ export async function voiceCostEntry(
     try {
       const log = await readLog(env, route, cost.gatewayLogId);
       if (log.metadata?.user !== userId) return { skipped: "other-user" };
+      if (log.metadata.source !== "voice") return { skipped: "not-voice" };
       return { entry: { kind: cost.kind, model: cost.model, estimated: false, usd: log.cost, source: "voice" } };
     } catch (error) {
       if (!(error instanceof AiGatewayLogRetryableError) || attempt === VOICE_LOG_ATTEMPTS - 1) throw error;
@@ -65,17 +69,21 @@ export async function voiceCostEntry(
   }
 }
 
-/** An error from a voice call that had already run, carrying what that run cost (see `withCost`). */
+// What each error of a voice call that had already run cost (see `afterRun`). Kept beside the
+// error rather than on it: the error goes back to the browser, which would get its own properties.
+const spentBy = new WeakMap<object, VoiceCost>();
+
+/** What the voice call that failed with `error` cost, when it failed after the model ran. */
 export function voiceCostOf(error: unknown): VoiceCost | undefined {
-  return typeof error === "object" && error !== null ? (error as { voiceCost?: VoiceCost }).voiceCost : undefined;
+  return typeof error === "object" && error !== null ? spentBy.get(error) : undefined;
 }
 
-/** Runs what follows a model's answer; a failure carries `cost`, since the request was spent all the same. */
+/** Runs what follows a model's answer; a failure is known to have cost `cost`, since the request was spent all the same. */
 async function afterRun<T>(cost: VoiceCost, work: () => Promise<T>): Promise<T> {
   try {
     return await work();
   } catch (error) {
-    if (typeof error === "object" && error !== null) (error as { voiceCost?: VoiceCost }).voiceCost = cost;
+    if (typeof error === "object" && error !== null) spentBy.set(error, cost);
     throw error;
   }
 }

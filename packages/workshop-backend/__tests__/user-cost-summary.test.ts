@@ -112,11 +112,17 @@ it("voice spend lands on the user's own ledger, not a workspace", async () => {
   await runInDurableObject(user, async (instance, ctx) => {
     let bound = instance as unknown as {env: Record<string, unknown>};
     bound.env = {...instance.env, CF_AI_GATEWAY: "platform-gateway", CF_AI_GATEWAY_ACCOUNT_ID: "account",
-      WORKERS_AI: {gateway: () => ({getLog: async (id: string) => id === "v-1" ? {cost: 0.0125, metadata: {user: profile.id}} : id === "theirs" ? {cost: 9, metadata: {user: "bo@example.com"}} : {cost: undefined}})}};
+      WORKERS_AI: {gateway: () => ({getLog: async (id: string) => ({
+        "v-1": {cost: 0.0125, metadata: {user: profile.id, source: "voice"}},
+        "theirs": {cost: 9, metadata: {user: "bo@example.com", source: "voice"}},
+        "chat": {cost: 7, metadata: {user: profile.id, source: "chat"}},
+      })[id] ?? {cost: undefined}})}};
     instance.recordVoiceCost({kind: "transcription", model: "@cf/openai/whisper", gatewayLogId: "v-1"});
-    // The same log twice counts once, another user's log counts nothing, and no log id counts nothing.
+    // The same log twice counts once, another user's log counts nothing, their own chat request's
+    // log (which its workspace counts) counts nothing, and no log id counts nothing.
     instance.recordVoiceCost({kind: "transcription", model: "@cf/openai/whisper", gatewayLogId: "v-1"});
     instance.recordVoiceCost({kind: "speech", model: "@cf/deepgram/aura-2-en", gatewayLogId: "theirs"});
+    instance.recordVoiceCost({kind: "speech", model: "@cf/deepgram/aura-2-en", gatewayLogId: "chat"});
     instance.recordVoiceCost({kind: "speech", model: "@cf/deepgram/aura-2-en"});
     await ctx.waitUntil(Promise.resolve());
   });
