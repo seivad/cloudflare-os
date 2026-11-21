@@ -16,7 +16,7 @@ import { zeroUsage } from "../src/ai-invoke.js";
 import {
   DecisionModelGatekeeper, gatewayBuiltInReasoning, gatewayReasoningLevels, getDecisionModel,
   getModel, isRuntimeModel, LanguageModelGatekeeper, ROUTABLE_CATALOG_MODELS,
-  SKIPPED_THOUGHT_SIGNATURE, withThoughtSignatures, LanguageModelBindingImpl, type ModelHandle,
+  SKIPPED_THOUGHT_SIGNATURE, withThoughtSignatures, LanguageModelBindingImpl, DecisionModelBindingImpl, type ModelHandle,
 } from "../src/ai-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
@@ -2359,6 +2359,39 @@ describe("LanguageModelBindingImpl cost reports", () => {
     const reportCost = vi.fn(async () => { throw new Error("queue gone"); });
     const binding = new LanguageModelBindingImpl(handle(), { reportCost } as never);
     expect(await binding.run({ prompt: "hello" })).toBe("hi");
+    expect(reportCost).toHaveBeenCalledOnce();
+  });
+});
+
+describe("DecisionModelBindingImpl cost reports", () => {
+  const request = { questions: {} } as never;
+  // A classifier whose result used 100 input, 20 cache-read and 5 cache-write tokens, and 10
+  // output tokens, priced at `total`.
+  const classifier = (total: number) => async () => ({
+    model: "clef", stopReason: "stop", answers: {},
+    usage: { ...zeroUsage(), input: 100, cacheRead: 20, cacheWrite: 5, output: 10,
+      totalTokens: 135, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total } },
+  }) as never;
+
+  it("reports each decision's model, estimate and tokens to its queue", async () => {
+    const reportCost = vi.fn(async () => {});
+    const binding = new DecisionModelBindingImpl(classifier(0.003), { reportCost } as never);
+    await binding.decide(request);
+    expect(reportCost).toHaveBeenCalledExactlyOnceWith(
+        { model: "clef", estimateUsd: 0.003, inputTokens: 125, outputTokens: 10 });
+  });
+
+  it("reports a free model's decision as a request", async () => {
+    const reportCost = vi.fn(async () => {});
+    await new DecisionModelBindingImpl(classifier(0), { reportCost } as never).decide(request);
+    expect(reportCost).toHaveBeenCalledExactlyOnceWith(
+        { model: "clef", estimateUsd: 0, inputTokens: 125, outputTokens: 10 });
+  });
+
+  it("does not fail the decision when the report fails", async () => {
+    const reportCost = vi.fn(async () => { throw new Error("queue gone"); });
+    const binding = new DecisionModelBindingImpl(classifier(0.003), { reportCost } as never);
+    await expect(binding.decide(request)).resolves.toEqual({});
     expect(reportCost).toHaveBeenCalledOnce();
   });
 });
