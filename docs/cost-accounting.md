@@ -55,6 +55,8 @@ For `spent` the Overseer reads the log (up to six attempts for a failure worth r
 
 A log id is counted once, also where the estimate was counted for it because it stayed unreadable or gave no cost. The Overseer remembers the ids it counted and prunes them after 31 days, the age past which it refuses a log, so a repeated answer never counts twice. A Gatekeeper's action that does not set `reportsCost` is never polled. One that sets it on a Gatekeeper without `getActionCost` is polled once, and dropped uncounted when the call fails for want of the method. `reportCost` is for model bindings only and is refused for any other Gatekeeper.
 
+When the owner deletes the workspace, the Overseer first asks each action still to report once more, due or not, with the same 30 s, so that what a generation finished meanwhile spent is in the owner's final cost (`settleActionCosts`). Its answer counts by the rules above, except that nothing is asked again later: `pending`, a failure or no answer drops the action with a warning, and a log not yet readable counts the capped estimate. Deleting waits for these answers, up to 30 s.
+
 The Media Studio Gatekeeper of the custom Gatekeeper package is the example: it tags each job, records the log id when the model answers, and answers `getActionCost` from the job it kept.
 
 ### Voice

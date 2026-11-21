@@ -274,6 +274,7 @@ interface ActionCostPolling {
   };
   getGatekeeperFacet: (id: number) => Promise<unknown>;
   pollActionCosts(answerTimeoutMs?: number): Promise<void>;
+  settleActionCosts(answerTimeoutMs?: number): Promise<void>;
   getCostLines(): CostLine[];
 }
 
@@ -367,6 +368,38 @@ describe("an approved action's cost", () => {
       await impl.pollActionCosts();
       expect(getActionCost).not.toHaveBeenCalled();
       expect([...impl.storage.pendingActionCosts.list()]).toEqual([]);
+    });
+  });
+});
+
+describe("an approved action's cost as its workspace is deleted", () => {
+  it("is asked for once, whenever it is due, and counted or dropped by its answer", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-settle");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      impl.storage.gatekeepers.put({ id: 1, class: {} });
+      // Actions 1 to 5, none due for an hour.
+      for (let action = 1; action <= 5; ++action) {
+        impl.storage.pendingActionCosts.put(newPendingActionCost(
+            { id: 10 + action, gatekeeperId: 1, action }, Date.now(), Date.now() + 3_600_000));
+      }
+      const answers: Record<number, () => Promise<unknown>> = {
+        1: async () => ({ state: "spent", kind: "video", model: "google/veo-3", estimateUsd: 2 }),
+        2: async () => ({ state: "pending" }),
+        3: async () => ({ state: "none" }),
+        4: async () => { throw new Error("The studio is down."); },
+        5: () => new Promise(() => {}),
+      };
+      const getActionCost = vi.fn((action: number) => answers[action]!());
+      impl.getGatekeeperFacet = async () => ({ getActionCost });
+
+      await impl.settleActionCosts(50);
+      expect(getActionCost).toHaveBeenCalledTimes(5);
+      expect([...impl.storage.pendingActionCosts.list()]).toEqual([]);
+      expect(impl.getCostLines()).toEqual([
+        { source: "action", kind: "video", model: "google/veo-3", estimated: true, usd: 2,
+          requests: 1 },
+      ]);
     });
   });
 });

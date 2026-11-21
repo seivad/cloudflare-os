@@ -319,6 +319,31 @@ it("stops polling once the workspace is deleting", async () => {
   expect(await polls(workspace.label, action)).toBe(before);
 });
 
+it("what a generation spent just before its workspace is deleted is in the owner's final cost",
+    async () => {
+  using workspace = await testWorkspace("actioncostlast");
+  const { session, resourceUrl } = await workspace.bind();
+  const action = await spend(workspace, session, 1);
+  await decide(workspace.ws, 1);
+  // By the sixth poll the next is over three seconds away, so only the deletion's own ask can
+  // learn of what is spent now.
+  await waitFor("six polls", async () => await polls(workspace.label, action) >= 6 || null);
+  const before = await polls(workspace.label, action);
+  const logId = crypto.randomUUID();
+  await logFor(resourceUrl, logId);
+  await setActionCost(workspace.label, action, spentVideo(logId));
+
+  await workspace.ws.deleteSelf();
+  expect(await polls(workspace.label, action)).toBe(before + 1);
+  const summary = await waitFor("the workspace to leave the summary", async () => {
+    const summary = await workspace.api.getMyCostSummary();
+    return summary.workspaces.length === 0 ? summary : null;
+  });
+  expect(summary.deletedWorkspaces).toEqual({
+    totalCost: 0.94, lines: [{ ...VIDEO_LINE, estimated: false, usd: 0.94, requests: 1 }],
+  });
+});
+
 it("a rejected action is never polled", async () => {
   using workspace = await testWorkspace("actioncostrejected");
   const { session, resourceUrl } = await workspace.bind();
