@@ -128,7 +128,7 @@ export const APPLY_OUTCOME_UNKNOWN_MESSAGE = "This action was interrupted after 
 type KitOwnedField = "awaitDecision" | "autoApprovable" | "actionKind";
 type ProviderOwnedField =
   | "title" | "description" | "fields" | "descriptionIsComplete" | "pushedCommits"
-  | "implementsRevert";
+  | "implementsRevert" | "reportsCost";
 type Unclassified = Exclude<keyof ActionDescription, KitOwnedField | ProviderOwnedField>;
 
 /**
@@ -749,6 +749,7 @@ export function defineActions<Host, M extends Record<string, unknown>>(
           // lane, and `describe` may still own what it returned.
           const {
             title, description, fields, descriptionIsComplete, pushedCommits, implementsRevert,
+            reportsCost,
           } = structuredClone(await definition.describe(payload, host));
           const action = { kind, payload } as TaggedAction<M>;
           return stage(journal, queue, action, {
@@ -762,6 +763,7 @@ export function defineActions<Host, M extends Record<string, unknown>>(
             // hook claims: the approver sees commit ids, not the bytes they carry.
             ...(fields?.length ? { fields } : {}),
             ...(pushedCommits ? { pushedCommits } : {}),
+            ...(reportsCost ? { reportsCost } : {}),
             ...(descriptionIsComplete === true && !pushedCommits?.length
               ? { descriptionIsComplete: true }
               : {}),
