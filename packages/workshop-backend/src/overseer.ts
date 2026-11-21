@@ -1213,7 +1213,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     let times: number[] = [];
-    if ([...this.storage.pendingUserUpdates.list({limit: 1})].length) {
+    if (this.#hasUserUpdates()) {
       times.push(this.#userUpdatesRetryAt || Date.now() + 1_000);
     }
     let liveCallCleanup = this.liveCalls.cleanupDue();
@@ -1363,9 +1363,20 @@ class OverseerImpl implements AgentHooks {
     await this.wrapUserDo(this.users.get(this.users.idFromName(profileId))).notifyCallInvite(invite);
   }
 
+  // What the workspace still owes users' DOs: a collaborator's changed access (pendingUserUpdates),
+  // or its owner's copy of its cost (ownerCostDirty).
+  #hasUserUpdates(): boolean {
+    return [...this.storage.pendingUserUpdates.list({limit: 1})].length > 0 ||
+        (this.storage.ownerCostDirty.get() && this.ownerId !== undefined);
+  }
+
+  // Delivers what #hasUserUpdates() finds owed, and when deleting, removes the workspace from its
+  // users' DOs, the owner's taking its final cost. A failed delivery stays owed and is retried
+  // from the alarm 30 seconds after it began; once all have succeeded, anything owed meanwhile
+  // goes at the next alarm.
   deliverUserUpdates(): Promise<void> {
     if (this.#userUpdateDrain) return this.#userUpdateDrain;
-    if (!this.storage.deleting.get() && ![...this.storage.pendingUserUpdates.list({limit: 1})].length) {
+    if (!this.storage.deleting.get() && !this.#hasUserUpdates()) {
       return Promise.resolve();
     }
     this.#userUpdatesRetryAt = Date.now() + 30_000;
@@ -1374,7 +1385,14 @@ class OverseerImpl implements AgentHooks {
       let sharing = this.storage.deleting.get() ? undefined : await this.getSharingManager();
       let deleting = this.storage.deleting.get();
       let updates = [...this.storage.pendingUserUpdates.list()];
-      await Promise.allSettled(updates.map(async update => {
+      let failed = false;
+      let ownerCost = this.#deliverOwnerCost().catch(error => {
+        failed = true;
+        this.logger.warn("owner's workspace cost update deferred", {
+          event: "workspace.cost.delivery.failed", gadgetId: this.ctx.id.toString(), error,
+        });
+      });
+      await Promise.allSettled([ownerCost, ...updates.map(async update => {
         try {
           // Re-admission supersedes a pending revocation; never replay an old removal after it.
           if (!deleting) {
@@ -1389,7 +1407,9 @@ class OverseerImpl implements AgentHooks {
             }
           }
           let user = this.users.get(this.users.idFromString(update.userId));
-          await boundedUserUpdate(deleting ? user.workspaceRemoved(this.ctx.id.toString()) :
+          let finalCost = update.userId === this.storage.ownerId.get()
+            ? {totalCost: this.storage.totalCost.get(), lines: this.getCostLines()} : undefined;
+          await boundedUserUpdate(deleting ? user.workspaceRemoved(this.ctx.id.toString(), finalCost) :
             update.role === null ? user.forgetSharedWorkspace(this.ctx.id.toString()) :
               user.updateSharedWorkspaceRole(this.ctx.id.toString(), update.role));
           let current = this.storage.pendingUserUpdates.get(update.userId);
@@ -1397,11 +1417,13 @@ class OverseerImpl implements AgentHooks {
             this.storage.pendingUserUpdates.delete(update.userId);
           }
         } catch (error) {
+          failed = true;
           this.logger.warn("user workspace cleanup deferred", {
             event: "shared.gadget.access.refresh.failed", gadgetId: this.ctx.id.toString(), error,
           });
         }
-      }));
+      })]);
+      if (!failed) this.#userUpdatesRetryAt = 0;
       if (this.storage.deleting.get() && ![...this.storage.pendingUserUpdates.list({limit: 1})].length) {
         // RealtimeKit cleanup still owed outlives the wipe, alone, so an outage there (or a revoked
         // token) can't hold up the rest. What remains opens as not found, like any wiped workspace,
@@ -1956,7 +1978,7 @@ class OverseerImpl implements AgentHooks {
         this.#agentKeepAliveTime = this.#scheduledAlarm ?? undefined;
       }
       this.#initializeUnreadTracking();
-      if (this.storage.deleting.get() || [...this.storage.pendingUserUpdates.list({limit: 1})].length) {
+      if (this.storage.deleting.get() || this.#hasUserUpdates()) {
         this.#userUpdatesRetryAt = this.#scheduledAlarm ?? Date.now() + 1_000;
         this.#updateAlarm();
       }
@@ -1964,7 +1986,7 @@ class OverseerImpl implements AgentHooks {
     // blockConcurrencyWhile already aborted the object; consume its rejection and retry on wake.
     }).then(() => {
       this.#resumeInterruptedAgents();
-      if (this.storage.deleting.get() || [...this.storage.pendingUserUpdates.list({limit: 1})].length) {
+      if (this.storage.deleting.get() || this.#hasUserUpdates()) {
         this.ctx.waitUntil(this.deliverUserUpdates());
       }
       // Typically the revocation restart's own cleanup: kick the revoked from their call now.
@@ -7030,7 +7052,8 @@ class OverseerImpl implements AgentHooks {
   // Do we currently have a timeout scheduled after which we plan to send a last active update?
   #lastActiveBumpScheduled: boolean = false;
 
-  // Update the last-active time and cost counter as recorded for this gadget in the user-level DO.
+  // Update the last-active time as recorded for this gadget in the user-level DO. (Its cost goes
+  // by deliverUserUpdates.)
   bumpLastActive(now: Date = new Date()) {
     if (this.#lastActiveTimeKnownToUs && this.#lastActiveTimeKnownToUs >= now) {
       // Redundant bump.
@@ -7077,8 +7100,7 @@ class OverseerImpl implements AgentHooks {
 
       let lastActive = this.#lastActiveTimeKnownToUs!;
       this.#lastActiveTimeKnownToUserDo = lastActive;
-      await owner.setWorkspaceLastActive(this.ctx.id.toString(), lastActive,
-                                      this.storage.totalCost.get());
+      await owner.setWorkspaceLastActive(this.ctx.id.toString(), lastActive);
 
       // The directory's activity is precise only to DIRECTORY_ACTIVITY_INTERVAL_MS, so it hears
       // of activity far less often than the owner does.
@@ -10380,9 +10402,30 @@ class OverseerImpl implements AgentHooks {
     return withEarlier(this.storage.totalCost.get(), [...this.storage.costLines.list()]);
   }
 
-  // Where a change to the breakdown would reach a copy of it kept outside this workspace. None is
-  // kept, so there is nothing to mark.
-  #markCostDirty() {}
+  // Counts recordCost() calls, so that a delivery of the cost knows whether it is still current
+  // when it completes.
+  #costChanges = 0;
+
+  // Marks the owner's User DO as owed the cost as it now stands, which deliverUserUpdates() gives
+  // it. A workspace with no owner (being deleted) has no one to tell.
+  #markCostDirty() {
+    if (!this.ownerId) return;
+    this.#costChanges++;
+    if (this.storage.ownerCostDirty.get()) return;
+    this.storage.ownerCostDirty.put(true);
+    this.#userUpdatesRetryAt ||= Date.now() + 1_000;
+    this.#updateAlarm();
+  }
+
+  // Gives the owner's User DO the cost as it now stands, if it is owed it (see #markCostDirty).
+  async #deliverOwnerCost(): Promise<void> {
+    if (!this.ownerId || !this.storage.ownerCostDirty.get()) return;
+    let changes = this.#costChanges;
+    let owner = this.users.get(this.users.idFromString(this.ownerId));
+    await boundedUserUpdate(owner.setWorkspaceCost(
+        this.ctx.id.toString(), this.storage.totalCost.get(), this.getCostLines()));
+    if (this.#costChanges === changes) this.storage.ownerCostDirty.put(false);
+  }
 
   // Counts a text request at the cost `log` gives, else at its estimate (see textCostEntry).
   #recordTextCost(request: MeteredRequest, log: AiGatewayLogRecord | undefined,
@@ -12504,7 +12547,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Mark gadget as non-provisional (it has code, so it should appear in the gadget list).
     // (A write, so deliberately not retried -- a reset can't distinguish "never applied" from
     // "applied, response lost".)
-    await owner().setWorkspaceLastActive(this.ctx.id.toString(), new Date(), undefined);
+    await owner().setWorkspaceLastActive(this.ctx.id.toString(), new Date());
   }
 
   async startGatekeeperSession(

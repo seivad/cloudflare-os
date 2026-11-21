@@ -331,9 +331,10 @@ async function seed(user: Live): Promise<Seeded> {
   }, { timeout: 10_000, interval: 20 });
   await instance.completeOnboarding();
   for (let n of [1, 2, 3, 4]) await instance.newWorkspace(`ws-owned-${n}`, `Owned ${n}`);
-  await instance.setWorkspaceLastActive("ws-owned-1", LAST_ACTIVE, 1.25);
-  await instance.setWorkspaceLastActive("ws-owned-2", LAST_ACTIVE, undefined);
-  await instance.setWorkspaceLastActive("ws-owned-3", LAST_ACTIVE, undefined);
+  await instance.setWorkspaceLastActive("ws-owned-1", LAST_ACTIVE);
+  instance.setWorkspaceCost("ws-owned-1", 1.25, []);
+  await instance.setWorkspaceLastActive("ws-owned-2", LAST_ACTIVE);
+  await instance.setWorkspaceLastActive("ws-owned-3", LAST_ACTIVE);
   await instance.recordSharedWorkspaceOpen("ws-shared", "Shared notes", OWNER, "build", []);
   // Linked with an expiry, then reported expired: not auto-provisioned.
   let tokenName = `https://hooks.example.test/${id}?token=webhook-token-2c8e`;

@@ -265,7 +265,7 @@ describe("UserDurableObject.recordSharedWorkspaceGrant", () => {
     let user = await signedUp(profile);
     let workspaceId = crypto.randomUUID();
     await user.newWorkspace(workspaceId, "Mine");
-    await user.setWorkspaceLastActive(workspaceId, new Date(), undefined);
+    await user.setWorkspaceLastActive(workspaceId, new Date());
     await grant(user, workspaceId, person("Other"));
     expect(await listing(user, workspaceId)).toMatchObject({title: "Mine"});
     expect(await listing(user, workspaceId)).not.toHaveProperty("owner");

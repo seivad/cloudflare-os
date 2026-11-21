@@ -1094,6 +1094,14 @@ export interface AuthenticatedApi extends RpcTarget {
   setWorkspacePinned(workspaceId: string, pinned: boolean): Promise<void>;
 
   /**
+   * What the caller is counted as having spent on AI, by kind and by model: the workspaces they
+   * own, collaborators' spend in them included, the workspaces they deleted, and their own spend
+   * outside any workspace. A workspace shared with them counts to its owner, not to them. Only the
+   * caller's own summary is readable here.
+   */
+  getMyCostSummary(): Promise<UserCostSummary>;
+
+  /**
    * List the outputs of all the user's workspaces. Used to display the Outputs page, which lets
    * the user find things they made without remembering which workspace they made them in.
    *
