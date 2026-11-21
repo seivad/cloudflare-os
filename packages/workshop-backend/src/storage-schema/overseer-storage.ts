@@ -24,8 +24,8 @@ import {
   type ActionState, type AgentSpawnerConfig, type AiChatAuthorInfo, type AiChatMessage,
   type AlwaysAvailableResource,
   type AiChatMetadata, type BlueprintBindingAnnotation, type BlueprintMetadata,
-  type BlueprintOutput, type ChatGadgetPinRecord, type CollaboratorRole, type GadgetUpstream,
-  type GatekeeperCreationSpec, type PermissionEdge, type WorkpieceId,
+  type BlueprintOutput, type ChatGadgetPinRecord, type CollaboratorRole, type CostLine,
+  type GadgetUpstream, type GatekeeperCreationSpec, type PermissionEdge, type WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import type { CodeChange } from "@gadgets/workshop-shared/code-change";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
@@ -1389,6 +1389,18 @@ export type CallStartRecord = {
 };
 
 // =======================================================================================
+// Costs
+
+/**
+ * Primary key of a `costLines` row: what a cost is broken down by. A row with no `answeredBy` and
+ * one whose `answeredBy` is undefined are the same line.
+ */
+export function costLineKey(
+    line: Pick<CostLine, "kind" | "model" | "answeredBy" | "estimated">): string {
+  return JSON.stringify([line.kind, line.model, line.answeredBy ?? null, line.estimated]);
+}
+
+// =======================================================================================
 // Schema
 
 /**
@@ -1470,6 +1482,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       ownerRegistrationPending: false,
 
       codeVersion: 0,
+      // Every cost counted to this workspace, in dollars. `costLines` breaks down what was counted
+      // since it existed; the rest is from before (see cost-ledger.ts withEarlier).
       totalCost: 0,
 
       // Next workpiece ID. This is called `nextGatekeeperId` for historical reasons (it predates
@@ -1913,6 +1927,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           }
         }
       }),
+
+      // What `totalCost` was counted from, one running total per kind, model, answering model and
+      // estimate flag, so it stays a few dozen rows however many requests there are. Written only
+      // by Overseer.recordCost, in the same step as `totalCost`.
+      costLines: collection<CostLine>()({primaryKey: costLineKey}),
     }
   });
 }

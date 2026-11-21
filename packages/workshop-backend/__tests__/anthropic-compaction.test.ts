@@ -7,7 +7,7 @@ import {
   type Message,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import type { AiChatAuthorInfo, AiChatMessage, AiChatMetadata } from "@gadgets/workshop-shared/api";
+import type { AiChatAuthorInfo, AiChatMessage, AiChatMetadata, CostLine } from "@gadgets/workshop-shared/api";
 import { runAgent, type AgentHooks } from "../src/agent.js";
 import { AgentTurnError, zeroUsage } from "../src/ai-invoke.js";
 import { getModel } from "../src/ai-models.js";
@@ -225,10 +225,11 @@ describe("Anthropic compaction", () => {
 interface OverseerInternals extends AgentHooks {
   storage: {
     gadgets: { put(record: GadgetRecord): void };
-    chatMeta: { put(meta: AiChatMetadata): void };
+    chatMeta: { get(id: number): AiChatMetadata | undefined, put(meta: AiChatMetadata): void };
     chats: { put(message: AiChatMessage): void };
   };
   nextChatSequence(chatId: number): number;
+  getCostLines(): CostLine[];
 }
 
 const OWNER: AiChatAuthorInfo = { type: "user", id: "owner@example.com", name: "Owner" };
@@ -289,6 +290,14 @@ describe("Anthropic compaction in a chat", () => {
     const checkpoint = impl.loadChatHistory(CHAT_ID).checkpoint;
     expect(checkpoint?.summary).toBe(BLOCK.content);
     expect(JSON.parse(checkpoint?.anthropicCompactionBlock ?? "null")).toStrictEqual(BLOCK);
+    // The summary request counts to the chat, at its estimate: the gateway named no log for it.
+    const [compaction] = impl.getCostLines();
+    expect(impl.getCostLines()).toEqual([{
+      kind: "text", model: "claude-sonnet-5-5", estimated: true, usd: expect.any(Number),
+      requests: 1, inputTokens: 1200, outputTokens: 80,
+    }]);
+    expect(compaction?.usd).toBeGreaterThan(0);
+    expect(impl.storage.chatMeta.get(CHAT_ID)?.totalCost).toBe(compaction?.usd);
 
     post(impl, OWNER, "Now add search.");
     respond(...REPLY_EVENTS);

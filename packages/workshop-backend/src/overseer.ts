@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import type { ChatTimelineHead, GadgetViewer } from "@gadgets/workshop-shared/api";
+import type { ChatTimelineHead, CostLine, GadgetViewer } from "@gadgets/workshop-shared/api";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { Overseer, WorkspaceMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPinRecord, MainlineMergeGadget, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AGENT_SPAWNER_CONNECTION_ID, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, CollaboratorAccess, CollaboratorGrant, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintMerge, ApplyBlueprintResult, GadgetUpstream, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenWorkspaceError, OPEN_WORKSPACE_ERROR_CODES, createGatekeeperError, GATEKEEPER_ERROR_CODES, resolveSiteName, modelKind } from '@gadgets/workshop-shared/api'
 import {
@@ -40,19 +40,22 @@ import {
   migrateToFrozenGadgetGrants, migrateToGitStorage, migrateToMultiGadget,
   migrateToSpawnerBindings, migrateToWorkpieceTypes,
 } from "./storage-schema/overseer-migrations";
-import type { Usage } from "@earendil-works/pi-ai";
 import {
   AiModelGatekeeperProps,
   getModel,
   UserGatewayRouting,
 } from "./ai-models";
-import { AgentTurnError, completeText } from "./ai-invoke";
+import { AgentTurnError, completeTextMetered, type MeteredRequest } from "./ai-invoke";
 import {
   AiGatewayLogRetryableError,
   getAiGatewayConfig,
-  getAiGatewayLogCost,
+  getAiGatewayLog,
+  type AiGatewayLogRecord,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
+import {
+  addToLine, costLineKey, textCostEntry, withEarlier, type CostAttribution, type CostEntry,
+} from "./cost-ledger";
 import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
 import { GitImpl } from "./git-binding";
@@ -1914,8 +1917,7 @@ class OverseerImpl implements AgentHooks {
             this.applyPendingAction(record, resolvedBy, autoApproved),
         id => this.#deciding.has(id));
     this.cacheWarmer = new ChatCacheWarmer(ctx.id.toString(), (chatId, resent) =>
-        this.#addRequestCost(
-            chatId, resent.usage, resent.aiGatewayLogId, resent.aiGatewayLogRoute, false));
+        this.addRequestCost(resent, {source: "chat", chatId, isActivity: false}));
 
     // Mirror every gadget-registry change into the owner's outputs index. Subscribing here makes
     // the registry the single chokepoint, so creation, acceptance, renaming, reverting and
@@ -3595,8 +3597,7 @@ class OverseerImpl implements AgentHooks {
         blueprintMerges: BlueprintMerge[],
         reRoots?: {worktreeId: WorkpieceId, baseCommit: string}[],
       },
-      usage?: Usage, aiGatewayLogId?: string,
-      aiGatewayLogRoute?: AiGatewayLogRoute): Promise<boolean> {
+      request?: MeteredRequest): Promise<boolean> {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) return false;  // chat deleted mid-turn
 
@@ -3768,7 +3769,7 @@ class OverseerImpl implements AgentHooks {
           this.storage.activeAgents.put(execution);
         }
 
-        this.addChatMessages(chatId, author, msgs, usage, aiGatewayLogId, aiGatewayLogRoute);
+        this.addChatMessages(chatId, author, msgs, request);
         let written = this.materializeChatChanges(chatId, undefined, {
           author,
           allowDuringTurn: true,
@@ -9195,13 +9196,15 @@ class OverseerImpl implements AgentHooks {
 
   // Choose a binding name for a resource using the quick model, validated and deduped. Returns
   // undefined on any failure (error, timeout, invalid or colliding output) so the caller can
-  // fall back to a deterministic name.
+  // fall back to a deterministic name. The request's cost counts to the chat `chatId` names, if
+  // any.
   async generateBindingName(
       subject: string, takenNames: Set<string>,
-      quick: {config: AiModelConfig, initiator: AiChatAuthorInfo}): Promise<string | undefined> {
+      quick: {config: AiModelConfig, initiator: AiChatAuthorInfo},
+      chatId: number | undefined): Promise<string | undefined> {
     try {
       let model = getModel(this.env, quick.config, quick.initiator);
-      let result = await completeText(model, {
+      let {text: result, ...request} = await completeTextMetered(model, {
         signal: AbortSignal.timeout(10_000),
         prompt:
             `Choose a short, meaningful JavaScript identifier in ALL_CAPS_WITH_UNDERSCORES ` +
@@ -9216,6 +9219,7 @@ class OverseerImpl implements AgentHooks {
             `\n========== resource description below this line ==========\n` +
             subject,
       });
+      this.addRequestCost(request, {source: "title", chatId, isActivity: true});
       let name = result.trim();
       validateBindingName(name);
       if (takenNames.has(name)) return undefined;
@@ -9483,7 +9487,7 @@ class OverseerImpl implements AgentHooks {
           let existing = nameByTarget.get(target);
           if (existing !== undefined) return existing;
         }
-        let name = quick ? await this.generateBindingName(subject, taken, quick) : undefined;
+        let name = quick ? await this.generateBindingName(subject, taken, quick, chatId) : undefined;
         if (name === undefined) {
           let suggested: string | undefined;
           if (target !== undefined && this.storage.gatekeepers.get(target)) {
@@ -10144,7 +10148,7 @@ class OverseerImpl implements AgentHooks {
         metadata: { source: "thread-title", gadgetId: this.ctx.id.toString(), chatId },
       });
 
-      let result = await completeText(model, {
+      let {text: result, ...request} = await completeTextMetered(model, {
         // TODO: Is there a better way to convince the LLM just to summarize and not to follow
         //   instructions in the user message? I tried putting the paragraph in the system
         //   prompt and putting the initial message into `prompt` and also into `messages` and
@@ -10156,6 +10160,7 @@ class OverseerImpl implements AgentHooks {
                 "========== user message below this line ==========\n" +
                 `${initialMessage}`,
       });
+      this.addRequestCost(request, {source: "title", chatId, isActivity: true});
 
       let meta = this.storage.chatMeta.get(chatId);
       if (!meta) {
@@ -10175,8 +10180,6 @@ class OverseerImpl implements AgentHooks {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         await owner.updateTitle(this.ctx.id.toString(), result);
       }
-
-      // TODO: Should we track costs for title generation? It's pretty negligible.
     } catch (err) {
       // Oh well, just leave the title as "New Chat".
       this.logger.warn("error generating chat title", {
@@ -10201,7 +10204,7 @@ class OverseerImpl implements AgentHooks {
         metadata: { source: "gadget-title", gadgetId: this.ctx.id.toString(), chatId },
       });
 
-      let gadgetTitle = await completeText(model, {
+      let {text: gadgetTitle, ...request} = await completeTextMetered(model, {
         prompt: "Below is the log of a chat session that led to a coding agent writing " +
                 "code for a small application. Based on the conversation, please generate " +
                 "a short name (2-5 words) for the app or tool the user is trying to build. " +
@@ -10211,6 +10214,7 @@ class OverseerImpl implements AgentHooks {
                 "========== chat log below this line ==========\n" +
                 `${parts.join("\n")}`,
       });
+      this.addRequestCost(request, {source: "title", chatId, isActivity: true});
       let title = gadgetTitle.trim();
       if (title && this.ownerId) {
         this.storage.title.put(title);
@@ -10226,9 +10230,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   addChatMessages(chatId: number, author: AiChatAuthorInfo,
-        msgs: AiChatMessageBodyWithModelData[],
-        usage?: Usage, aiGatewayLogId?: string,
-        aiGatewayLogRoute?: AiGatewayLogRoute): void {
+        msgs: AiChatMessageBodyWithModelData[], request?: MeteredRequest): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -10317,6 +10319,7 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
+    let usage = request?.usage;
     if (usage !== undefined) {
       meta.totalTokens = usage.totalTokens;
       meta.promptTokens =
@@ -10328,23 +10331,21 @@ class OverseerImpl implements AgentHooks {
     meta.lastActive = this.getChatTimestamp();
     this.storage.chatMeta.put(meta);
 
-    this.#addRequestCost(chatId, usage, aiGatewayLogId, aiGatewayLogRoute, true);
+    if (request) this.addRequestCost(request, {source: "chat", chatId, isActivity: true});
   }
 
-  // Adds a model request's cost to the chat's and workspace's totals: the cost AI Gateway logged
-  // for it where it went through one, else the catalog-priced estimate in `usage`. See
-  // #addChatCost for `isActivity`.
-  #addRequestCost(chatId: number, usage: Usage | undefined, aiGatewayLogId: string | undefined,
-                  aiGatewayLogRoute: AiGatewayLogRoute | undefined, isActivity: boolean) {
+  // AgentHooks implementation: counts a model request's cost, as `to` says: the cost AI Gateway
+  // logged for it where it went through one, else the catalog-priced estimate in its `usage`.
+  addRequestCost(request: MeteredRequest, to: CostAttribution) {
+    let {aiGatewayLogId, aiGatewayLogRoute} = request;
     if (aiGatewayLogId && aiGatewayLogRoute) {
       // Best-effort UI accounting only. The log ID is not persisted, so a DO restart can lose
       // this update. Do not use this total as a billing source of truth.
-      void this.#getCostFromAiGateway(
-          chatId, aiGatewayLogRoute, aiGatewayLogId, usage?.cost.total, isActivity);
-    } else if (usage?.cost.total) {
+      void this.#getCostFromAiGateway(request, aiGatewayLogRoute, aiGatewayLogId, to);
+    } else {
       // No AI Gateway log to consult (direct provider access, or a gateway response that didn't
       // surface a log id): fall back to the caller's catalog-priced estimate.
-      this.#addChatCost(chatId, usage.cost.total, isActivity);
+      this.#recordTextCost(request, undefined, to);
     }
   }
 
@@ -10352,40 +10353,58 @@ class OverseerImpl implements AgentHooks {
     return this.storage.chatModelData.get(chatKey(chatId, sequence))?.message;
   }
 
-  // Adds an inference cost (in dollars) to a chat's running total and the workspace-wide total.
+  // Counts a cost (in dollars) in one synchronous step: to the workspace's total and its line of
+  // the breakdown, and to the chat's total when `chatId` names one. A cost whose chat has since
+  // been deleted still counts to the workspace, which paid for it.
+  //
   // A turn's cost also moves lastActive, though it isn't really activity: subscribeToChat's
   // catch-up lists only chats whose lastActive moved, and AI Gateway's cost lands after the turn.
-  // A cache warm ping's cost doesn't, or a chat left open would rise to the top of every list
-  // every few minutes. Catch-up-only subscribers see a ping's cost with the chat's next activity,
-  // and the owner's workspace list with the workspace's.
-  #addChatCost(chatId: number, cost: number, isActivity: boolean) {
-    let meta = this.storage.chatMeta.get(chatId);
-    if (!meta) {
-      // Chat thread deleted?
-      return;
+  // A cache warm ping's cost doesn't (`isActivity` false), or a chat left open would rise to the
+  // top of every list every few minutes. Catch-up-only subscribers see a ping's cost with the
+  // chat's next activity, and the owner's workspace list with the workspace's.
+  recordCost(entry: CostEntry & CostAttribution): void {
+    let meta = entry.chatId === undefined ? undefined : this.storage.chatMeta.get(entry.chatId);
+    if (meta) {
+      meta.totalCost = (meta.totalCost ?? 0) + entry.usd;
+      if (entry.isActivity) meta.lastActive = this.getChatTimestamp();
+      this.storage.chatMeta.put(meta);
     }
-
-    meta.totalCost = (meta.totalCost ?? 0) + cost;
-    if (isActivity) meta.lastActive = this.getChatTimestamp();
-
-    this.storage.chatMeta.put(meta);
-    this.storage.totalCost.put(this.storage.totalCost.get() + cost);
+    this.storage.totalCost.put(this.storage.totalCost.get() + entry.usd);
+    this.storage.costLines.put(addToLine(this.storage.costLines.get(costLineKey(entry)), entry));
+    this.#markCostDirty();
   }
 
-  // Fetches an AI Gateway log entry and adds the cost to the given chat ID's cost indicator.
-  // If the gateway can't produce a (positive) cost -- fetch failure, or the gateway doesn't
-  // price this model -- falls back to `estimatedCost` (the caller's catalog-priced estimate)
-  // so the indicator degrades to an estimate rather than silently omitting the turn.
+  // This workspace's cost breakdown, which sums to its total: the lines counted since costs were
+  // broken down, and one "earlier" line for what was counted before.
+  getCostLines(): CostLine[] {
+    return withEarlier(this.storage.totalCost.get(), [...this.storage.costLines.list()]);
+  }
+
+  // Where a change to the breakdown would reach a copy of it kept outside this workspace. None is
+  // kept, so there is nothing to mark.
+  #markCostDirty() {}
+
+  // Counts a text request at the cost `log` gives, else at its estimate (see textCostEntry).
+  #recordTextCost(request: MeteredRequest, log: AiGatewayLogRecord | undefined,
+                  to: CostAttribution) {
+    let entry = textCostEntry(request, log);
+    if (entry) this.recordCost({...entry, ...to});
+  }
+
+  // Fetches a request's AI Gateway log and counts the cost it gives. If the gateway can't produce
+  // a (positive) cost -- fetch failure, or the gateway doesn't price this model -- the request
+  // counts at the caller's catalog-priced estimate, so the indicator degrades to an estimate
+  // rather than silently omitting it.
   //
   // TODO: Get AI gateway to add cost data to response headers -- it's dumb that we need a
   //   separate request!
-  async #getCostFromAiGateway(chatId: number, route: AiGatewayLogRoute, aiGatewayLogId: string,
-                              estimatedCost: number | undefined, isActivity: boolean) {
-    let cost: number | undefined;
+  async #getCostFromAiGateway(request: MeteredRequest, route: AiGatewayLogRoute,
+                              aiGatewayLogId: string, to: CostAttribution) {
+    let log: AiGatewayLogRecord | undefined;
     try {
       for (let attempt = 0; attempt < 4; ++attempt) {
         try {
-          cost = await getAiGatewayLogCost(this.env, route, aiGatewayLogId);
+          log = await getAiGatewayLog(this.env, route, aiGatewayLogId);
           break;
         } catch (err) {
           if (!(err instanceof AiGatewayLogRetryableError) || attempt === 3) throw err;
@@ -10401,11 +10420,7 @@ class OverseerImpl implements AgentHooks {
         event: "ai.gateway.cost.log.fetch.failed", error: err,
       });
     }
-
-    cost ||= estimatedCost;
-    if (cost) {
-      this.#addChatCost(chatId, cost, isActivity);
-    }
+    this.#recordTextCost(request, log, to);
   }
 
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
@@ -13117,7 +13132,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           () => this.#clientUser.getChatContext(null), this.impl.logger);
       if (userMeta.quickModel) {
         bindingName = await this.impl.generateBindingName(
-            title, taken, {config: userMeta.quickModel, initiator: userMeta.profile});
+            title, taken, {config: userMeta.quickModel, initiator: userMeta.profile}, chatId);
       }
       bindingName ??= fallbackBindingName("GADGET", name => taken.has(name));
     } else if (chatNames?.has(bindingName)) {

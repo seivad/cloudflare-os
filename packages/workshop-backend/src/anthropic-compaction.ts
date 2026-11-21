@@ -12,7 +12,7 @@
 // prompt (its gadget list or always-available resources), the API drops it, as pi's `drop_block`
 // asks, and the turn runs as it would after a summary the agent wrote.
 
-import type { Api, Context, Model } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, Usage } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import { AgentTurnError, httpStatusFromError } from "./ai-invoke.js";
 import type { ModelHandle, ModelStreamOptions } from "./ai-models.js";
@@ -77,8 +77,11 @@ export function supportsAnthropicCompaction(model: Model<Api>): boolean {
       Object.hasOwn(COMPACTION_MODELS, model.id);
 }
 
-/** A summary Anthropic wrote: its text, and the block that carries it, as JSON. */
-export type AnthropicCompaction = { summary: string; block: string };
+/**
+ * A summary Anthropic wrote: its text, the block that carries it, as JSON, and what the request
+ * used, for its cost.
+ */
+export type AnthropicCompaction = { summary: string; block: string; usage: Usage };
 
 /**
  * Have Anthropic summarize the messages of `context`, which must be the request a turn would send
@@ -121,7 +124,7 @@ export async function requestAnthropicCompaction(
   if (block === undefined || block.content.trim() === "") {
     throw new Error(`Compaction produced no summary (stop reason ${result.rawStopReason}).`);
   }
-  return { summary: block.content, block: JSON.stringify(block) };
+  return { summary: block.content, block: JSON.stringify(block), usage: result.usage };
 }
 
 /**

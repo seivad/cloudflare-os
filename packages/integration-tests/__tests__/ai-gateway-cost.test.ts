@@ -9,8 +9,12 @@ import {
   connect, logIn, nextUsernames, signUp, waitFor, waitForIdleChat,
 } from "../src/rpc-client.js";
 
-const LOG_URL = "https://api.cloudflare.com/client/v4/accounts/gateway-account-id/ai-gateway/gateways/" +
-    "platform-gateway/logs/scripted-log-id";
+const LOGS_URL = "https://api.cloudflare.com/client/v4/accounts/gateway-account-id/ai-gateway/gateways/" +
+    "platform-gateway/logs/";
+const LOG_URL = `${LOGS_URL}scripted-log-id`;
+// Every chat's title, which the deployment's quick model writes, is logged at this cost.
+const TITLE_LOG_URL = `${LOGS_URL}title-log-id`;
+const TITLE_COST = 0.25;
 
 // One reply for each chat turn the cases below run, in order, then one for each model test and
 // one for each provider test.
@@ -29,10 +33,15 @@ const network = new NetworkInterceptor({
         ? new Response("not yet", { status: 404 })
         : Response.json({ success: true, result: { cost: 1.25 } });
     }
+    if (method === "GET" && url.href === TITLE_LOG_URL) {
+      return Response.json({ success: true, result: { cost: TITLE_COST } });
+    }
+    const titles = model.auxiliaryRequests.length;
     const response = await model.handler(url, method, headers, request);
+    const logId = model.auxiliaryRequests.length > titles ? "title-log-id" : "scripted-log-id";
     return response && new Response(response.body, {
       status: response.status,
-      headers: { ...Object.fromEntries(response.headers), "cf-aig-log-id": "scripted-log-id" },
+      headers: { ...Object.fromEntries(response.headers), "cf-aig-log-id": logId },
     });
   }],
 });
@@ -65,17 +74,22 @@ afterAll(async () => {
   }
 });
 
-it("a chat is charged the AI Gateway log's cost in place of the estimate", async () => {
+it("a chat is charged the AI Gateway log's cost in place of the estimate, its title included",
+    async () => {
   using publicApi = connect(harness.url);
   using api = await signUp(publicApi, nextUsernames("gatewaycost")[0]!);
   using ws = await api.newWorkspace();
 
   const chatId = await ws.newChat("What does this cost?", SCRIPTED_MODEL_ID);
   await waitForIdleChat(ws, chatId);
+  // The turn's logged 1.25 and the title's logged cost. The catalog's estimates for the scripted
+  // token counts are far below a cent, so either one counted at its estimate would show.
+  const charged = 1.25 + TITLE_COST;
   await waitFor("the gateway cost", async () =>
-    (await ws.listChats()).find(chat => chat.id === chatId)?.totalCost === 1.25 || null);
-  expect((await ws.getMetadata()).totalCost).toBe(1.25);
+    (await ws.listChats()).find(chat => chat.id === chatId)?.totalCost === charged || null);
+  expect((await ws.getMetadata()).totalCost).toBe(charged);
   expect(logReads).toBe(2);
+  expect(model.auxiliaryRequests.map(({ kind }) => kind)).toEqual(["thread-title"]);
 });
 
 const ADDED: GatewayModel = {
