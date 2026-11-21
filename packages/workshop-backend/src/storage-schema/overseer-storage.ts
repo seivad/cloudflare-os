@@ -1455,6 +1455,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Every cost counted to this workspace, in dollars. `costLines` breaks down what was counted
       // since it existed; the rest is from before (see cost-ledger.ts withEarlier).
       totalCost: 0,
+      // Whether the owner's User DO has yet to be told the cost as it now stands (see
+      // Overseer.deliverUserUpdates, which tells it, and clears this once it has).
+      ownerCostDirty: false,
 
       // Next workpiece ID. This is called `nextGatekeeperId` for historical reasons (it predates
       // the ability to have multiple gadgets per workspace), but it is actually used to allocate

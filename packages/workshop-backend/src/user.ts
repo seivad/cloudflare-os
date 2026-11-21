@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import type { CallInvite, ChatReadState, ChatTimelineHead, UnreadStateScope, UnreadStateSubscriber, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
+import type { CallInvite, ChatReadState, ChatTimelineHead, CostLine, UnreadStateScope, UnreadStateSubscriber, UserCostSummary, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceCostSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
 import { WorkspaceMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, WorkspaceMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart, type WebPushSubscription } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -15,6 +15,7 @@ import {
 } from "./storage-schema/user-storage.js";
 import { chatKey, chatKeyPrefix } from "./storage-schema/overseer-storage.js";
 import { recordAnalytics } from "./analytics";
+import { addCost, byKind, byModel, mergeLines, withEarlier, type CostEntry } from "./cost-ledger.js";
 import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
@@ -1123,8 +1124,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.#unreadChanged(workspaceId, chatId);
   }
 
-  /** Remove the listing and its accepted work before the source is destroyed; no callback read. */
-  async workspaceRemoved(workspaceId: string): Promise<void> {
+  /**
+   * Remove the listing and its accepted work before the source is destroyed; no callback read.
+   * The owner is also handed the workspace's final cost, which deleteWorkspace() keeps.
+   */
+  async workspaceRemoved(workspaceId: string,
+                         finalCost?: {totalCost: number; lines: CostLine[]}): Promise<void> {
+    if (finalCost) this.setWorkspaceCost(workspaceId, finalCost.totalCost, finalCost.lines);
     await this.deleteWorkspace(workspaceId);
     await this.#armExpirySweep();
   }
@@ -1658,7 +1664,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async listWorkspaces(): Promise<WorkspaceMetadataWithTimestamps[]> {
     let result: WorkspaceMetadataWithTimestamps[] = [];
-    for (let workspace of this.storage.gadgets.list()) {
+    for (let {costLines: _costLines, ...workspace} of this.storage.gadgets.list()) {
       if (isFullyCreated(workspace)) {
         result.push(workspace);
       }
@@ -1698,18 +1704,67 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     await this.newWorkspace(id, title);
   }
 
-  async setWorkspaceLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {
+  async setWorkspaceLastActive(id: string, time: Date): Promise<void> {
     let workspace = this.storage.gadgets.get(id);
     if (workspace) {
       workspace.lastActive = time;
-      if (totalCost) {
-        workspace.totalCost = totalCost;
-      }
       this.storage.gadgets.put(workspace);
     }
   }
 
+  /**
+   * The cost of a workspace this user owns, as its Overseer counts it: the total and the lines it
+   * was counted from. Ignored for a workspace shared with the user, whose cost is its owner's.
+   * It leaves lastActive alone: spending is not activity.
+   */
+  setWorkspaceCost(id: string, totalCost: number, lines: CostLine[]): void {
+    let workspace = this.storage.gadgets.get(id);
+    if (!workspace || workspace.owner) return;
+    workspace.totalCost = totalCost;
+    workspace.costLines = lines;
+    this.storage.gadgets.put(workspace);
+  }
+
+  /** Counts a cost the user incurred outside any workspace. */
+  addOwnCost(entry: CostEntry & {source: "voice"}): void {
+    this.storage.ownCostLines.put(addCost(this.storage.ownCostLines.get(), entry));
+  }
+
+  /**
+   * What this user is counted as having spent: the workspaces they own (collaborators' spend in
+   * them included), the workspaces they deleted, and their own spend outside any workspace.
+   */
+  getCostSummary(): UserCostSummary {
+    let workspaces: WorkspaceCostSummary[] = [];
+    for (let workspace of this.storage.gadgets.list()) {
+      if (workspace.owner || !workspace.totalCost) continue;
+      workspaces.push({workspaceId: workspace.id, title: workspace.title, totalCost: workspace.totalCost,
+        lines: withEarlier(workspace.totalCost, workspace.costLines ?? [])});
+    }
+    let deletedWorkspaces = this.storage.deletedWorkspaceCost.get();
+    let ownLines = this.storage.ownCostLines.get();
+    let own = {totalCost: ownLines.reduce((sum, line) => sum + line.usd, 0), lines: ownLines};
+    let lines = [...workspaces.flatMap(workspace => workspace.lines), ...deletedWorkspaces.lines, ...ownLines];
+    return {
+      totalCost: workspaces.reduce((sum, workspace) => sum + workspace.totalCost, 0) +
+          deletedWorkspaces.totalCost + own.totalCost,
+      byKind: byKind(lines),
+      byModel: byModel(lines),
+      workspaces,
+      deletedWorkspaces,
+      own,
+    };
+  }
+
   async deleteWorkspace(id: string): Promise<void> {
+    let workspace = this.storage.gadgets.get(id);
+    if (workspace && !workspace.owner && workspace.totalCost) {
+      let deleted = this.storage.deletedWorkspaceCost.get();
+      this.storage.deletedWorkspaceCost.put({
+        totalCost: deleted.totalCost + workspace.totalCost,
+        lines: mergeLines(deleted.lines, withEarlier(workspace.totalCost, workspace.costLines ?? [])),
+      });
+    }
     this.storage.gadgets.delete(id);
     this.storage.outputs.byWorkspace.delete(id);
     this.#forgetUnreadWorkspace(id);

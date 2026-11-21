@@ -6,7 +6,7 @@
 
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import type {
-  AiChatAuthorInfo, AiModelConfig, BlueprintMetadata, BlueprintOutput,
+  AiChatAuthorInfo, AiModelConfig, BlueprintMetadata, BlueprintOutput, CostLine,
   WorkspaceMetadata, WorkpieceId, UserNotification, ChatTimelineHead,
 } from "@gadgets/workshop-shared/api";
 import { chatKey } from "./overseer-storage.js";
@@ -119,6 +119,13 @@ export type GadgetRecord = WorkspaceMetadata & {
   lastActive?: Date;  // if missing, gadget is provisional
   // If we're not the gadget owner (it was shared with us), `owner` is set (inherited from
   // WorkspaceMetadata).
+
+  /**
+   * What `totalCost` was counted from, as the workspace's Overseer last delivered it
+   * (Overseer.getCostLines(), which sums to the total). Kept on owned workspaces only, for the
+   * user's cost summary; absent until the workspace's first cost since costs were broken down.
+   */
+  costLines?: CostLine[];
 };
 
 /**
@@ -322,6 +329,13 @@ export function makeUserStorage(storage: DurableObjectStorage) {
 
       nextAccountId: 0,
       pinnedBlueprints: <string[]>[],
+
+      // What the user's deleted workspaces had cost: each one's total and breakdown, folded in when
+      // its record is deleted, so that deleting a workspace never takes its spend off the user.
+      deletedWorkspaceCost: <{totalCost: number; lines: CostLine[]}>{totalCost: 0, lines: []},
+
+      // What the user spent outside any workspace (voice), broken down like a workspace's costs.
+      ownCostLines: <CostLine[]>[],
 
       // Per-user free-tier daily LLM-call counter (only used when ENABLE_CLOUDFLARE_LIMITS is on).
       // Stores the current UTC day and the calls made that day; a stale `day` implicitly resets the
