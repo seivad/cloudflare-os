@@ -39,7 +39,9 @@ import {
   AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, gatewayLogRoute, getAiGatewayConfig, getGatewayModels,
   type AiGatewayLogRoute,
 } from "./ai-gateway.js";
-import { completeTextMetered } from "./ai-invoke.js";
+import {
+  completeTextMetered, observeResponse, type ObservedResponse,
+} from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 import {
   estimateSharedHeadTokens, hasGpt56PromptCaching, splitSystemPrompt,
@@ -127,9 +129,10 @@ export type ModelHandle = {
    * the Auto Router model the gateway model that answered. Reset at the start of every request
    * and set from pi's onResponse callback (which fires only once a response arrives -- an
    * SDK-level failure leaves this undefined), so consumers must read it right after the request
-   * they care about completes. Turns run requests sequentially, so this is safe.
+   * they care about completes. Turns run requests sequentially, so this is safe for them; a
+   * caller whose requests may overlap observes its own through `onResponse` (completeTextMetered).
    */
-  lastResponse?: { status: number; aiGatewayLogId?: string; routedModel?: string };
+  lastResponse?: ObservedResponse;
 
   /**
    * The most recent request `stream` sent with prompt caching on, once its response ends, if the
@@ -665,15 +668,6 @@ function reasoningOptions(model: Model<Api>, level: ReasoningLevel, maxTokens: n
 }
 
 // Case-insensitive response-header lookup (pi surfaces headers as a plain record).
-function getHeader(headers: Record<string, string>, name: string): string | undefined {
-  if (headers[name] !== undefined) return headers[name];
-  const lower = name.toLowerCase();
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === lower) return value;
-  }
-  return undefined;
-}
-
 type HandleArgs = {
   model: Model<Api>;
   // Provider auth: a plain API key (pi turns it into the SDK's native auth) and/or headers.
@@ -754,11 +748,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
         sessionId: options.sessionId ?? args.sessionAffinity,
         onResponse: async (response, responseModel) => {
-          received = {
-            status: response.status,
-            aiGatewayLogId: getHeader(response.headers, "cf-aig-log-id"),
-            routedModel: getHeader(response.headers, "cf-aig-routed-model"),
-          };
+          received = observeResponse(response);
           handle.lastResponse = received;
           await options.onResponse?.(response, responseModel);
         },
@@ -850,7 +840,7 @@ function cachedRequest(
         ...routing,
         onPayload: () => resent.payload,
         onResponse: response => {
-          aiGatewayLogId = getHeader(response.headers, "cf-aig-log-id");
+          aiGatewayLogId = observeResponse(response).aiGatewayLogId;
         },
       }).result();
       if (message.stopReason === "error" || message.stopReason === "aborted") {
