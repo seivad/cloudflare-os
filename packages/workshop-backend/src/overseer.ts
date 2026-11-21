@@ -9916,10 +9916,12 @@ class OverseerImpl implements AgentHooks {
     }
     let cost: unknown;
     try {
-      let facet = await this.getGatekeeperFacet(pending.gatekeeperId) as unknown as
-          ActionCostGatekeeperFacet;
-      cost = await withTimeout<unknown>(facet.getActionCost(pending.action), answerTimeoutMs,
-          "The gatekeeper did not answer getActionCost() in time.");
+      // Reaching the facet starts its Gatekeeper, which can hang as well as the answer can.
+      cost = await withTimeout<unknown>((async () => {
+        let facet = await this.getGatekeeperFacet(pending.gatekeeperId) as unknown as
+            ActionCostGatekeeperFacet;
+        return await facet.getActionCost(pending.action);
+      })(), answerTimeoutMs, "The gatekeeper did not answer getActionCost() in time.");
     } catch (error) {
       if (isMissingMethodError(error, "getActionCost")) {
         return this.#dropActionCost(pending, "action cost dropped: no getActionCost()");

@@ -322,6 +322,18 @@ describe("an approved action's cost", () => {
     });
   });
 
+  it("is asked for again, later, when the gatekeeper's facet can't be reached in time", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-facet-timeout");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      queue(impl, {});
+      impl.getGatekeeperFacet = () => new Promise(() => {});
+      await impl.pollActionCosts(50);
+      expect([...impl.storage.pendingActionCosts.list()])
+          .toMatchObject([{ actionRecordId: 7, attempts: 1 }]);
+    });
+  });
+
   it("is dropped on a malformed answer", async () => {
     const stub = env.TEST_OVERSEER.getByName("action-cost-malformed");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
