@@ -18,6 +18,7 @@ import { recordAnalytics } from "./analytics";
 import { addCost, byKind, byModel, mergeLines, withEarlier, type CostEntry } from "./cost-ledger.js";
 import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
+import { voiceCostEntry, type VoiceCost } from "./voice.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import type { AdminSettings } from "./admin-settings.js";
@@ -1728,6 +1729,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Counts a cost the user incurred outside any workspace. */
   addOwnCost(entry: CostEntry & {source: "voice"}): void {
     this.storage.ownCostLines.put(addCost(this.storage.ownCostLines.get(), entry));
+  }
+
+  /**
+   * Counts what a voice call cost, once its AI Gateway log gives it. Returns at once: the log is
+   * read in the background, and a call whose log can't be read counts nothing (voice has no
+   * estimate) and is warned about.
+   */
+  recordVoiceCost(cost: VoiceCost): void {
+    this.ctx.waitUntil((async () => {
+      try {
+        const entry = await voiceCostEntry(this.env, cost);
+        if (entry) this.addOwnCost(entry);
+        else logger.warn("voice call has no AI Gateway log; nothing counted", {event: "voice.cost.no_log", modelId: cost.model});
+      } catch (error) {
+        logger.warn("voice call's AI Gateway log unreadable; nothing counted", {event: "voice.cost.log.unreadable", modelId: cost.model, error});
+      }
+    })());
   }
 
   /**

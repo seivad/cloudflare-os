@@ -15,7 +15,49 @@ import {
   MAX_SPEAK_CHARS, MAX_VOICE_AUDIO_BYTES,
   type SpeakOptions, type TranscribeOptions, type VoiceModelInfo, type VoiceSpeech, type VoiceTranscript,
 } from "@gadgets/workshop-shared/api";
-import { getAiGatewayConfig, type AiGatewayConfig } from "./ai-gateway.js";
+import {
+  AiGatewayLogRetryableError, deploymentLogRoute, getAiGatewayConfig, getAiGatewayLog,
+  type AiGatewayConfig, type AiGatewayLogRecord, type AiGatewayLogRoute,
+} from "./ai-gateway.js";
+import type { CostEntry } from "./cost-ledger.js";
+
+/**
+ * What a voice call ran as, for counting its cost on the user's own ledger: the gateway log the
+ * call was made under, if the binding reported one. Internal: the client never gets it.
+ */
+export type VoiceCost = { kind: "transcription" | "speech"; model: string; gatewayLogId?: string };
+
+/** A transcript, and what it cost (see VoiceCost). */
+export type TranscribeResult = VoiceTranscript & { cost: VoiceCost };
+/** A spoken text, and what it cost (see VoiceCost). */
+export type SpeakResult = VoiceSpeech & { cost: VoiceCost };
+
+/** How many times a voice call's log is read before its cost is given up on, as the Overseer does for a chat request. */
+const VOICE_LOG_ATTEMPTS = 4;
+
+/**
+ * The cost a voice call's AI Gateway log gives, as an entry for the user's own ledger. Reads the
+ * log up to VOICE_LOG_ATTEMPTS times, waiting 1, 2 then 4 seconds between reads while the gateway
+ * says the log is not ready. Voice has no estimate: with no log id or no readable log the result
+ * is undefined and nothing is counted.
+ */
+export async function voiceCostEntry(
+  env: Cloudflare.Env, cost: VoiceCost,
+  readLog: (env: Cloudflare.Env, route: AiGatewayLogRoute, logId: string) => Promise<AiGatewayLogRecord> = getAiGatewayLog,
+  wait: (ms: number) => Promise<void> = (ms) => scheduler.wait(ms),
+): Promise<(CostEntry & { source: "voice" }) | undefined> {
+  const route = deploymentLogRoute(env);
+  if (!cost.gatewayLogId || !route) return undefined;
+  for (let attempt = 0; ; ++attempt) {
+    try {
+      const log = await readLog(env, route, cost.gatewayLogId);
+      return { kind: cost.kind, model: cost.model, estimated: false, usd: log.cost, source: "voice" };
+    } catch (error) {
+      if (!(error instanceof AiGatewayLogRetryableError) || attempt === VOICE_LOG_ATTEMPTS - 1) throw error;
+      await wait(1000 * 2 ** attempt);
+    }
+  }
+}
 
 /** One model: what a person sees of it, and how a request becomes its input. */
 type VoiceModel = VoiceModelInfo & {
@@ -97,7 +139,8 @@ const MODELS: readonly VoiceModel[] = [
   },
 ];
 
-type AiRun = { run(model: string, input: unknown, options: unknown): Promise<unknown> };
+/** The Workers AI binding's `run`, and the id of the gateway log of the call it made last. */
+type AiRun = { run(model: string, input: unknown, options: unknown): Promise<unknown>; aiGatewayLogId?: string | null };
 
 /** The gateway and binding a voice request runs through, or a refusal naming why there is none. */
 function gatewayOf(env: Cloudflare.Env): { gw: AiGatewayConfig; ai: AiRun } {
@@ -135,7 +178,7 @@ function pick(models: readonly VoiceModel[], kind: VoiceModelInfo["kind"], id: s
 const metadata = (userId: string) => ({ user: userId, source: "voice" });
 
 /** The text of a recording. See `AuthenticatedApi.transcribe`. */
-export async function transcribe(env: Cloudflare.Env, userId: string, audio: Uint8Array, contentType: string, options: TranscribeOptions = {}): Promise<VoiceTranscript> {
+export async function transcribe(env: Cloudflare.Env, userId: string, audio: Uint8Array, contentType: string, options: TranscribeOptions = {}): Promise<TranscribeResult> {
   const { gw, ai } = gatewayOf(env);
   if (!(audio instanceof Uint8Array) || audio.byteLength === 0) throw new Error("The recording is empty.");
   if (audio.byteLength > MAX_VOICE_AUDIO_BYTES) throw new Error(`The recording is larger than ${MAX_VOICE_AUDIO_BYTES / (1024 * 1024)} MB. Record a shorter piece.`);
@@ -147,14 +190,15 @@ export async function transcribe(env: Cloudflare.Env, userId: string, audio: Uin
   // A model that takes no recording of this type gives way to the default, which takes any.
   if (model.accepts && !model.accepts.some((a) => type.startsWith(a))) model = pick(models, "transcribe", undefined);
   const answer = await ai.run(model.id, model.input({ audio, contentType: type === "video/webm" ? "audio/webm" : type, language }), { gateway: { id: gw.gateway, metadata: metadata(userId) } });
+  const cost: VoiceCost = { kind: "transcription", model: model.id, gatewayLogId: ai.aiGatewayLogId ?? undefined };
   const result = answer as { text?: unknown; result?: { text?: unknown } } | null;
   const text = result?.text ?? result?.result?.text;
   if (typeof text !== "string") throw new Error(`${model.name} answered without a transcript.`);
-  return { text: text.trim(), model: model.id };
+  return { text: text.trim(), model: model.id, cost };
 }
 
 /** Text as spoken audio. See `AuthenticatedApi.speak`. */
-export async function speak(env: Cloudflare.Env, userId: string, text: string, options: SpeakOptions = {}, fetcher: typeof fetch = fetch): Promise<VoiceSpeech> {
+export async function speak(env: Cloudflare.Env, userId: string, text: string, options: SpeakOptions = {}, fetcher: typeof fetch = fetch): Promise<SpeakResult> {
   const { gw, ai } = gatewayOf(env);
   const said = typeof text === "string" ? text.trim() : "";
   if (!said) throw new Error("There is no text to speak.");
@@ -162,19 +206,20 @@ export async function speak(env: Cloudflare.Env, userId: string, text: string, o
   const model = pick(modelsFor(gw, userId), "speak", options.model);
   const voice = options.voice && model.voices?.some((v) => v.id === options.voice) ? options.voice : model.defaultVoice;
   const answer = await ai.run(model.id, model.input({ text: said, voice }), { gateway: { id: gw.gateway, metadata: metadata(userId) } });
+  const cost: VoiceCost = { kind: "speech", model: model.id, gatewayLogId: ai.aiGatewayLogId ?? undefined };
   if (answer instanceof ReadableStream) {
-    return { audio: new Uint8Array(await new Response(answer).arrayBuffer()), contentType: "audio/mpeg", model: model.id };
+    return { audio: new Uint8Array(await new Response(answer).arrayBuffer()), contentType: "audio/mpeg", model: model.id, cost };
   }
   const shaped = answer as { audio?: unknown; result?: { audio?: unknown } } | null;
   if (typeof shaped?.audio === "string") {
-    return { audio: Uint8Array.from(atob(shaped.audio), (c) => c.charCodeAt(0)), contentType: "audio/wav", model: model.id };
+    return { audio: Uint8Array.from(atob(shaped.audio), (c) => c.charCodeAt(0)), contentType: "audio/wav", model: model.id, cost };
   }
   const url = shaped?.result?.audio;
   if (typeof url === "string" && url.startsWith("https://")) {
     const response = await fetcher(url);
     if (!response.ok) throw new Error(`${model.name}'s audio could not be fetched (HTTP ${response.status}).`);
     const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim();
-    return { audio: new Uint8Array(await response.arrayBuffer()), contentType: type.startsWith("audio/") ? type : "audio/mpeg", model: model.id };
+    return { audio: new Uint8Array(await response.arrayBuffer()), contentType: type.startsWith("audio/") ? type : "audio/mpeg", model: model.id, cost };
   }
   throw new Error(`${model.name} answered without audio.`);
 }
