@@ -142,6 +142,10 @@ function disposeRpc(value: unknown): void {
 }
 
 class TestApprovalQueue extends RpcTarget {
+  // These Gatekeepers report no costs.
+  async getCostTag(): Promise<string> { return "test-tag"; }
+  async reportCost(): Promise<void> {}
+
   #submissions: Array<{actionId: number; description: unknown}> = [];
   #observations: unknown[] = [];
   #rejection?: string;

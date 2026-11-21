@@ -62,6 +62,10 @@ function failure(error: unknown): { error: string } {
   return { error: error instanceof Error ? error.message : String(error) };
 }
 class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
+  // These Gatekeepers report no costs.
+  async getCostTag(): Promise<string> { return "test-tag"; }
+  async reportCost(): Promise<void> {}
+
   actionId?: number;
   action?: ActionDescription;
   actionDescription?: string;

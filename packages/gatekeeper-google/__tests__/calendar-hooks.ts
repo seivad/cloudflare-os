@@ -16,6 +16,10 @@ export const TEST_CALENDAR_ID = "cal-1";
 export type CalendarCall = { actionId?: number; action?: ActionDescription; error?: string };
 
 class RecordingApprovalQueue extends RpcTarget implements ApprovalQueue {
+  // These Gatekeepers report no costs.
+  async getCostTag(): Promise<string> { return "test-tag"; }
+  async reportCost(): Promise<void> {}
+
   actionId?: number;
   action?: ActionDescription;
 

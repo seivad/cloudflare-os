@@ -99,6 +99,10 @@ async function getAccessToken(): Promise<string> {
 }
 
 class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
+  // These Gatekeepers report no costs.
+  async getCostTag(): Promise<string> { return "test-tag"; }
+  async reportCost(): Promise<void> {}
+
   readonly observations: ObservationDescription[] = [];
   /** Titles this queue refuses to authorize. */
   readonly refuse = new Set<string>();
