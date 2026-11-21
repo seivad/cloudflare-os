@@ -4,8 +4,8 @@ import { runInDurableObject } from "cloudflare:test";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AiChatMetadata, CostLine } from "@gadgets/workshop-shared/api";
 import {
-  addCost, byKind, byModel, costLineKey, mergeLines, textCostEntry, withEarlier,
-  type CostAttribution, type CostEntry,
+  actionCostEntry, addCost, byKind, byModel, costLineKey, isActionCost, mergeLines, textCostEntry,
+  withEarlier, type CostAttribution, type CostEntry,
 } from "../src/cost-ledger.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import {
@@ -235,9 +235,14 @@ interface ActionCostPolling {
       put(record: PendingActionCost): void;
       list(): Iterable<PendingActionCost>;
     };
+    countedCostLogs: {
+      put(record: { logId: string; countedAt: number }): void;
+      list(): Iterable<{ logId: string; countedAt: number }>;
+    };
   };
   getGatekeeperFacet: (id: number) => Promise<unknown>;
-  pollActionCosts(): Promise<void>;
+  pollActionCosts(answerTimeoutMs?: number): Promise<void>;
+  getCostLines(): CostLine[];
 }
 
 describe("an approved action's cost", () => {
@@ -274,6 +279,41 @@ describe("an approved action's cost", () => {
     });
   });
 
+  it("is asked for again, later, when the gatekeeper doesn't answer in time", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-timeout");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      queue(impl, { getActionCost: () => new Promise(() => {}) });
+      await impl.pollActionCosts(50);
+      expect([...impl.storage.pendingActionCosts.list()])
+          .toMatchObject([{ actionRecordId: 7, attempts: 1 }]);
+    });
+  });
+
+  it("is dropped on a malformed answer", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-malformed");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      queue(impl, { getActionCost: async () => ({ state: "spent", kind: "video", model: "m",
+        estimateUsd: -1 }) });
+      await impl.pollActionCosts();
+      expect([...impl.storage.pendingActionCosts.list()]).toEqual([]);
+      expect(impl.getCostLines()).toEqual([]);
+    });
+  });
+
+  it("forgets counted logs once they are past the age a log is refused at", async () => {
+    const stub = env.TEST_OVERSEER.getByName("action-cost-prune");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: ActionCostPolling }).impl;
+      const DAY = 24 * 60 * 60 * 1000;
+      impl.storage.countedCostLogs.put({ logId: "old", countedAt: Date.now() - 32 * DAY });
+      impl.storage.countedCostLogs.put({ logId: "recent", countedAt: Date.now() - 30 * DAY });
+      await impl.pollActionCosts();
+      expect([...impl.storage.countedCostLogs.list()].map(row => row.logId)).toEqual(["recent"]);
+    });
+  });
+
   it("is given up on a week after it was queued", async () => {
     const stub = env.TEST_OVERSEER.getByName("action-cost-give-up");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
@@ -284,5 +324,50 @@ describe("an approved action's cost", () => {
       expect(getActionCost).not.toHaveBeenCalled();
       expect([...impl.storage.pendingActionCosts.list()]).toEqual([]);
     });
+  });
+});
+
+describe("what an approved action that spent counts as", () => {
+  const NOW = Date.UTC(2026, 10, 21);
+  const DAY = 24 * 60 * 60 * 1000;
+  const SPENT = { state: "spent", kind: "video", model: "google/veo-3", estimateUsd: 9 } as const;
+  const ESTIMATE = { kind: "video", model: "google/veo-3", estimated: true, usd: 5 };
+  const log = (overrides: object = {}) => ({
+    cost: 0.94, model: "google/veo-3", metadata: { tag: "mine" }, createdAt: new Date(NOW - DAY),
+    ...overrides,
+  });
+
+  it("is its log's cost, answered by the model the log names where it isn't the one picked", () => {
+    expect(actionCostEntry(SPENT, log({ model: "google/veo-3-fast", tokensOut: 10 }), "mine", NOW))
+        .toEqual({ kind: "video", model: "google/veo-3", answeredBy: "google/veo-3-fast",
+          estimated: false, usd: 0.94, outputTokens: 10 });
+    expect(actionCostEntry(SPENT, log(), "mine", NOW))
+        .toEqual({ kind: "video", model: "google/veo-3", estimated: false, usd: 0.94 });
+  });
+
+  it("is the capped estimate for a log over 31 days old, or of unknown age", () => {
+    expect(actionCostEntry(SPENT, log({ createdAt: new Date(NOW - 32 * DAY) }), "mine", NOW))
+        .toEqual(ESTIMATE);
+    expect(actionCostEntry(SPENT, log({ createdAt: undefined }), "mine", NOW)).toEqual(ESTIMATE);
+  });
+
+  it("is the capped estimate with no log, or an untagged one", () => {
+    expect(actionCostEntry(SPENT, undefined, "mine", NOW)).toEqual(ESTIMATE);
+    expect(actionCostEntry(SPENT, log({ metadata: {} }), "mine", NOW)).toEqual(ESTIMATE);
+    expect(actionCostEntry(SPENT, log({ metadata: undefined }), undefined, NOW)).toEqual(ESTIMATE);
+  });
+
+  it("is nothing for a log with another tag, including when the gatekeeper was given none", () => {
+    expect(actionCostEntry(SPENT, log({ metadata: { tag: "theirs" } }), "mine", NOW)).toBeNull();
+    expect(actionCostEntry(SPENT, log(), undefined, NOW)).toBeNull();
+  });
+
+  it("is only ever counted from a well-formed answer", () => {
+    expect(isActionCost({ state: "pending" })).toBe(true);
+    expect(isActionCost(SPENT)).toBe(true);
+    expect(isActionCost({ ...SPENT, kind: "hologram" })).toBe(false);
+    expect(isActionCost({ ...SPENT, estimateUsd: Number.NaN })).toBe(false);
+    expect(isActionCost({ ...SPENT, gatewayLogId: 7 })).toBe(false);
+    expect(isActionCost(null)).toBe(false);
   });
 });

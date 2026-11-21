@@ -139,10 +139,15 @@ function summaryCounting(api: RpcStub<AuthenticatedApi>, total: number): Promise
   });
 }
 
+/** A log AI Gateway made a minute ago, of a request whose metadata was `metadata`. */
+function setLog(logId: string, metadata: object) {
+  const createdAt = new Date(Date.now() - 60_000).toISOString();
+  logs.set(logId, { cost: 0.94, model: "google/veo-3", metadata, created_at: createdAt });
+}
+
 /** A log of this connection's, as AI Gateway records a request made with its tag. */
 async function logFor(resourceUrl: string, logId: string) {
-  const tag = await costTag(resourceUrl);
-  logs.set(logId, { cost: 0.94, model: "google/veo-3", metadata: { tag } });
+  setLog(logId, { tag: await costTag(resourceUrl) });
 }
 
 it("an approved spending action is counted from its gateway log", async () => {
@@ -195,11 +200,26 @@ it("the same log id reported by two actions is counted once", async () => {
       [{ ...VIDEO, estimated: false, usd: 0.94, requests: 1 }]);
 });
 
-it("a log whose tag is not this gatekeeper's counts the capped estimate instead", async () => {
+it("a log whose tag is not this gatekeeper's counts nothing", async () => {
   using workspace = await testWorkspace("actioncosttag");
   const { session } = await workspace.bind();
   const logId = crypto.randomUUID();
-  logs.set(logId, { cost: 0.94, model: "google/veo-3", metadata: { tag: "another-gatekeepers" } });
+  setLog(logId, { tag: "another-gatekeepers" });
+  const action = await spend(workspace, session, 1, spentVideo(logId, 9));
+
+  await decide(workspace.ws, 1);
+  await waitFor("a poll", async () => await polls(workspace.label, action) > 0 || null);
+  // Long enough for a count to have reached the summary, or for more polls had it gone on.
+  await sleep(1_500);
+  expect(await polls(workspace.label, action)).toBe(1);
+  expect((await workspace.api.getMyCostSummary()).totalCost).toBe(0);
+});
+
+it("an untagged log counts the capped estimate instead", async () => {
+  using workspace = await testWorkspace("actioncostuntagged");
+  const { session } = await workspace.bind();
+  const logId = crypto.randomUUID();
+  setLog(logId, {});
   await spend(workspace, session, 1, spentVideo(logId, 9));
 
   await decide(workspace.ws, 1);
@@ -210,7 +230,7 @@ it("a log whose tag is not this gatekeeper's counts the capped estimate instead"
 
 it("falls back to the estimate once after the log stays unreadable", async () => {
   using workspace = await testWorkspace("actioncostunread");
-  const { session } = await workspace.bind();
+  const { session, resourceUrl } = await workspace.bind();
   const logId = crypto.randomUUID();
   await spend(workspace, session, 1, spentVideo(logId, 0.5));
 
@@ -219,6 +239,13 @@ it("falls back to the estimate once after the log stays unreadable", async () =>
   expect(summary.workspaces[0]!.lines).toEqual(
       [{ ...VIDEO, estimated: true, usd: 0.5, requests: 1 }]);
   expect(logReads.get(logId)).toBe(6);
+
+  // The log counted at the estimate counts no more once it can be read, for any action.
+  await logFor(resourceUrl, logId);
+  const again = await spend(workspace, session, 2, spentVideo(logId, 0.5));
+  await decide(workspace.ws, 2);
+  await waitFor("the second action's poll", async () =>
+    await polls(workspace.label, again) > 0 || null);
   await sleep(1_500);
   expect((await workspace.api.getMyCostSummary()).totalCost).toBe(0.5);
   expect(logReads.get(logId)).toBe(6);

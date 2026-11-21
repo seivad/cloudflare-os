@@ -109,16 +109,20 @@ export function isActionCost(value: unknown): value is ActionCost {
 }
 
 /**
- * What an approved action that spent counts as: the cost AI Gateway logged for it, where `log`
- * carries the tag its Gatekeeper was given (`tag`) and is no older than MAX_REPORTED_LOG_AGE_DAYS
- * at `now`; else the Gatekeeper's estimate, up to MAX_UNLOGGED_ACTION_COST_USD.
+ * What an approved action that spent counts as, or null for nothing. The cost AI Gateway logged
+ * for it, where `log` carries the tag its Gatekeeper was given (`tag`) and was made no more than
+ * MAX_REPORTED_LOG_AGE_DAYS before `now`. Null where the log carries another tag: a Gatekeeper
+ * reporting another's log has no estimate worth taking either. Otherwise (no log, an untagged log,
+ * or one too old or of unknown age) the Gatekeeper's estimate, up to MAX_UNLOGGED_ACTION_COST_USD.
  */
 export function actionCostEntry(
     cost: Extract<ActionCost, { state: "spent" }>, log: AiGatewayLogRecord | undefined,
-    tag: string | undefined, now: number): CostEntry {
+    tag: string | undefined, now: number): CostEntry | null {
   let { kind, model } = cost;
-  if (log === undefined || tag === undefined || log.metadata?.tag !== tag ||
-      (log.createdAt !== undefined && now - log.createdAt.valueOf() > MAX_REPORTED_LOG_AGE_MS)) {
+  let logTag = log?.metadata?.tag;
+  if (logTag !== undefined && logTag !== tag) return null;
+  if (log === undefined || logTag === undefined || log.createdAt === undefined ||
+      now - log.createdAt.valueOf() > MAX_REPORTED_LOG_AGE_MS) {
     return { kind, model, estimated: true,
       usd: Math.min(cost.estimateUsd, MAX_UNLOGGED_ACTION_COST_USD) };
   }
