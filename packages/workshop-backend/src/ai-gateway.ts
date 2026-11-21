@@ -637,7 +637,7 @@ function optionalDate(value: unknown): Date | undefined {
 }
 
 /** Reads a log's fields from either transport's shape (both name them in snake_case). */
-function toLogRecord(log: Record<string, unknown>): AiGatewayLogRecord {
+function toLogRecord(log: Record<string, unknown> | AiGatewayLog): AiGatewayLogRecord {
   return {
     cost: validateLogCost(log.cost),
     model: optionalString(log.model),
@@ -666,7 +666,7 @@ export async function getAiGatewayLog(
         cause: error,
       });
     }
-    return toLogRecord(log as unknown as Record<string, unknown>);
+    return toLogRecord(log);
   }
 
   let url = "https://api.cloudflare.com/client/v4/accounts/" +
