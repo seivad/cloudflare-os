@@ -17,6 +17,8 @@ const LOGS_URL = "https://api.cloudflare.com/client/v4/accounts/gateway-account-
 const KEY_CHECK_URLS = ["openai/models", "anthropic/v1/models?limit=1", "openrouter/v1/key"]
     .map(path => `https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway/${path}`);
 const VIDEO = { kind: "video", model: "google/veo-3" } as const;
+// A line of approved actions' videos.
+const VIDEO_LINE = { source: "action", ...VIDEO } as const;
 
 /** A video that spent `estimateUsd` by its Gatekeeper's estimate, logged as `gatewayLogId`. */
 function spentVideo(gatewayLogId: string, estimateUsd = 2): ActionCost {
@@ -41,7 +43,7 @@ const network = new NetworkInterceptor({
     if (method === "GET" && KEY_CHECK_URLS.includes(url.href)) {
       return new Response("no key", { status: 401 });
     }
-    return undefined;
+    return null;
   }],
 });
 let harness: Harness;
@@ -160,7 +162,7 @@ it("an approved spending action is counted from its gateway log", async () => {
   await decide(workspace.ws, 1);
   const summary = await summaryCounting(workspace.api, 0.94);
   expect(summary.workspaces[0]!.lines).toEqual(
-      [{ ...VIDEO, estimated: false, usd: 0.94, requests: 1 }]);
+      [{ ...VIDEO_LINE, estimated: false, usd: 0.94, requests: 1 }]);
 });
 
 it("a pending action is polled until it is spent", async () => {
@@ -176,7 +178,7 @@ it("a pending action is polled until it is spent", async () => {
       spentVideo(logId));
   const summary = await summaryCounting(workspace.api, 0.94);
   expect(summary.workspaces[0]!.lines).toEqual(
-      [{ ...VIDEO, estimated: false, usd: 0.94, requests: 1 }]);
+      [{ ...VIDEO_LINE, estimated: false, usd: 0.94, requests: 1 }]);
 });
 
 it("the same log id reported by two actions is counted once", async () => {
@@ -197,7 +199,7 @@ it("the same log id reported by two actions is counted once", async () => {
   await sleep(1_500);
   const summary = await workspace.api.getMyCostSummary();
   expect(summary.workspaces[0]!.lines).toEqual(
-      [{ ...VIDEO, estimated: false, usd: 0.94, requests: 1 }]);
+      [{ ...VIDEO_LINE, estimated: false, usd: 0.94, requests: 1 }]);
 });
 
 it("a log whose tag is not this gatekeeper's counts nothing", async () => {
@@ -225,7 +227,7 @@ it("an untagged log counts the capped estimate instead", async () => {
   await decide(workspace.ws, 1);
   const summary = await summaryCounting(workspace.api, 5);
   expect(summary.workspaces[0]!.lines).toEqual(
-      [{ ...VIDEO, estimated: true, usd: 5, requests: 1 }]);
+      [{ ...VIDEO_LINE, estimated: true, usd: 5, requests: 1 }]);
 });
 
 it("falls back to the estimate once after the log stays unreadable", async () => {
@@ -237,7 +239,7 @@ it("falls back to the estimate once after the log stays unreadable", async () =>
   await decide(workspace.ws, 1);
   const summary = await summaryCounting(workspace.api, 0.5);
   expect(summary.workspaces[0]!.lines).toEqual(
-      [{ ...VIDEO, estimated: true, usd: 0.5, requests: 1 }]);
+      [{ ...VIDEO_LINE, estimated: true, usd: 0.5, requests: 1 }]);
   expect(logReads.get(logId)).toBe(6);
 
   // The log counted at the estimate counts no more once it can be read, for any action.
@@ -278,7 +280,7 @@ it("drops a pending cost when the gatekeeper has no getActionCost", async () => 
   await decide(workspace.ws, 2);
   const summary = await summaryCounting(workspace.api, 0.94);
   expect(summary.workspaces[0]!.lines).toEqual(
-      [{ ...VIDEO, estimated: false, usd: 0.94, requests: 1 }]);
+      [{ ...VIDEO_LINE, estimated: false, usd: 0.94, requests: 1 }]);
 });
 
 it("stops polling once the workspace is deleting", async () => {

@@ -110,9 +110,10 @@ it("the owner's summary matches the workspace's lines after a charged turn", asy
   const lines = summary.workspaces[0]!.lines;
   expect(lines).toHaveLength(2);
   expect(lines).toContainEqual(expect.objectContaining(
-      { kind: "text", model: SCRIPTED_MODEL_ID, estimated: false, usd: TURN_COST, requests: 1 }));
+      { source: "chat", kind: "text", model: SCRIPTED_MODEL_ID, estimated: false, usd: TURN_COST,
+        requests: 1 }));
   expect(lines).toContainEqual(expect.objectContaining(
-      { kind: "text", estimated: false, usd: TITLE_COST, requests: 1 }));
+      { source: "title", kind: "text", estimated: false, usd: TITLE_COST, requests: 1 }));
   expect(summary.byKind).toEqual({ text: CHAT_COST });
   expect(Object.values(summary.byModel).reduce((sum, usd) => sum + usd, 0)).toBe(CHAT_COST);
   expect(summary.deletedWorkspaces).toEqual(NOTHING.deletedWorkspaces);

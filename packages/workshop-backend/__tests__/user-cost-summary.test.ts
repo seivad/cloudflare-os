@@ -29,8 +29,8 @@ async function signedUp(profile: AiChatAuthorInfo) {
   return user;
 }
 
-const TEXT: CostLine = {kind: "text", model: "@cf/zai-org/glm-5.2", estimated: false, usd: 1.5, requests: 3};
-const IMAGE: CostLine = {kind: "image", model: "@cf/image-model", estimated: true, usd: 0.5, requests: 1};
+const TEXT: CostLine = {source: "chat", kind: "text", model: "@cf/zai-org/glm-5.2", estimated: false, usd: 1.5, requests: 3};
+const IMAGE: CostLine = {source: "action", kind: "image", model: "@cf/image-model", estimated: true, usd: 0.5, requests: 1};
 
 it("counts owned workspaces, shows their uncounted rest as earlier, and leaves shared ones out",
     async () => {
@@ -53,8 +53,8 @@ it("counts owned workspaces, shows their uncounted rest as earlier, and leaves s
   await user.addOwnCost({kind: "transcription", model: "@cf/openai/whisper", estimated: true,
     usd: 0.125, source: "voice"});
 
-  let earlier: CostLine = {kind: "text", model: "earlier", estimated: false, usd: 0.25, requests: 0};
-  let voice: CostLine = {kind: "transcription", model: "@cf/openai/whisper", estimated: true,
+  let earlier: CostLine = {source: "chat", kind: "text", model: "earlier", estimated: false, usd: 0.25, requests: 0};
+  let voice: CostLine = {source: "voice", kind: "transcription", model: "@cf/openai/whisper", estimated: true,
     usd: 0.125, requests: 1};
   expect(await user.getCostSummary()).toEqual({
     totalCost: 2.375,
@@ -135,7 +135,7 @@ it("voice spend lands on the user's own ledger, not a workspace", async () => {
   await new Promise(resolve => setTimeout(resolve, 100));
 
   let summary = await user.getCostSummary();
-  expect(summary.own.lines).toEqual([{kind: "transcription", model: "@cf/openai/whisper",
+  expect(summary.own.lines).toEqual([{source: "voice", kind: "transcription", model: "@cf/openai/whisper",
     estimated: false, usd: 0.0125, requests: 1}]);
   expect(summary.totalCost).toBe(0.0125);
   expect(summary.byKind).toEqual({transcription: 0.0125});
