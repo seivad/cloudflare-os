@@ -2377,7 +2377,7 @@ describe("LanguageModelBindingImpl cost reports", () => {
     expect(await Promise.all([binding.run({ prompt: "one" }), binding.run({ prompt: "two" })]))
         .toEqual(["answer 1", "answer 2"]);
     expect(reportCost.mock.calls.map(([cost]) => (cost as { gatewayLogId?: string }).gatewayLogId)
-        .sort()).toEqual(["log-1", "log-2"]);
+        .toSorted()).toEqual(["log-1", "log-2"]);
   });
 
   it("reports each run's model, log id and estimate to its queue", async () => {
