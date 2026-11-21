@@ -170,8 +170,13 @@ export type CachedRequest = {
   resend(): Promise<Resent>;
 };
 
-/** What a resend used, priced from the model catalog, and the AI Gateway log that prices it. */
+/**
+ * What a resend used, priced from the model catalog, and the AI Gateway log that prices it: the
+ * request as its cost is counted (see MeteredRequest).
+ */
 export type Resent = {
+  /** The model the request was sent to. */
+  model: string;
   usage: Usage;
   aiGatewayLogId?: string;
   aiGatewayLogRoute?: AiGatewayLogRoute;
@@ -849,7 +854,7 @@ function cachedRequest(
       if (message.stopReason === "error" || message.stopReason === "aborted") {
         throw new Error(message.errorMessage ?? "The model request failed.");
       }
-      return { usage: message.usage, aiGatewayLogId, aiGatewayLogRoute };
+      return { model: model.id, usage: message.usage, aiGatewayLogId, aiGatewayLogRoute };
     },
   };
 }

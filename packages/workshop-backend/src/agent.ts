@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type {
   AssistantMessage, ImageContent, Message, SystemMessage, TextContent, ToolCall,
-  ToolResultMessage, Usage,
+  ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { Type, type TSchema } from "typebox";
 import {
@@ -26,10 +26,13 @@ import {
   seenAlwaysAvailableResources,
 } from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
-import type { AiGatewayLogRoute } from "./ai-gateway";
 import type { SpawnCallableOptions } from "./agent-spawner-binding";
 import { traceRejectedToolCall, traceTool } from "./agent-tracing";
-import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
+import {
+  AgentTurnError, completeTextMetered, httpStatusFromError, meteredRequest, zeroUsage,
+  type MeteredRequest,
+} from "./ai-invoke";
+import type { CostAttribution } from "./cost-ledger";
 import type { CachedRequest, ModelHandle } from "./ai-models";
 import { blobOid } from "./git-codec";
 import { assertNoNul } from "./git-cache";
@@ -351,10 +354,9 @@ export interface AgentHooks {
    * caller in overseer.ts). The rows' `changeApplied` broadcasts supersede the tool calls'
    * streamed edit previews.
    *
-   * The accounting parameters match the overseer's addChatMessages. `usage` is pi's report for
-   * the step: it sets the chat's token counts, and its catalog-priced `cost.total` is the cost
-   * fallback. When both `aiGatewayLogId` and `aiGatewayLogRoute` are present, the authoritative
-   * cost is fetched asynchronously from the AI Gateway log; otherwise the estimate is applied.
+   * `request` is the step's model request, as the overseer's addChatMessages takes it: its
+   * `usage`, pi's report for the step, sets the chat's token counts, and its cost is counted to
+   * the chat as addRequestCost counts one.
    */
   commitAgentStep(chatId: number, author: AiChatAuthorInfo,
       msgs: AiChatMessageBodyWithModelData[],
@@ -366,8 +368,14 @@ export interface AgentHooks {
         worktreeCommits: {worktreeId: WorkpieceId, commit: string, previousHead: string}[],
         blueprintMerges: BlueprintMerge[],
       },
-      usage?: Usage, aiGatewayLogId?: string,
-      aiGatewayLogRoute?: AiGatewayLogRoute): Promise<boolean>;
+      request?: MeteredRequest): Promise<boolean>;
+
+  /**
+   * Counts a model request's cost to the workspace, and to the chat `to.chatId` names: the cost
+   * AI Gateway logged for it where it went through one (fetched later), else the catalog-priced
+   * estimate in its `usage`. For the requests a turn makes outside its steps, such as compaction.
+   */
+  addRequestCost(request: MeteredRequest, to: CostAttribution): void;
 
   /**
    * The history one agent pass replays (see ChatHistory). Read fresh before each pass, since a
@@ -4276,7 +4284,7 @@ async function runAgentPass(
           if (await hooks.commitAgentStep(chatId, author, msgs,
               {changes: stepChanges, createdGadgets, createdWorktrees, addedBindings,
                worktreeCommits, blueprintMerges},
-              message.usage, handle.lastResponse?.aiGatewayLogId, handle.aiGatewayLogRoute)) {
+              meteredRequest(handle, message.usage))) {
             ++nextChangeId;
           }
         });
@@ -4317,10 +4325,12 @@ async function runAgentPass(
           // The summarized messages are the prompt up to the boundary; the rest stays verbatim.
           let keptFrom = projection.findIndex(({sequence}) =>
             sequence !== undefined && sequence >= compactedTo);
-          let {summary, block} = await requestAnthropicCompaction(
+          let {summary, block, usage} = await requestAnthropicCompaction(
               handle, stream,
               {messages: [leadingSystemMessage, ...modelMessages.slice(0, keptFrom)]},
               COMPACTION_SYSTEM_PROMPT, {maxTokens: maxOutputTokens, signal: abortSignal});
+          hooks.addRequestCost(meteredRequest(handle, usage),
+              {source: "compaction", chatId, isActivity: true});
           written = {summary, anthropicCompactionBlock: block};
         } else {
           let summaryMessages = buildSummaryPrompt(projection, compactedTo, handle.model);
@@ -4329,15 +4339,17 @@ async function runAgentPass(
             content: "Create the context handoff now. Do not continue the conversation.",
             timestamp: Date.now(),
           });
-          // Like title generation, this call's usage is deliberately not billed to the chat. It
-          // carries the turn's largest prompt, so it needs the response cap most: without it a
-          // model that charges the response to the same window would reject the request outright.
-          let summary = (await completeText(handle, {
+          // This call carries the turn's largest prompt, so it needs the response cap most: without
+          // it a model that charges the response to the same window would reject the request
+          // outright.
+          let {text, ...request} = await completeTextMetered(handle, {
             systemPrompt: COMPACTION_SYSTEM_PROMPT,
             messages: summaryMessages,
             maxTokens: maxOutputTokens,
             signal: abortSignal,
-          })).trim();
+          });
+          hooks.addRequestCost(request, {source: "compaction", chatId, isActivity: true});
+          let summary = text.trim();
           // An empty summary would discard the compacted history, so keep the history instead.
           if (!summary) throw new Error("Compaction produced an empty summary.");
           written = {summary};

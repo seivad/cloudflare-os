@@ -1,4 +1,5 @@
 import type { Message, ProviderHeaders, Usage } from "@earendil-works/pi-ai";
+import type { AiGatewayLogRoute } from "./ai-gateway.js";
 import type { ModelHandle } from "./ai-models.js";
 
 /**
@@ -45,14 +46,34 @@ export function httpStatusFromError(errorMessage: string, response: ModelHandle[
 }
 
 /**
- * Run a single non-streaming-style completion against a ModelHandle and return the response
- * text. Used for one-shot calls: title generation, binding naming, compaction summaries, and
- * LanguageModelBinding.run. Requests thinking off unless asked (one-shots should be quick, and
- * none of them benefit from extended thinking; pre-pi, these calls never configured thinking
- * either), and prompt caching off unless asked. Throws AgentTurnError on provider failure, or the
- * abort reason when `signal` fired.
+ * A model request as its cost is counted (see Overseer.addRequestCost): the model picked, the one
+ * that answered where a router picked it, pi's catalog-priced usage, and the AI Gateway log that
+ * prices it where the request went through a gateway.
  */
-export async function completeText(handle: ModelHandle, args: {
+export type MeteredRequest = {
+  model: string;
+  answeredBy?: string;
+  usage?: Usage;
+  aiGatewayLogId?: string;
+  aiGatewayLogRoute?: AiGatewayLogRoute;
+};
+
+/**
+ * The request `handle` last completed, which used `usage`, as a MeteredRequest. Read it right
+ * after the request, as ModelHandle.lastResponse says.
+ */
+export function meteredRequest(handle: ModelHandle, usage: Usage | undefined): MeteredRequest {
+  return {
+    model: handle.model.id,
+    answeredBy: handle.lastResponse?.routedModel,
+    usage,
+    aiGatewayLogId: handle.lastResponse?.aiGatewayLogId,
+    aiGatewayLogRoute: handle.aiGatewayLogRoute,
+  };
+}
+
+/** The arguments of completeText and completeTextMetered. */
+export type CompleteTextArgs = {
   systemPrompt?: string;
   /** Convenience: wraps into a single user message. Exactly one of `prompt`/`messages` required. */
   prompt?: string;
@@ -72,7 +93,25 @@ export async function completeText(handle: ModelHandle, args: {
    * cache write.
    */
   cache?: boolean;
-}): Promise<string> {
+};
+
+/**
+ * Run a single non-streaming-style completion against a ModelHandle and return the response
+ * text. Used for one-shot calls: title generation, binding naming, compaction summaries, and
+ * LanguageModelBinding.run. Requests thinking off unless asked (one-shots should be quick, and
+ * none of them benefit from extended thinking; pre-pi, these calls never configured thinking
+ * either), and prompt caching off unless asked. Throws AgentTurnError on provider failure, or the
+ * abort reason when `signal` fired.
+ */
+export async function completeText(handle: ModelHandle, args: CompleteTextArgs): Promise<string> {
+  return (await completeTextMetered(handle, args)).text;
+}
+
+/**
+ * completeText, also returning the request as its cost is counted, for a caller that counts it.
+ */
+export async function completeTextMetered(handle: ModelHandle, args: CompleteTextArgs)
+    : Promise<MeteredRequest & { text: string }> {
   const messages: Message[] = args.messages ??
       [{ role: "user", content: args.prompt ?? "", timestamp: Date.now() }];
   const stream = await handle.stream(handle.model, {
@@ -92,8 +131,11 @@ export async function completeText(handle: ModelHandle, args: {
     const errorMessage = message.errorMessage ?? "The model request failed.";
     throw new AgentTurnError(errorMessage, httpStatusFromError(errorMessage, handle.lastResponse));
   }
-  return message.content
-      .filter(block => block.type === "text")
-      .map(block => block.text)
-      .join("");
+  return {
+    ...meteredRequest(handle, message.usage),
+    text: message.content
+        .filter(block => block.type === "text")
+        .map(block => block.text)
+        .join(""),
+  };
 }

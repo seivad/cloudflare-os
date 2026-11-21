@@ -1,0 +1,169 @@
+import { describe, expect, it } from "vitest";
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import type { Usage } from "@earendil-works/pi-ai";
+import type { AiChatMetadata, CostLine } from "@gadgets/workshop-shared/api";
+import {
+  addCost, byKind, byModel, costLineKey, mergeLines, textCostEntry, withEarlier,
+  type CostAttribution, type CostEntry,
+} from "../src/cost-ledger.js";
+import type { OverseerDurableObject } from "../src/overseer.js";
+
+declare module "cloudflare:workers" {
+  interface ProvidedEnv {
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+  }
+}
+
+const KIMI = "@cf/moonshotai/kimi-k2.6";
+const OPUS = "claude-opus-5-5";
+
+function entry(overrides: Partial<CostEntry> = {}): CostEntry {
+  return { kind: "text", model: KIMI, estimated: false, usd: 0.5, ...overrides };
+}
+
+describe("cost ledger", () => {
+  it("addCost merges same kind/model/answeredBy/estimated and counts requests", () => {
+    let lines = addCost([], entry({ usd: 0.5, inputTokens: 100, outputTokens: 10 }));
+    lines = addCost(lines, entry({ usd: 0.25, inputTokens: 50, outputTokens: 5 }));
+    lines = addCost(lines, entry({ model: OPUS, usd: 2 }));
+    lines = addCost(lines, entry({ model: "auto", answeredBy: OPUS, usd: 1 }));
+    lines = addCost(lines, entry({ model: "auto", answeredBy: KIMI, usd: 0.125 }));
+
+    expect(lines).toEqual([
+      { kind: "text", model: KIMI, estimated: false, usd: 0.75, requests: 2,
+        inputTokens: 150, outputTokens: 15 },
+      { kind: "text", model: OPUS, estimated: false, usd: 2, requests: 1 },
+      { kind: "text", model: "auto", answeredBy: OPUS, estimated: false, usd: 1, requests: 1 },
+      { kind: "text", model: "auto", answeredBy: KIMI, estimated: false, usd: 0.125, requests: 1 },
+    ]);
+  });
+
+  it("addCost keeps estimated and logged lines apart", () => {
+    let lines = addCost([], entry({ usd: 0.5 }));
+    lines = addCost(lines, entry({ estimated: true, usd: 0.25 }));
+    lines = addCost(lines, entry({ kind: "image", estimated: true, usd: 0.25 }));
+
+    expect(lines).toEqual([
+      { kind: "text", model: KIMI, estimated: false, usd: 0.5, requests: 1 },
+      { kind: "text", model: KIMI, estimated: true, usd: 0.25, requests: 1 },
+      { kind: "image", model: KIMI, estimated: true, usd: 0.25, requests: 1 },
+    ]);
+    expect(new Set(lines.map(costLineKey)).size).toBe(3);
+  });
+
+  it("withEarlier adds the pre-breakdown remainder as text/earlier", () => {
+    let lines = addCost([], entry({ usd: 0.5 }));
+    expect(withEarlier(2.75, lines)).toEqual([
+      ...lines,
+      { kind: "text", model: "earlier", estimated: false, usd: 2.25, requests: 0 },
+    ]);
+  });
+
+  it("withEarlier adds nothing when lines cover the total", () => {
+    // Each addition rounds, so a total summed request by request can differ from the lines' sum
+    // by far less than a cent.
+    let lines = addCost(addCost([], entry({ usd: 0.1 })), entry({ model: OPUS, usd: 0.2 }));
+    expect(withEarlier(0.1 + 0.2, lines)).toEqual(lines);
+    expect(withEarlier(0, [])).toEqual([]);
+  });
+
+  it("byModel groups auto's answering models under auto", () => {
+    let lines = addCost([], entry({ model: "auto", answeredBy: OPUS, usd: 1 }));
+    lines = addCost(lines, entry({ model: "auto", answeredBy: KIMI, usd: 0.25 }));
+    lines = addCost(lines, entry({ model: "auto", estimated: true, usd: 0.25 }));
+    lines = addCost(lines, entry({ model: OPUS, usd: 2 }));
+    lines = addCost(lines, entry({ kind: "video", model: "veo", estimated: true, usd: 3 }));
+
+    expect(byModel(lines)).toEqual({ auto: 1.5, [OPUS]: 2, veo: 3 });
+    expect(byKind(lines)).toEqual({ text: 3.5, video: 3 });
+  });
+
+  it("mergeLines adds lines with the same key and keeps the others", () => {
+    let a: CostLine[] = addCost(addCost([], entry({ usd: 1, inputTokens: 10 })),
+        entry({ model: OPUS, usd: 2 }));
+    let b: CostLine[] = addCost(addCost([], entry({ usd: 0.5, outputTokens: 4 })),
+        entry({ kind: "speech", model: "aura", estimated: true, usd: 0.25 }));
+
+    expect(mergeLines(a, b)).toEqual([
+      { kind: "text", model: KIMI, estimated: false, usd: 1.5, requests: 2,
+        inputTokens: 10, outputTokens: 4 },
+      { kind: "text", model: OPUS, estimated: false, usd: 2, requests: 1 },
+      { kind: "speech", model: "aura", estimated: true, usd: 0.25, requests: 1 },
+    ]);
+    // Neither input is changed.
+    expect(a[0]?.usd).toBe(1);
+    expect(b[0]?.usd).toBe(0.5);
+  });
+});
+
+describe("a text request's cost", () => {
+  // 100 prompt tokens (60 of them read from or written to the cache) and 10 response tokens,
+  // which the catalog prices at a tenth of a cent.
+  const usage: Usage = {
+    input: 40, output: 10, cacheRead: 50, cacheWrite: 10, totalTokens: 110,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
+  };
+
+  it("is the gateway log's, with its answering model and tokens, in place of the estimate", () => {
+    expect(textCostEntry({ model: "auto", answeredBy: KIMI, usage },
+        { cost: 0.5, model: OPUS, tokensIn: 120, tokensOut: 12 })).toEqual(
+        { kind: "text", model: "auto", answeredBy: OPUS, estimated: false, usd: 0.5,
+          inputTokens: 120, outputTokens: 12 });
+    // A log that names the picked model, and counts no tokens.
+    expect(textCostEntry({ model: KIMI, usage }, { cost: 0.5, model: KIMI })).toEqual(
+        { kind: "text", model: KIMI, answeredBy: undefined, estimated: false, usd: 0.5,
+          inputTokens: 100, outputTokens: 10 });
+  });
+
+  it("is the estimate where there is no log, or it gives no cost", () => {
+    const estimate = { kind: "text", model: "auto", answeredBy: KIMI, estimated: true, usd: 0.001,
+      inputTokens: 100, outputTokens: 10 };
+    expect(textCostEntry({ model: "auto", answeredBy: KIMI, usage }, undefined)).toEqual(estimate);
+    expect(textCostEntry({ model: "auto", usage }, { cost: 0, model: KIMI })).toEqual(estimate);
+    expect(textCostEntry({ model: KIMI }, undefined)).toBeUndefined();
+    expect(textCostEntry({ model: KIMI, usage: { ...usage, cost: { ...usage.cost, total: 0 } } },
+        { cost: 0 })).toBeUndefined();
+  });
+});
+
+// The OverseerImpl members this test drives; the class itself is private to overseer.ts.
+interface OverseerInternals {
+  storage: {
+    chatMeta: { get(id: number): AiChatMetadata | undefined, put(meta: AiChatMetadata): void };
+    totalCost: { get(): number, put(cost: number): void };
+  };
+  recordCost(entry: CostEntry & CostAttribution): void;
+  getCostLines(): CostLine[];
+}
+
+describe("a workspace's cost ledger", () => {
+  it("counts each cost to its total, its line and its chat, and shows the total from before " +
+      "as earlier", async () => {
+    const stub = env.TEST_OVERSEER.getByName("cost-ledger");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = (instance as unknown as { impl: OverseerInternals }).impl;
+      impl.storage.totalCost.put(2);
+      impl.storage.chatMeta.put(
+          { id: 3, title: "Chat", started: new Date(0), lastActive: new Date(0) });
+
+      impl.recordCost({ ...entry({ usd: 1.25 }), source: "chat", chatId: 3, isActivity: false });
+      impl.recordCost({ ...entry({ usd: 0.25 }), source: "title", chatId: 3, isActivity: true });
+      // A chat deleted before its cost arrived: the workspace paid for it all the same.
+      impl.recordCost(
+          { ...entry({ model: OPUS, estimated: true, usd: 0.5 }), source: "compaction",
+            chatId: 4, isActivity: true });
+
+      expect(impl.storage.totalCost.get()).toBe(4);
+      const chat = impl.storage.chatMeta.get(3);
+      expect(chat?.totalCost).toBe(1.5);
+      expect(chat?.lastActive.valueOf()).toBeGreaterThan(0);
+      expect(impl.storage.chatMeta.get(4)).toBeUndefined();
+      expect(impl.getCostLines()).toEqual([
+        { kind: "text", model: KIMI, estimated: false, usd: 1.5, requests: 2 },
+        { kind: "text", model: OPUS, estimated: true, usd: 0.5, requests: 1 },
+        { kind: "text", model: "earlier", estimated: false, usd: 2, requests: 0 },
+      ]);
+    });
+  });
+});

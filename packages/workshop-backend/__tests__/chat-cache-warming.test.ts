@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { AiChatMetadata } from "@gadgets/workshop-shared/api";
+import type { AiChatMetadata, CostLine } from "@gadgets/workshop-shared/api";
 import type { CachedRequest } from "../src/ai-models.js";
 import { ChatCacheWarmer } from "../src/chat-cache-warming.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
@@ -34,7 +34,7 @@ function usage(cacheRead: number, cacheWrite = 0, cost = 1): Usage {
 function request(
     answer: () => Promise<Usage> = async () => usage(100_000),
     overrides: Partial<CachedRequest> = {}) {
-  const resend = vi.fn(async () => ({ usage: await answer() }));
+  const resend = vi.fn(async () => ({ model: MODEL, usage: await answer() }));
   const cached: CachedRequest = {
     sentAt: Date.now(), cacheLifetime: 5 * MINUTE, resendCost: 1, expiryCost: 11.5, resend,
     ...overrides,
@@ -211,7 +211,7 @@ describe("ChatCacheWarmer", () => {
     answer(usage(100_000));
     await vi.advanceTimersByTimeAsync(60 * MINUTE);
     expect(resend).toHaveBeenCalledTimes(1);
-    expect(resent).toHaveBeenCalledExactlyOnceWith(CHAT, { usage: usage(100_000) });
+    expect(resent).toHaveBeenCalledExactlyOnceWith(CHAT, { model: MODEL, usage: usage(100_000) });
   });
 
   describe("logs each pause", () => {
@@ -278,6 +278,7 @@ interface OverseerInternals {
     chatMeta: { get(id: number): AiChatMetadata | undefined, put(meta: AiChatMetadata): void };
     totalCost: { get(): number };
   };
+  getCostLines(): CostLine[];
 }
 
 describe("a workspace's warm pings", () => {
@@ -304,6 +305,11 @@ describe("a workspace's warm pings", () => {
       expect(impl.storage.chatMeta.get(CHAT)).toMatchObject(
           { totalCost: 0.5, lastActive: new Date(0) });
       expect(impl.storage.totalCost.get() - workspaceCost).toBe(0.5);
+      // Each ping is one request to the turn's model, at its estimate: it has no gateway log.
+      expect(impl.getCostLines()).toContainEqual({
+        kind: "text", model: MODEL, estimated: true, usd: 0.5, requests: 2,
+        inputTokens: 200_020, outputTokens: 2,
+      });
     });
   });
 });
