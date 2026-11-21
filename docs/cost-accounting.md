@@ -36,7 +36,7 @@ An action that spends (a generated image, say) cannot report its cost when it is
 
 1. The action's description sets `reportsCost: true`.
 2. The Gatekeeper's session answers `getCostTag()` with an opaque string. The Gatekeeper puts it in the AI Gateway metadata of every request it makes for the action, as `tag`. The tag is how the Overseer tells which logs are the Gatekeeper's.
-3. Once the action is approved the Overseer polls `getActionCost(action)`: first after 30 s, then at doubling intervals up to an hour, for at most seven days. One call has 30 s to answer, else it is asked again at the next poll.
+3. Once the action is approved the Overseer polls `getActionCost(action)`: first after 30 s, then at doubling intervals up to an hour, for at most seven days. One call, reaching the Gatekeeper included, has 30 s to answer, else it is asked again at the next poll.
 4. The answer is one of:
 
 | State | Meaning |
@@ -53,7 +53,7 @@ For `spent` the Overseer reads the log (up to six attempts for a failure worth r
 | Log carries a different `tag` | nothing, with a warning: it is another Gatekeeper's, so its estimate is not trusted either |
 | No `gatewayLogId`, log unreadable, log without a tag, or log older than 31 days or of unknown age | the Gatekeeper's `estimateUsd`, capped at US$5, once for the approved action |
 
-A log id is counted once, also where the estimate was counted for it because it stayed unreadable or gave no cost. The Overseer remembers the ids it counted and prunes them after 31 days, the age past which it refuses a log, so a repeated answer never counts twice. A Gatekeeper that does not set `reportsCost`, or does not implement `getActionCost`, is never polled. `reportCost` is for model bindings only and is refused for any other Gatekeeper.
+A log id is counted once, also where the estimate was counted for it because it stayed unreadable or gave no cost. The Overseer remembers the ids it counted and prunes them after 31 days, the age past which it refuses a log, so a repeated answer never counts twice. A Gatekeeper's action that does not set `reportsCost` is never polled. One that sets it on a Gatekeeper without `getActionCost` is polled once, and dropped uncounted when the call fails for want of the method. `reportCost` is for model bindings only and is refused for any other Gatekeeper.
 
 The Media Studio Gatekeeper of the custom Gatekeeper package is the example: it tags each job, records the log id when the model answers, and answers `getActionCost` from the job it kept.
 
