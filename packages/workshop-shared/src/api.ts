@@ -3243,14 +3243,13 @@ export type AdminUserDiagnostics = {
  *
  * It returns what the "metadata" access level shows of an account (see
  * ADMIN_WORKSPACE_ACCESS_LEVELS), at "content" as at "metadata", and none of what that level
- * withholds: no method returns what a
- * gatekeeper says of a connected account (see AdminUserConnectedAccount) or a blueprint's id (see
- * AdminUserBlueprint). Nor does any return what the account stores as a credential: a session
- * token or its hash, the password's hash, a model's API token or extra headers, a push
- * subscription, or a pending connect or sign-in ticket. A model's API URL is free text, not a
- * credential, but a URL can carry one, so only whether one is set is reported
- * (AdminUserModel.customApiUrl). A restart of the account's Durable Object ends the view; inspect
- * again.
+ * withholds: no method returns what a gatekeeper says of a connected account (see
+ * AdminUserConnectedAccount) or a blueprint's id (see AdminUserBlueprint). Nor does any return what
+ * the account stores as a credential: a session token or its hash, the password's hash, a model's
+ * API token or extra headers, a push subscription, or a pending connect or sign-in ticket. A
+ * model's API URL is free text, not a credential, but a URL can carry one, so only whether one is
+ * set is reported (AdminUserModel.customApiUrl). A restart of the account's Durable Object ends the
+ * view; inspect again.
  */
 export interface AdminUserView extends RpcTarget {
   /** The account's profile, when it was created and last signed in, whether its user is a

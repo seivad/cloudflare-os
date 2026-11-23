@@ -534,18 +534,17 @@ names is refused (capnweb-validate checks it against the method union); one that
 has gives an empty page.
 
 The store's table admits exactly these kinds, by a CHECK on its `kind` column, and its `exposed`
-column holds `'metadata'` for every access record, of either kind, whatever its `access`: a call
-at `"content"` to a method that needs only `"metadata"` answers with metadata. The column's CHECK
-already admits `'content'`, and the level lives in the record's JSON, which no CHECK constrains,
-so the `"content"` level needed no rebuild of the table. SQLite cannot alter a CHECK, so
-a table whose stored definition differs from the current one is rebuilt once, when the log's
-Durable Object next starts: its rows are copied into a table of the current definition, each
-keeping its `seq`. AUTOINCREMENT's high-water mark is not carried, so a `seq` above the highest row
-copied (one whose row has since been deleted) can be handed out again, which only a list cursor
-held across the rebuild could notice. A rebuild that fails, as it does on a table of a later
-definition holding rows of a kind this CHECK refuses, rolls back whole: it leaves the stored table
-with its rows, is logged (`admin.audit.table.rebuild.failed`), and the log goes on appending the
-kinds that table admits.
+column holds `'metadata'` for every access record, of either kind, whatever its `access`: a call at
+`"content"` to a method that needs only `"metadata"` answers with metadata. The column's CHECK
+already admits `'content'`, and the level lives in the record's JSON, which no CHECK constrains, so
+the `"content"` level needed no rebuild of the table. SQLite cannot alter a CHECK, so a table whose
+stored definition differs from the current one is rebuilt once, when the log's Durable Object next
+starts: its rows are copied into a table of the current definition, each keeping its `seq`.
+AUTOINCREMENT's high-water mark is not carried, so a `seq` above the highest row copied (one whose
+row has since been deleted) can be handed out again, which only a list cursor held across the
+rebuild could notice. A rebuild that fails, as it does on a table of a later definition holding rows
+of a kind this CHECK refuses, rolls back whole: it leaves the stored table with its rows, is logged
+(`admin.audit.table.rebuild.failed`), and the log goes on appending the kinds that table admits.
 
 ### What the metadata level withholds
 
@@ -725,41 +724,38 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
 - `cli-admins-only.test.ts`: the `via` a session's User-Agent gives its records.
 - `admin-view.test.ts`: `adminViewCall()`, the call discipline both views share: the order of its
   checks, its read of the setting, the read and the record before the answer; each call recorded
-  with no retention; a call refused and recorded while the setting or the cap is off or not a
-  level, and answered again once the level is back at `"metadata"`; a call that needs `"content"`
-  refused and recorded at each level below it, the record naming the level in force, and answered
-  once the cap and the choice are both `content`; a call that needs `"metadata"` answered at
-  `"content"`, recorded at it; a refused call and a failed
-  read recorded with nothing awaited since the last check; nothing recorded for a view no longer
-  live; a record that cannot be written failing the call, with the method alone logged; and the
-  environment read at each use.
+  with no retention; a call refused and recorded while the setting or the cap is off or not a level,
+  and answered again once the level is back at `"metadata"`; a call that needs `"content"` refused
+  and recorded at each level below it, the record naming the level in force, and answered once the
+  cap and the choice are both `content`; a call that needs `"metadata"` answered at `"content"`,
+  recorded at it; a refused call and a failed read recorded with nothing awaited since the last
+  check; nothing recorded for a view no longer live; a record that cannot be written failing the
+  call, with the method alone logged; and the environment read at each use.
 - `admin-workspace-view.test.ts`: the view, from an uninitialised id that stays uninitialised to the
   per-call checks; every method recorded and none refused, each record stored with `exposed`
   `metadata` in the table; what every answer withholds, beside the structure it keeps; a call
-  refused and recorded while the setting is off, answered again once it is back at `"metadata"`,
-  and refused while the cap or a stored level is not a level; every answer at `"content"` equal
-  to the one at `"metadata"`, recorded at the level in force and stored with `exposed`
-  `metadata`; the reads that fail recorded, and a
-  depth out of range refused unrecorded; a failed record returning nothing; the races with
-  deletion and expiry, at the setting read and while a call reads its answer, writing nothing; a
-  2,000,000-character title; the live-session counts, one for each hold a collaborator has, by
-  role; the reads that never pull (a gadget's head, history, changed paths, files at a commit,
-  and a chat's pending changes with a worktree, a pending edit of a symlink failing without
-  naming its target); the sharing reads never reaching a connection, a link to several gadgets
-  among them; an inspection calling every method leaving the workspace's storage, presence and
-  alarm as they were; and the view's surface being exactly what the audit names: every method in
-  `ADMIN_WORKSPACE_METHODS` is recorded, and the view class exposes no other member over RPC, and
-  none that reads content (a helper must be `#private`: the class's public members, not its
+  refused and recorded while the setting is off, answered again once it is back at `"metadata"`, and
+  refused while the cap or a stored level is not a level; every answer at `"content"` equal to the
+  one at `"metadata"`, recorded at the level in force and stored with `exposed` `metadata`; the
+  reads that fail recorded, and a depth out of range refused unrecorded; a failed record returning
+  nothing; the races with deletion and expiry, at the setting read and while a call reads its
+  answer, writing nothing; a 2,000,000-character title; the live-session counts, one for each hold a
+  collaborator has, by role; the reads that never pull (a gadget's head, history, changed paths,
+  files at a commit, and a chat's pending changes with a worktree, a pending edit of a symlink
+  failing without naming its target); the sharing reads never reaching a connection, a link to
+  several gadgets among them; an inspection calling every method leaving the workspace's storage,
+  presence and alarm as they were; and the view's surface being exactly what the audit names: every
+  method in `ADMIN_WORKSPACE_METHODS` is recorded, and the view class exposes no other member over
+  RPC, and none that reads content (a helper must be `#private`: the class's public members, not its
   interface, are its RPC surface).
-- `admin-user-view.test.ts`: the user view, from an id that names no account and creates none to
-  the per-call checks; every method recorded and none refused, each record stored with `exposed`
-  `metadata` in the table; what the answers withhold, shown first in what the user is served
-  from; each answer whole, and no credential in any; a call refused and recorded while the
-  setting is off, answered again once it is back at `"metadata"`, and refused while the cap or a
-  stored level is not a level; every answer at `"content"` equal to the one at `"metadata"`,
-  recorded at the level in force; a failed record returning nothing; and the case that holds the
-  view to its seven reads, with the walk both views' suites share (`rpc-surface.ts`). Two steps
-  show the wake:
+- `admin-user-view.test.ts`: the user view, from an id that names no account and creates none to the
+  per-call checks; every method recorded and none refused, each record stored with `exposed`
+  `metadata` in the table; what the answers withhold, shown first in what the user is served from;
+  each answer whole, and no credential in any; a call refused and recorded while the setting is off,
+  answered again once it is back at `"metadata"`, and refused while the cap or a stored level is not
+  a level; every answer at `"content"` equal to the one at `"metadata"`, recorded at the level in
+  force; a failed record returning nothing; and the case that holds the view to its seven reads,
+  with the walk both views' suites share (`rpc-surface.ts`). Two steps show the wake:
   1. The read-only case opens views and calls every method, recorded and refused, on an account
      with both kinds of directory sync due, two gatekeeper accounts stored and an alarm set: its
      write count, stored values, alarm and directory entry stay as they were, no subscriber to
@@ -794,26 +790,25 @@ Integration suites, in `packages/integration-tests/__tests__/`:
   `listActions()` and `subscribeToActions()`; what the view withholds of what the owner reads, and
   inspection turned off; attachments, commits and a draft's paths listed without their content; no
   level above `"metadata"` to ask for or to set while the cap names none (`"content"` refused for
-  the bound), and no method that reads content; every call
-  recorded end to end; the creator of a connection made through `newGatekeeper()`, and none on an
-  ambient one; who holds an observer record, with what was verified for each; a deleted id refused
-  without being written; an audit write failure, where a call returns nothing; expiry; and long
-  text end to end.
-- `workshop-admin-user-view.test.ts`: `inspectUser()` reachable by a deployment admin alone, and
-  the account's `openForAdmin()` by no capability a user holds; a user that does not exist refused
-  with no account created, no directory entry and no record; every call into an account recorded
-  with kind `"user"`, and what the view withholds of what the user reads; no level above
-  `"metadata"` to ask for or to set while the cap names none; a live view turned off and on with the deployment's level,
-  with what that refuses recorded; an audit write failure, where a call returns nothing and
-  writes nothing; and an inspection that writes nothing to the account: the open, every method
-  and the refusals each sit between two reads of the account's `total_changes()`, which must be
-  equal, and the user then sees what they saw before.
+  the bound), and no method that reads content; every call recorded end to end; the creator of a
+  connection made through `newGatekeeper()`, and none on an ambient one; who holds an observer
+  record, with what was verified for each; a deleted id refused without being written; an audit
+  write failure, where a call returns nothing; expiry; and long text end to end.
+- `workshop-admin-user-view.test.ts`: `inspectUser()` reachable by a deployment admin alone, and the
+  account's `openForAdmin()` by no capability a user holds; a user that does not exist refused with
+  no account created, no directory entry and no record; every call into an account recorded with
+  kind `"user"`, and what the view withholds of what the user reads; no level above `"metadata"` to
+  ask for or to set while the cap names none; a live view turned off and on with the deployment's
+  level, with what that refuses recorded; an audit write failure, where a call returns nothing and
+  writes nothing; and an inspection that writes nothing to the account: the open, every method and
+  the refusals each sit between two reads of the account's `total_changes()`, which must be equal,
+  and the user then sees what they saw before.
 - `workshop-admin-audit.test.ts`: every setting change recorded before it takes effect, sessions,
   filters, stats across two admins, and a refused change when its record cannot be written.
 - `workshop-admin-bounds.test.ts`: the bounds' defaults (`"content"` refused for the bound), and a
-  redeploy that tightens them (an invalid cap failing closed) and demotes an admin. The redeploy ends every session, the demoted
-  admin's view among them, so the per-call re-check that stops a live view once its admin is demoted
-  is covered by `admin-workspace-view.test.ts`.
+  redeploy that tightens them (an invalid cap failing closed) and demotes an admin. The redeploy
+  ends every session, the demoted admin's view among them, so the per-call re-check that stops a
+  live view once its admin is demoted is covered by `admin-workspace-view.test.ts`.
 
 The integration suite reaches Durable Object storage directly (see
 [integration-testing.md](integration-testing.md#reaching-a-durable-objects-storage-from-a-test)): it

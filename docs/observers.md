@@ -119,11 +119,11 @@ The exception is bounded to metadata. The view never returns chat messages and a
 contents, commit messages, the arguments of queued agent calls, the descriptions and fields of
 actions, observations and hooks, or blueprint ids (see
 [What the metadata level withholds](admin-access.md#what-the-metadata-level-withholds) for each
-call). The one wider level, `"content"`, adds a gadget's code and stored data and nothing else, and
-only where the deployment sets `ADMIN_WORKSPACE_ACCESS_MAX=content` and an admin chooses it (see
-[The levels](admin-access.md#the-levels)). `ADMIN_WORKSPACE_ACCESS_MAX=off` turns inspection off
-whatever admins choose, and a value that is not a level counts as `off`. Titles, names, notes and blueprint descriptions stay visible,
-and can echo content.
+call). The one wider level, `"content"`, adds a gadget's code and stored data and nothing else,
+and only where the deployment sets `ADMIN_WORKSPACE_ACCESS_MAX=content` and an admin chooses it
+(see [The levels](admin-access.md#the-levels)). `ADMIN_WORKSPACE_ACCESS_MAX=off` turns inspection
+off whatever admins choose, and a value that is not a level counts as `off`. Titles, names, notes
+and blueprint descriptions stay visible, and can echo content.
 
 What a connection supplied is read only as the workspace stores it, and the connection is never
 asked. That includes a repository: a worktree can be a checkout through a connection, and the view
