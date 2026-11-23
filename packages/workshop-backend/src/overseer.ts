@@ -80,7 +80,9 @@ import {
   type AdminViewTerms,
 } from "./admin-access";
 import { adminViewCall } from "./admin-view";
-import { createExportDeadline, MAX_EXPORT_BYTES, MAX_EXPORT_DURATION_MS } from "./export-limits";
+import {
+  createExportDeadline, MAX_EXPORT_BYTES, MAX_EXPORT_DURATION_MS, type ExportDeadline,
+} from "./export-limits";
 import type { GadgetStorageReader } from "./gadget-storage-reader";
 import type { AdminAuditDurableObject } from "./admin-audit";
 import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryDurableObject } from "./user-directory";
@@ -5547,13 +5549,13 @@ class OverseerImpl implements AgentHooks {
       throw new Error(`No permanent gadget has id ${gadgetId}.`);
     }
     let released = Promise.withResolvers<void>();
-    this.#storageReads.set(gadgetId, released.promise);
-
     let facetName = this.gadgetFacetName(gadgetId);
-    let deadline = createExportDeadline(
-        `Reading the gadget's data took longer than ${maxDurationMs / 1000} seconds.`,
-        maxDurationMs);
+    let deadline: ExportDeadline | undefined;
     try {
+      this.#storageReads.set(gadgetId, released.promise);
+      deadline = createExportDeadline(
+          `Reading the gadget's data took longer than ${maxDurationMs / 1000} seconds.`,
+          maxDurationMs);
       // Whatever ran in the facet, mainline or a chat's version, runs nothing until the read
       // ends, and proposedChangesChanged() must not abort the reader.
       this.#runningChatIds.delete(gadgetId);
@@ -5576,11 +5578,16 @@ class OverseerImpl implements AgentHooks {
       }
       return result;
     } finally {
-      deadline.clear();
-      this.ctx.facets.abort(facetName, new Error("An admin's copy is taken"));
-      this.#runningChatIds.delete(gadgetId);
-      this.#storageReads.delete(gadgetId);
-      released.resolve();
+      // The lock is released even if the abort throws (as for a facet the gadget's removal
+      // deleted during the read), so no later call to the gadget waits on it for ever.
+      try {
+        deadline?.clear();
+        this.ctx.facets.abort(facetName, new Error("An admin's copy is taken"));
+        this.#runningChatIds.delete(gadgetId);
+      } finally {
+        this.#storageReads.delete(gadgetId);
+        released.resolve();
+      }
     }
   }
 

@@ -2920,13 +2920,13 @@ export type AdminAutoApproval = {
 
 /**
  * A deployment admin's read-only view of one workspace's metadata, minted by
- * AdminApi.inspectWorkspace(). Nothing it does changes the workspace or is seen by its members,
- * except a read of a gadget's stored data (measureGadget()), which pauses the gadget while it
- * reads and keeps the size it measured: it joins no presence and no session count, and starts no
- * agent or connection. Apart from the
- * methods documented as needing the "content" level, it returns what the "metadata" access level
- * shows (see ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that level withholds, at either
- * level: no method returns a chat's messages, an attachment's bytes or a file's content.
+ * AdminApi.inspectWorkspace(). It joins no presence and no session count, and starts no agent or
+ * connection. Nothing it does changes the workspace or is seen by its members, with one exception:
+ * measureGadget() pauses the gadget while it reads its stored data, and keeps the size it
+ * measured. Apart from the methods documented as needing the "content" level, it returns what the
+ * "metadata" access level shows (see ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that level
+ * withholds, at either level: no method returns a chat's messages, an attachment's bytes or a
+ * file's content.
  *
  * Each call first passes three checks, refused unrecorded with a code from
  * ADMIN_ACCESS_ERROR_CODES: the view has not expired (`viewExpired`), its admin is still a

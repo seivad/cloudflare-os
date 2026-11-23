@@ -819,12 +819,14 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
      connected accounts, profile and directory state among them).
 - `gadget-storage-reader.test.ts`: `data.json`'s encoding (rows lossless, BLOBs as `$bytes`,
   each key-value kind JSON cannot hold tagged, an object with a `$` key wrapped, a value that
-  refers to itself refused, internal tables left out, the byte limit stopping the read); the reader
+  refers to itself refused, a column named `__proto__` kept, internal tables left out, the byte
+  limit stopping the read); the reader
   refusing every call without its nonce; and `readGadgetStorage()` on a
   real gadget facet: a measure and a copy of its tables and key-value storage, the gadget coming
   back with its data, a connection and a stored persistent stub restored during a read each
   waiting for it and reaching the gadget's own class, a read that fails (over its byte limit)
-  restoring the gadget, keeping nothing and releasing the lock, two reads of one gadget in turn
+  restoring the gadget, keeping nothing and releasing the lock, the lock released when the abort
+  that ends a read throws, two reads of one gadget in turn
   with a code update between, a pending gadget refused, and the size forgotten when the gadget is
   deleted.
 - `connection-creator.test.ts`: the creator stamped at each creation path, and absent on an ambient
@@ -869,9 +871,10 @@ Integration suites, in `packages/integration-tests/__tests__/`:
   that keeps notes in SQL and a counter in its key-value storage, measured and listed, then
   answering with its data and taking one more write; the owner's and a collaborator's connections
   interleaved with reads, each reconnecting only when a read's pause cut it off and never reaching
-  the reader; a pending gadget and an unknown id refused, the next read going ahead; and
-  `measureGadget()` refused below `"content"` (`accessInsufficient`), recorded at the level in
-  force.
+  the reader (reads are quick, so few land during one: the wait itself is proven in
+  `gadget-storage-reader.test.ts`); a pending gadget and an unknown id refused, the next read
+  going ahead; and `measureGadget()` refused below `"content"` (`accessInsufficient`), recorded
+  at the level in force.
 - `workshop-admin-bounds.test.ts`: the bounds' defaults (`"content"` refused for the bound), and a
   redeploy that tightens them (an invalid cap failing closed) and demotes an admin. The redeploy
   ends every session, the demoted admin's view among them, so the per-call re-check that stops a

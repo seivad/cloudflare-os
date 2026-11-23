@@ -162,7 +162,11 @@ it("measures a gadget's stored data, and the gadget goes on with its data", asyn
   });
 });
 
-it("makes the owner's and a collaborator's connections during a read wait for the gadget",
+// Reads take about a millisecond, so connections mostly land between them: this checks end to end
+// that connections interleaved with reads only ever see the gadget, cut off at most once per read.
+// That a connection landing during a read waits for it is proven deterministically by the
+// backend's gadget-storage-reader.test.ts.
+it("lets the owner's and a collaborator's connections interleaved with reads see only the gadget",
     async () => {
   await withNotesGadget(["kept"], async ({ ws, gadget, gadgetId, workspaceId }) => {
     const [viewer] = nextUsernames("exportviewer");

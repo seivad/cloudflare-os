@@ -71,10 +71,20 @@ export class GadgetStorageReader extends DurableObject<Cloudflare.Env, GadgetSto
         name: table.name,
         createSql: table.sql,
         // Read as the encoding reaches it, so a table past the limit is never read whole.
-        rows: { [Symbol.iterator]: () => sql.exec(`SELECT * FROM ${quoteIdentifier(table.name)}`) },
+        rows: { [Symbol.iterator]: () => tableRows(sql, table.name) },
       })),
       kv: this.ctx.storage.kv.list(),
     }, options.maxBytes));
+  }
+}
+
+// A table's rows, each with its columns as own properties: built from the raw cells, since a row
+// object the cursor builds loses a column named `__proto__`.
+function* tableRows(sql: SqlStorage, name: string): Generator<Record<string, SqlStorageValue>> {
+  let cursor = sql.exec(`SELECT * FROM ${quoteIdentifier(name)}`);
+  let columns = cursor.columnNames;
+  for (let cells of cursor.raw()) {
+    yield Object.fromEntries(columns.map((column, index) => [column, cells[index] ?? null]));
   }
 }
 
@@ -109,8 +119,10 @@ export function encodeGadgetData(dump: GadgetStorageDump, maxBytes = MAX_EXPORT_
     if (isInternalTable(table.name)) continue;
     let rows: GadgetDataFile["sql"][number]["rows"] = [];
     for (let row of table.rows) {
-      let encoded: Record<string, GadgetDataValue> = {};
-      for (let [column, value] of Object.entries(row)) encoded[column] = encodeSqlValue(value);
+      // Built with fromEntries, which defines each column as an own property, so a column named
+      // `__proto__` is kept rather than setting the row's prototype.
+      let encoded: Record<string, GadgetDataValue> = Object.fromEntries(
+          Object.entries(row).map(([column, value]) => [column, encodeSqlValue(value)]));
       count(encoded);
       rows.push(encoded);
     }

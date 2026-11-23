@@ -97,6 +97,19 @@ describe("encodeGadgetData", () => {
     ]);
   });
 
+  it("keeps a column named __proto__ as a column", () => {
+    // JSON.parse makes `__proto__` an own property, as a SQL row's column is.
+    let row = JSON.parse('{"id": 1, "__proto__": "kept"}');
+    let file = encodeGadgetData(dump([
+      { name: "odd", createSql: 'CREATE TABLE odd(id, "__proto__")', rows: [row] },
+    ]));
+    let [encoded] = file.sql[0]!.rows;
+    expect(Object.hasOwn(encoded!, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(encoded)).toBe(Object.prototype);
+    expect(JSON.parse(JSON.stringify(file)).sql[0].rows)
+        .toStrictEqual([JSON.parse('{"id": 1, "__proto__": "kept"}')]);
+  });
+
   it("refuses a value that refers to itself, and allows one shared twice", () => {
     let shared = { n: 1 };
     expect(encodeKvValue({ a: shared, b: shared })).toStrictEqual({ a: { n: 1 }, b: { n: 1 } });
@@ -144,6 +157,11 @@ export class Gadget extends DurableObject {
 
   whoami() {
     return "gadget";
+  }
+
+  addOdd(value) {
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS odd("__proto__" TEXT)');
+    this.ctx.storage.sql.exec('INSERT INTO odd("__proto__") VALUES (?)', value);
   }
 
   mintCallback() {
@@ -260,6 +278,36 @@ describe("readGadgetStorage", () => {
     });
     expect(impl.storage.gadgetDataSizes.get(GADGET_ID).bytes).toBe(file.sizeBytes);
     expect(await (await gadgetOf(impl)).notes()).toStrictEqual(["only"]);
+  }));
+
+  it("copies a column named __proto__ from a real table", () => withGadget(async impl => {
+    await (await gadgetOf(impl)).addOdd("kept");
+    let file: GadgetDataFile = await impl.readGadgetStorage(GADGET_ID, "dump");
+    let odd = file.sql.find(table => table.name === "odd")!;
+    expect(odd.rows).toHaveLength(1);
+    expect(Object.hasOwn(odd.rows[0]!, "__proto__")).toBe(true);
+    expect(JSON.stringify(odd.rows)).toBe('[{"__proto__":"kept"}]');
+  }));
+
+  it("releases the lock when the abort that ends the read throws", () =>
+      withGadget(async impl => {
+    await (await gadgetOf(impl)).add("kept");
+    let facets = impl.ctx.facets;
+    let abort = facets.abort;
+    // The abort that ends the read throws, as for a facet deleted while it was read.
+    facets.abort = function(this: unknown, name: string, reason: unknown) {
+      Reflect.apply(abort, facets, [name, reason]);
+      if (String(reason).includes("copy is taken")) throw new Error("abort failed");
+    };
+    try {
+      await expect(impl.readGadgetStorage(GADGET_ID, "measure")).rejects.toThrow("abort failed");
+    } finally {
+      facets.abort = abort;
+    }
+    // A later restore of the gadget proceeds, and so does the next read.
+    let gadget = await gadgetOf(impl);
+    expect(await gadget.notes()).toStrictEqual(["kept"]);
+    expect((await impl.readGadgetStorage(GADGET_ID, "measure")).bytes).toBeGreaterThan(0);
   }));
 
   it("makes a connection opened during the read wait, then run the gadget's own class", () =>
