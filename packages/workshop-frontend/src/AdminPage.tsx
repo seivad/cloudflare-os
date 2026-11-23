@@ -12,6 +12,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import { AdminModelsPanel } from './features/ai-models/AdminModelsPanel'
 import { AdminUpdatesPanel } from './features/deployment-updates/AdminUpdatesPanel'
+import { AdminUsersPanel } from './features/admin-users/AdminUsersPanel'
 import { AdminAuditPanel } from './features/admin-audit/AdminAuditPanel'
 import { auditSettingsOf, type AuditSettings } from './features/admin-audit/auditSettings'
 import { latestReads } from './features/deployment-updates/latestReads'
@@ -116,7 +117,7 @@ export default function AdminPage() {
   // changing either replaces the history entry on the same route, which keeps this component and
   // its drafts.
   const navigate = useNavigate()
-  const { tab: requestedTab, ...auditFilter } = useSearch({ from: '/admin' })
+  const { tab: requestedTab, user: selectedUserId, ...auditFilter } = useSearch({ from: '/admin' })
   const activeTab = resolveAdminTab(requestedTab, {
     updatesAvailable: updateStatus === 'pending' ? 'pending' : updateStatus !== null,
     auditAvailable: auditSettings !== null,
@@ -491,6 +492,7 @@ export default function AdminPage() {
           { value: 'formats', label: 'Formats' },
           { value: 'models', label: 'Models' },
           { value: 'access', label: 'Access' },
+          { value: 'users', label: 'Users' },
           ...(auditSettings !== null ? [{ value: 'audit', label: 'Audit' }] : []),
           // Also listed while a requested Updates tab waits for the status, so it shows as selected.
           ...(activeTab === 'updates' || (updateStatus !== null && updateStatus !== 'pending')
@@ -514,6 +516,15 @@ export default function AdminPage() {
               onChanged={() => reloadUpdateStatus(() => admin.api.getUpdateStatus())}
             />
           )
+      )}
+
+      {/* Every account, with search, activity filter and sort */}
+      {activeTab === 'users' && (
+        <AdminUsersPanel
+          admin={admin.api}
+          selectedUserId={selectedUserId}
+          onSelectUser={(id) => void navigate({ to: '/admin', search: { tab: 'users', user: id }, replace: true })}
+        />
       )}
 
       {/* Admin audit log, inspection access and retention */}
