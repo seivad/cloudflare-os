@@ -6,7 +6,10 @@ import type { RpcStub } from 'capnweb'
 import type { AdminApi, AdminUserDescription } from '@gadgets/workshop-shared/api'
 import { BlueprintsTab } from './BlueprintsTab'
 import { describeFailure, ACCESS_OFF_TEXT } from './describeFailure'
+import { GadgetsTab } from './GadgetsTab'
 import { ReasonPrompt } from './ReasonPrompt'
+import { SharingTab } from './SharingTab'
+import { UsageTab } from './UsageTab'
 import { useAdminViews } from './useAdminViews'
 import { WorkspacesTab } from './WorkspacesTab'
 
@@ -21,10 +24,6 @@ const TABS: { value: UserPanelTab; label: string }[] = [
   { value: 'sharing', label: 'Sharing' },
 ]
 
-const Placeholder = ({ name }: { name: string }) => (
-  <p className="py-6 text-center text-sm text-kumo-subtle">{name} isn’t available yet.</p>
-)
-
 /**
  * A user's profile as a drawer over the Users table. It asks for a reason first, then reads the
  * account through `AdminApi.inspectUser()` and each workspace through `inspectWorkspace()`, so
@@ -38,7 +37,7 @@ export const UserPanel = ({ admin, userId, userName, onClose }: {
   onClose: () => void
 }) => {
   const views = useAdminViews(admin, userId)
-  const [tab, setTab] = useState<UserPanelTab>('workspaces')
+  const [tab, setTab] = useState<UserPanelTab>('usage')
   const [profile, setProfile] = useState<{ userId: string; description: AdminUserDescription } | { userId: string; error: string } | null>(null)
 
   const { reason, call, userView } = views
@@ -101,9 +100,9 @@ export const UserPanel = ({ admin, userId, userName, onClose }: {
                   />
                   {tab === 'workspaces' && <WorkspacesTab views={views} />}
                   {tab === 'blueprints' && <BlueprintsTab views={views} />}
-                  {tab === 'usage' && <Placeholder name="Usage" />}
-                  {tab === 'gadgets' && <Placeholder name="Gadgets" />}
-                  {tab === 'sharing' && <Placeholder name="Sharing" />}
+                  {tab === 'usage' && <UsageTab views={views} />}
+                  {tab === 'gadgets' && <GadgetsTab views={views} />}
+                  {tab === 'sharing' && <SharingTab views={views} />}
                 </div>
               )}
             </div>

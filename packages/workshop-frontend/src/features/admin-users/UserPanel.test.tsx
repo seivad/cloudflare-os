@@ -103,6 +103,7 @@ describe('UserPanel', () => {
     const admin = fakeAdmin()
     await render(admin)
     await confirmReason()
+    await click(tab('Workspaces'))
     await flush()
     expect(admin.inspectWorkspace).toHaveBeenCalledOnce()
     expect(admin.inspectWorkspace).toHaveBeenCalledWith('w1', 'Reviewing Ada’s work')
@@ -117,9 +118,18 @@ describe('UserPanel', () => {
     expect(body).toContain('use')
   })
 
+  it('opens on the Usage tab', async () => {
+    await render(fakeAdmin())
+    await confirmReason()
+    await flush()
+    expect(document.querySelector('section[aria-label="Total cost"]')).not.toBeNull()
+    expect(text()).toContain('$0.50')
+  })
+
   it('shows an empty state for a user with no workspaces', async () => {
     await render(fakeAdmin([]))
     await confirmReason()
+    await click(tab('Workspaces'))
     expect(text()).toContain('This user has no workspaces.')
   })
 
