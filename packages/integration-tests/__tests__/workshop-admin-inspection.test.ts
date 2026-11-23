@@ -321,9 +321,10 @@ it("lists users and workspaces from the deployment directory", async () => {
 
   const listed = await waitFor("the new user to be listed", async () =>
     (await admin.listUsers({ query: ownerName })).users.find(user => user.id === ownerName) ?? null);
+  // A new account owns no workspace the directory lists yet.
   expect(listed).toEqual({
     id: ownerName, name: "Dir Owner", created: expect.any(Date), lastLogin: expect.any(Date),
-    isAdmin: false,
+    isAdmin: false, ownedWorkspaces: 0,
   });
   // Asked through the second admin's capability, which lists the same directory.
   for (const username of [ADMIN_USERNAME, AUDITOR_USERNAME]) {
@@ -346,6 +347,11 @@ it("lists users and workspaces from the deployment directory", async () => {
     id: firstId, title: (await first.getMetadata()).title,
     owner: { id: ownerName, name: "Dir Owner" }, created: expect.any(Date),
   });
+  // The owner's record counts the workspaces listed with them as owner.
+  const ownedCount = async () =>
+    (await admin.listUsers({ query: ownerName })).users.find(user => user.id === ownerName)
+        ?.ownedWorkspaces;
+  expect(await ownedCount()).toBe(2);
 
   await first.setTitle("Renamed for the directory");
   await waitFor("the rename to be listed", async () =>
@@ -368,6 +374,7 @@ it("lists users and workspaces from the deployment directory", async () => {
   await first.deleteSelf();
   expect((await admin.listWorkspaces({ owner: ownerName })).workspaces
       .map(workspace => workspace.id)).toEqual([secondId]);
+  expect(await ownedCount()).toBe(1);
 
   for (const limit of [0, 201, 1.5]) {
     await expect(admin.listUsers({ limit }), `listUsers limit ${limit}`).rejects.toThrow();
