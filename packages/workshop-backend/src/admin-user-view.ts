@@ -12,12 +12,14 @@ import {
   type AdminUserAccessRecord, type AdminUserBlueprint, type AdminUserConnectedAccount,
   type AdminUserDescription, type AdminUserDiagnostics, type AdminUserMethod,
   type AdminUserModels, type AdminUserSessions, type AdminUserView, type AdminUserWorkspace,
+  type UserCostSummary,
 } from "@gadgets/workshop-shared/api";
 import {
   assertAdminViewLive, redactAdminAuditArgs, type AdminViewTerms,
 } from "./admin-access.js";
 import type { AdminAuditDurableObject } from "./admin-audit.js";
 import { adminViewCall } from "./admin-view.js";
+import { userCostSummary } from "./cost-ledger.js";
 import { isDeploymentAdmin } from "./auth/config.js";
 import { createWorkshopLogger } from "./observability.js";
 import type { ConnectedAccountRecord, UserStorage } from "./storage-schema/user-storage.js";
@@ -251,6 +253,10 @@ class AdminUserViewImpl extends RpcTarget implements AdminUserView {
       }));
       return [...own, ...library];
     });
+  }
+
+  async getCostSummary(): Promise<UserCostSummary> {
+    return this.#call("getCostSummary", {}, () => userCostSummary(this.#host.storage));
   }
 
   async getDiagnostics(): Promise<AdminUserDiagnostics> {

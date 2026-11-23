@@ -1824,6 +1824,10 @@ export type AdminUserRecord = UserDirectoryRecord & {
   /** How many workspaces the directory lists as this user's: 0 when none. Counts only the
    * workspaces the directory knows (see AdminApi.listWorkspaces()). */
   ownedWorkspaces: number;
+  /** What the user is counted as having spent, in US dollars (UserCostSummary.totalCost), as the
+   * user's account last reported it: to within a cent of the current total, or as of their last
+   * session start. Absent until it has reported one. */
+  totalCost?: number;
 };
 
 /** Options for AdminApi.listUsers(). */
@@ -1839,9 +1843,11 @@ export type AdminUserQuery = {
   /** Only users whose `lastLogin` is at or after this: one with no recorded login is left out.
    * Rejected when not a valid Date. Absent lists users whatever their activity. */
   activeSince?: Date;
-  /** What orders the page: "id" (the default), "lastLogin" or "created". A user with no recorded
-   * time comes last whichever the direction, and ties fall in id order. */
-  sort?: "id" | "lastLogin" | "created";
+  /** Only users whose reported `totalCost` is above zero. Absent lists users whatever they spent. */
+  hasSpend?: boolean;
+  /** What orders the page: "id" (the default), "lastLogin", "created" or "totalCost". A user with
+   * no recorded value comes last whichever the direction, and ties fall in id order. */
+  sort?: "id" | "lastLogin" | "created" | "totalCost";
   /** "asc" (the default) or "desc", the direction of `sort`. */
   direction?: "asc" | "desc";
 };
@@ -1988,7 +1994,7 @@ export type AdminWorkspaceMethod = typeof ADMIN_WORKSPACE_METHODS[number];
  * and each AdminUserView method. */
 export const ADMIN_USER_METHODS = [
   "inspectUser", "describe", "listWorkspaces", "listConnectedAccounts", "listModels",
-  "listSessions", "listBlueprints", "getDiagnostics",
+  "listSessions", "listBlueprints", "getDiagnostics", "getCostSummary",
 ] as const satisfies readonly ("inspectUser" | keyof AdminUserView)[];
 
 /** One of ADMIN_USER_METHODS. */
@@ -3342,6 +3348,12 @@ export interface AdminUserView extends RpcTarget {
   /** The blueprints the account holds: the user's own, then those in their library, without
    * each one's id (see AdminUserBlueprint). */
   listBlueprints(): Promise<AdminUserBlueprint[]>;
+
+  /** What the user is counted as having spent: their owned workspaces' costs (collaborators'
+   * spend in them included), those of workspaces they deleted, and their own spend outside any
+   * workspace, with each breakdown by kind and by model. The same summary the user reads of
+   * themselves, AuthenticatedApi.getMyCostSummary(). */
+  getCostSummary(): Promise<UserCostSummary>;
 
   /** The account's operational state. */
   getDiagnostics(): Promise<AdminUserDiagnostics>;

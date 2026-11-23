@@ -380,6 +380,8 @@ export function makeUserStorage(storage: DurableObjectStorage) {
       createdAt: <Date | null>null,
       // Epoch ms of the session start the directory last took (0 = none). See #syncDirectory().
       directoryLoginAt: 0,
+      // The total cost in USD the directory last took (see #syncDirectoryCost()).
+      directoryCostUsd: 0,
     }
   });
 }

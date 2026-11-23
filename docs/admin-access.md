@@ -33,8 +33,9 @@ a user's account (see [User inspection](#user-inspection)) alike.
   resource and gatekeeper availability, models, update checks, ...), plus
   `setAdminWorkspaceAccess()` and `setAdminAuditRetentionDays()`. Every setter is audited.
 - **The directory**: `listUsers()` and `listWorkspaces()`. `listUsers()` takes `activeSince` (only
-  users whose `lastLogin` is at or after it), `sort` (`"id"`, `"lastLogin"` or `"created"`) and
-  `direction`, and each record carries `ownedWorkspaces`.
+  users whose `lastLogin` is at or after it), `hasSpend` (only users whose reported total cost is above zero), `sort` (`"id"`, `"lastLogin"`,
+  `"created"` or `"totalCost"`) and `direction`, and each record carries `ownedWorkspaces` and, once
+  the account has reported one, `totalCost`.
 - **Inspection**: `inspectWorkspace(workspaceId, reason, { lifetimeSeconds })`, which returns an
   `AdminWorkspaceView` of the workspace's metadata.
 - **User inspection**: `inspectUser(userId, reason, { lifetimeSeconds })`, which returns an
@@ -74,6 +75,13 @@ value and id), so pages neither repeat nor skip users that share a value. `owned
 the workspaces the directory lists with that user as owner (the `workspaces_by_owner` index), so a
 workspace the directory has not yet learned of is not counted.
 
+`totalCost` is the account's `UserCostSummary.totalCost` (see
+[cost-accounting.md](cost-accounting.md#ledger-and-summary)), kept in a nullable `total_cost_usd`
+column of `user_activity` (added to an existing table when the object starts). `hasSpend` keeps
+users whose column is above zero, and `sort: "totalCost"` orders like a time sort: users with none
+reported last, ties by id, an opaque cursor. The directory is a finding aid: the figure is the
+account's last report, not a ledger, and the exact breakdown is `AdminUserView.getCostSummary()`.
+
 ### Feeds
 
 Durable Objects cannot be enumerated, so the directory learns of accounts and workspaces from the
@@ -84,7 +92,12 @@ objects themselves:
   start also reports the session's time as `lastLogin`, at most once per
   `DIRECTORY_ACTIVITY_INTERVAL_MS` (an hour, the precision `lastLogin` promises), and every report
   carries the account's creation time once it is recorded. An account records it when it is
-  created, so it is listed with it from its first session.
+  created, so it is listed with it from its first session. It also reports the account's total
+  cost, with each activity report and, between them, when the total has moved by
+  `DIRECTORY_COST_STEP_USD` ($0.01) or more since the directory last took one (checked when a
+  workspace's cost arrives or the account counts one of its own). One cost push is in flight at a
+  time, and changes that arrive meanwhile are one more push, so a burst of spend is not a sync per
+  request; a failed push leaves the last acknowledged total (`directoryCostUsd`) behind to retry.
 - **The Overseer** reports its workspace's title, owner and creation time:
   - on every `open()`, a no-op once the directory has acknowledged the title's revision;
   - when the title changes, whoever changes it (a rename, an agent-chosen title, initialisation
@@ -428,7 +441,7 @@ delivery's own records (the queue, the read cursor of a chat it delivered for, a
 its service reports gone) and the alarm, and nothing else of the account. An account with nothing
 queued is left byte for byte as it was.
 
-The view offers seven reads:
+The view offers eight reads:
 
 | Call | Returns | Withholds |
 | --- | --- | --- |
@@ -439,6 +452,7 @@ The view offers seven reads:
 | `listSessions()` | How many sign-in sessions the account holds, and the latest `ADMIN_LIST_MAX_LIMIT` (200) of them, latest first: when each was created and when it expires, and for a device session staged for a handoff, when that handoff lapses | Nothing |
 | `listBlueprints()` | The blueprints the account holds, the user's own (published from a workspace, or imported) and then those in their library (uploaded, or added by id): each one's title, version and release time, the workspace a published one came from, and whether one of the user's own is featured | Each blueprint's id, which is a share link to its code |
 | `getDiagnostics()` | When the alarm next fires, the connect flows and device sign-ins still pending, the push devices by kind, the notifications queued, the day's model-call count, and the billing account's id and credit balance | Nothing |
+| `getCostSummary()` | What the user is counted as having spent (`UserCostSummary`): the total, by kind and by model, each owned workspace's cost and lines, the deleted workspaces' bucket and the user's own ledger | Nothing |
 
 The open (`inspectUser`) returns the view and nothing of the account.
 
@@ -457,7 +471,10 @@ API URL is free text, not a credential, but a URL can carry one, and an investig
 nothing else of it, so only whether one is set is returned (`AdminUserModel.customApiUrl`).
 
 `getDiagnostics()` reports the billing account's id, the credit balance and the day's model-call
-count: they are metadata.
+count: they are metadata. So is `getCostSummary()`, which is what the user reads of themselves
+(`AuthenticatedApi.getMyCostSummary()`). The view computes it from its store reads with the same
+function the account uses (`userCostSummary()` in `cost-ledger.ts`), never by calling the object.
+This is the one part of the admin user view that depends on the fork's cost ledger.
 
 `listWorkspaces()` lists more than the user's home page shows. A workspace is provisional until it
 has some activity, such as a chat message or a code edit: the home page creates one ahead of the
@@ -854,7 +871,7 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   each answer whole, and no credential in any; a call refused and recorded while the setting is off,
   answered again once it is back at `"metadata"`, and refused while the cap or a stored level is not
   a level; every answer at `"content"` equal to the one at `"metadata"`, recorded at the level in
-  force; a failed record returning nothing; and the case that holds the view to its seven reads,
+  force; a failed record returning nothing; and the case that holds the view to its eight reads,
   with the walk both views' suites share (`rpc-surface.ts`). Two steps show the wake:
   1. The read-only case opens views and calls every method, recorded and refused, on an account
      with both kinds of directory sync due, two gatekeeper accounts stored and an alarm set: its

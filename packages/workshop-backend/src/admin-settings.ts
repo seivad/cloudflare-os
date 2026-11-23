@@ -1545,7 +1545,7 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
     // Built field by field, so that nothing else the client sent reaches the directory.
     let { users, nextCursor } = await this.directories.getByName("").listUsers({
       query: options.query, cursor: options.cursor, limit, activeSince,
-      sort: options.sort, direction: options.direction,
+      hasSpend: options.hasSpend, sort: options.sort, direction: options.direction,
     });
     let page = users.map(user => ({ ...user, isAdmin: isDeploymentAdmin(this.env, user.id) }));
     return nextCursor === undefined ? { users: page } : { users: page, nextCursor };

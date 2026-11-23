@@ -16,12 +16,19 @@ const MAX_PAGE_TEXT_LENGTH = 1_000_000;
  * precision of AdminUserRecord.lastLogin and AdminWorkspaceRecord.lastActive. */
 export const DIRECTORY_ACTIVITY_INTERVAL_MS = 60 * 60_000;
 
+/** How far a user's total cost must move, in US dollars, before its user DO tells the directory
+ * between activity reports. */
+export const DIRECTORY_COST_STEP_USD = 0.01;
+
 /** What a user DO reports of its account beside its profile (see syncUser()). */
 export type UserDirectoryActivity = {
   /** When the account was created, if recorded; the first known value is kept. */
   created?: Date;
   /** When the session being reported started; the stored value only moves forward. */
   lastLogin?: Date;
+  /** What the account is counted as having spent in USD (UserCostSummary.totalCost); the latest
+   * report is the one kept. */
+  totalCost?: number;
 };
 
 /** A workspace as its Overseer reports it to the directory (see syncWorkspace()). */
@@ -146,6 +153,11 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       created INTEGER,
       last_login INTEGER
     ) STRICT`);
+    // Added after the table first shipped, so a table that exists lacks it.
+    if (!ctx.storage.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('user_activity')")
+        .toArray().some(column => column.name === "total_cost_usd")) {
+      ctx.storage.sql.exec("ALTER TABLE user_activity ADD COLUMN total_cost_usd REAL");
+    }
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS workspaces (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -174,14 +186,16 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
          rev = excluded.rev
        WHERE excluded.rev > users.rev`,
       record.id, name, `${clamp(record.id)}\n${name}`.toLowerCase(), rev);
-    if (activity?.created || activity?.lastLogin) {
+    if (activity?.created || activity?.lastLogin || activity?.totalCost !== undefined) {
       this.ctx.storage.sql.exec(
-        `INSERT INTO user_activity (id, created, last_login) VALUES (?, ?, ?)
+        `INSERT INTO user_activity (id, created, last_login, total_cost_usd) VALUES (?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            created = coalesce(user_activity.created, excluded.created),
            last_login = max(coalesce(user_activity.last_login, excluded.last_login),
-                            coalesce(excluded.last_login, user_activity.last_login))`,
-        record.id, epochMs(activity.created), epochMs(activity.lastLogin));
+                            coalesce(excluded.last_login, user_activity.last_login)),
+           total_cost_usd = coalesce(excluded.total_cost_usd, user_activity.total_cost_usd)`,
+        record.id, epochMs(activity.created), epochMs(activity.lastLogin),
+        activity.totalCost ?? null);
     }
   }
 
@@ -259,10 +273,11 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * Users matching `query` as searchUsers() matches (blank matches all), with their activity,
-   * the number of workspaces they own and clamped names: in id order by default, or by `sort`
-   * (`direction` "asc" by default; a user with no recorded time for a time sort comes last
-   * whichever the direction, ties by id). `activeSince` keeps only users whose last login is at
-   * or after it, so one with no recorded login is left out. A page is at most `limit`, and fewer
+   * the number of workspaces they own, their reported total cost and clamped names: in id order
+   * by default, or by `sort` (`direction` "asc" by default; a user with no recorded value for a
+   * time or cost sort comes last whichever the direction, ties by id). `activeSince` keeps only users whose last login is at
+   * or after it, so one with no recorded login is left out; `hasSpend` keeps only users whose
+   * reported total cost is above zero. A page is at most `limit`, and fewer
    * once its ids and names would pass a million characters (never none while any remain).
    * `cursor` is the previous page's `nextCursor`: the last id for an id sort, otherwise an opaque
    * string naming the last user's sort value and id, so a page boundary falls the same however
@@ -271,17 +286,19 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
    * adminListLimit()).
    */
   listUsers(options: {
-    query?: string; cursor?: string; limit: number; activeSince?: Date;
-    sort?: "id" | "lastLogin" | "created"; direction?: "asc" | "desc";
+    query?: string; cursor?: string; limit: number; activeSince?: Date; hasSpend?: boolean;
+    sort?: "id" | "lastLogin" | "created" | "totalCost"; direction?: "asc" | "desc";
   }): UserDirectoryPage {
-    const { query = "", cursor, limit, activeSince, sort = "id", direction = "asc" } = options;
+    const { query = "", cursor, limit, activeSince, hasSpend, sort = "id", direction = "asc" } =
+        options;
     validateQuery(query);
     const needle = query.trim().toLowerCase();
     const conditions: string[] = [];
     const bindings: (string | number)[] = [];
     // The sort column and the order its keyset cursor walks.
     const column = sort === "lastLogin" ? "user_activity.last_login"
-        : sort === "created" ? "user_activity.created" : "users.id";
+        : sort === "created" ? "user_activity.created"
+        : sort === "totalCost" ? "user_activity.total_cost_usd" : "users.id";
     const dir = direction === "desc" ? "DESC" : "ASC";
     if (cursor !== undefined) {
       if (sort === "id") {
@@ -308,13 +325,15 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       conditions.push("user_activity.last_login >= ?");
       bindings.push(activeSince.getTime());
     }
+    if (hasSpend) conditions.push("user_activity.total_cost_usd > 0");
     const order = sort === "id" ? `users.id ${dir}` : `${column} ${dir} NULLS LAST, users.id`;
     const rows = this.ctx.storage.sql.exec<{
       id: string; name: string; created: number | null; last_login: number | null;
-      owned: number;
+      total_cost_usd: number | null; owned: number;
     }>(
       `SELECT users.id AS id, users.name AS name, user_activity.created AS created,
          user_activity.last_login AS last_login,
+         user_activity.total_cost_usd AS total_cost_usd,
          (SELECT COUNT(*) FROM workspaces WHERE workspaces.owner_id = users.id) AS owned
        FROM users LEFT JOIN user_activity ON user_activity.id = users.id
        ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
@@ -326,11 +345,13 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       ...row.created !== null && { created: new Date(row.created) },
       ...row.last_login !== null && { lastLogin: new Date(row.last_login) },
       ownedWorkspaces: row.owned,
+      ...row.total_cost_usd !== null && { totalCost: row.total_cost_usd },
     }), user => user.id.length + user.name.length);
     if (nextCursor === undefined) return { users: items };
     if (sort === "id") return { users: items, nextCursor };
     const last = items[items.length - 1];
-    const value = (sort === "lastLogin" ? last.lastLogin : last.created)?.getTime() ?? null;
+    const value = sort === "totalCost" ? last.totalCost ?? null
+        : (sort === "lastLogin" ? last.lastLogin : last.created)?.getTime() ?? null;
     return { users: items, nextCursor: encodeCursor(value, last.id) };
   }
 

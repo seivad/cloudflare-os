@@ -3,12 +3,14 @@
 // lines; where they are stored is the caller's business (Overseer.recordCost, `costLines`).
 
 import {
-  AUTO_ROUTER_MODEL_ID, type CostKind, type CostLine, type CostSource,
+  AUTO_ROUTER_MODEL_ID, type CostKind, type CostLine, type CostSource, type UserCostSummary,
+  type WorkspaceCostSummary,
 } from "@gadgets/workshop-shared/api";
 import type { ActionCost } from "@gadgets/workshop-shared/gatekeeper";
 import type { AiGatewayLogRecord } from "./ai-gateway";
 import type { MeteredRequest } from "./ai-invoke";
 import { costLineKey } from "./storage-schema/overseer-storage";
+import type { UserStorage } from "./storage-schema/user-storage";
 
 export { costLineKey };
 
@@ -176,6 +178,41 @@ export function byModel(lines: CostLine[]): Record<string, number> {
   let totals: Record<string, number> = {};
   for (let line of lines) totals[line.model] = (totals[line.model] ?? 0) + line.usd;
   return totals;
+}
+
+/** What userCostSummary() reads of a user's store: only reads, so the admin view can hold them. */
+export type UserCostReads = {
+  readonly gadgets: Pick<UserStorage["gadgets"], "list">;
+  readonly deletedWorkspaceCost: Pick<UserStorage["deletedWorkspaceCost"], "get">;
+  readonly ownCostLines: Pick<UserStorage["ownCostLines"], "get">;
+};
+
+/**
+ * What a user is counted as having spent: the workspaces they own (collaborators' spend in them
+ * included), the workspaces they deleted, and their own spend outside any workspace. Shared by the
+ * user's own summary (UserDurableObject.getCostSummary()), the admin view's, and the directory's
+ * total.
+ */
+export function userCostSummary(storage: UserCostReads): UserCostSummary {
+  let workspaces: WorkspaceCostSummary[] = [];
+  for (let workspace of storage.gadgets.list()) {
+    if (workspace.owner || !workspace.totalCost) continue;
+    workspaces.push({workspaceId: workspace.id, title: workspace.title, totalCost: workspace.totalCost,
+      lines: withEarlier(workspace.totalCost, workspace.costLines ?? [])});
+  }
+  let deletedWorkspaces = storage.deletedWorkspaceCost.get();
+  let ownLines = storage.ownCostLines.get();
+  let own = {totalCost: ownLines.reduce((sum, line) => sum + line.usd, 0), lines: ownLines};
+  let lines = [...workspaces.flatMap(workspace => workspace.lines), ...deletedWorkspaces.lines, ...ownLines];
+  return {
+    totalCost: workspaces.reduce((sum, workspace) => sum + workspace.totalCost, 0) +
+        deletedWorkspaces.totalCost + own.totalCost,
+    byKind: byKind(lines),
+    byModel: byModel(lines),
+    workspaces,
+    deletedWorkspaces,
+    own,
+  };
 }
 
 function addLine(lines: CostLine[], add: CostLine): CostLine[] {

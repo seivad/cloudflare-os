@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import type { CallInvite, ChatReadState, ChatTimelineHead, CostLine, UnreadStateScope, UnreadStateSubscriber, UserCostSummary, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceCostSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
+import type { CallInvite, ChatReadState, ChatTimelineHead, CostLine, UnreadStateScope, UnreadStateSubscriber, UserCostSummary, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
 import { ADMIN_ACCESS_ERROR_CODES, createAdminAccessError, type AdminUserView } from "@gadgets/workshop-shared/api";
 import { WorkspaceMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart, type WebPushSubscription } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection, getResourceTypeId, findResourceType } from "@gadgets/workshop-shared/gatekeeper";
@@ -16,7 +16,7 @@ import {
 } from "./storage-schema/user-storage.js";
 import { chatKey, chatKeyPrefix } from "./storage-schema/overseer-storage.js";
 import { recordAnalytics } from "./analytics";
-import { addCost, byKind, byModel, MAX_REPORTED_LOG_AGE_DAYS, mergeLines, withEarlier, type CostEntry } from "./cost-ledger.js";
+import { addCost, MAX_REPORTED_LOG_AGE_DAYS, mergeLines, userCostSummary, withEarlier, type CostEntry } from "./cost-ledger.js";
 import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
 import { voiceCostEntry, type VoiceCost, type VoiceCostOutcome } from "./voice.js";
@@ -35,7 +35,7 @@ import {
   DEVICE_HANDOFF_LIFETIME_MS, isDeviceHandoffState, sealDeviceSessionHandoff,
   type DeviceSessionCredential, type DeviceSessionHandoff,
 } from "./auth/device-session-handoff.js";
-import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryActivity } from "./user-directory.js";
+import { DIRECTORY_ACTIVITY_INTERVAL_MS, DIRECTORY_COST_STEP_USD, type UserDirectoryActivity } from "./user-directory.js";
 import type { AdminViewTerms } from "./admin-access.js";
 import { openAdminUserView } from "./admin-user-view.js";
 
@@ -354,6 +354,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // The latest registration with the notification service; the next one waits for it to settle.
   #notificationRegistration: Promise<unknown> = Promise.resolve();
   #unreadSubscribers = new Map<object, {scope: UnreadStateScope; subscriber: RpcStub<UnreadStateSubscriber>}>();
+  // Whether a total cost push to the directory is in flight, and whether a change arrived during it
+  // (see #syncDirectoryCost()).
+  #costSyncing = false;
+  #costSyncAgain = false;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -427,9 +431,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (rev === this.storage.directoryRev.get() && !reportLogin) return;
     const profile = this.storage.profile.get();
     const createdAt = this.storage.createdAt.get();
+    // The total goes with the activity report, so the directory's figure is at most an hour old
+    // even for an account whose spend moves by less than a cent at a time.
+    const totalCost = reportLogin ? userCostSummary(this.storage).totalCost : undefined;
     const activity: UserDirectoryActivity = {
       ...createdAt && { created: createdAt },
       ...reportLogin && { lastLogin: new Date(now) },
+      ...totalCost !== undefined && { totalCost },
     };
     this.ctx.exports.UserDirectoryDurableObject.getByName("")
         .syncUser({ id: profile.id, name: profile.name }, rev, activity)
@@ -438,11 +446,48 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           if (reportLogin && now > this.storage.directoryLoginAt.get()) {
             this.storage.directoryLoginAt.put(now);
           }
+          if (totalCost !== undefined) this.storage.directoryCostUsd.put(totalCost);
         }, (error: unknown) => {
           logger.warn("failed to sync user directory record", {
             event: "user.directory.sync.failed",
             error,
           });
+        });
+  }
+
+  // Tells the directory the account's total cost when it has moved by DIRECTORY_COST_STEP_USD or
+  // more since the directory last took one, so a user who spends is listed with what they spent
+  // without a sync per request. One push is in flight at a time: a change that arrives meanwhile
+  // is checked again when it lands, so a burst of costs is one push and then at most one more.
+  // Best-effort, and a failed push leaves the last acknowledged total behind, so the next change
+  // or session retries.
+  #syncDirectoryCost(): void {
+    if (this.#costSyncing) {
+      this.#costSyncAgain = true;
+      return;
+    }
+    const totalCost = userCostSummary(this.storage).totalCost;
+    if (Math.abs(totalCost - this.storage.directoryCostUsd.get()) < DIRECTORY_COST_STEP_USD) return;
+    this.#costSyncing = true;
+    const profile = this.storage.profile.get();
+    this.ctx.exports.UserDirectoryDurableObject.getByName("")
+        .syncUser({ id: profile.id, name: profile.name }, this.storage.profileRev.get(),
+            { totalCost })
+        .then(() => {
+          this.storage.directoryCostUsd.put(totalCost);
+        }, (error: unknown) => {
+          this.#costSyncAgain = false;
+          logger.warn("failed to sync user directory cost", {
+            event: "user.directory.cost.failed",
+            error,
+          });
+        })
+        .finally(() => {
+          this.#costSyncing = false;
+          if (this.#costSyncAgain) {
+            this.#costSyncAgain = false;
+            this.#syncDirectoryCost();
+          }
         });
   }
 
@@ -1889,11 +1934,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     workspace.totalCost = totalCost;
     workspace.costLines = lines;
     this.storage.gadgets.put(workspace);
+    this.#syncDirectoryCost();
   }
 
   /** Counts a cost the user incurred outside any workspace. */
   addOwnCost(entry: CostEntry & {source: "voice"}): void {
     this.storage.ownCostLines.put(addCost(this.storage.ownCostLines.get(), entry));
+    this.#syncDirectoryCost();
   }
 
   /**
@@ -1934,25 +1981,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * them included), the workspaces they deleted, and their own spend outside any workspace.
    */
   getCostSummary(): UserCostSummary {
-    let workspaces: WorkspaceCostSummary[] = [];
-    for (let workspace of this.storage.gadgets.list()) {
-      if (workspace.owner || !workspace.totalCost) continue;
-      workspaces.push({workspaceId: workspace.id, title: workspace.title, totalCost: workspace.totalCost,
-        lines: withEarlier(workspace.totalCost, workspace.costLines ?? [])});
-    }
-    let deletedWorkspaces = this.storage.deletedWorkspaceCost.get();
-    let ownLines = this.storage.ownCostLines.get();
-    let own = {totalCost: ownLines.reduce((sum, line) => sum + line.usd, 0), lines: ownLines};
-    let lines = [...workspaces.flatMap(workspace => workspace.lines), ...deletedWorkspaces.lines, ...ownLines];
-    return {
-      totalCost: workspaces.reduce((sum, workspace) => sum + workspace.totalCost, 0) +
-          deletedWorkspaces.totalCost + own.totalCost,
-      byKind: byKind(lines),
-      byModel: byModel(lines),
-      workspaces,
-      deletedWorkspaces,
-      own,
-    };
+    return userCostSummary(this.storage);
   }
 
   async deleteWorkspace(id: string): Promise<void> {

@@ -65,6 +65,42 @@ describe("the user DO's directory feed", () => {
     await expect.poll(() => listed(username)).toEqual({ ...second, name: "Renamed Feed User" });
   });
 
+  it("reports the total cost when it moved by a cent, and with a session report", async () => {
+    const { username, user, token } = await newAccount();
+    await user.authenticate(token);
+    await expect.poll(() => listed(username)).toMatchObject({ lastLogin: expect.any(Date) });
+    const costOf = async () => (await listed(username))?.totalCost;
+    // The session report carries the total, even a zero one.
+    await expect.poll(costOf).toBe(0);
+
+    // A move under a cent is not pushed; one of a cent or more is.
+    await user.newWorkspace("w1", "Workspace");
+    await user.setWorkspaceCost("w1", 0.005, []);
+    await user.setWorkspaceCost("w1", 0.5, []);
+    await expect.poll(costOf).toBe(0.5);
+    await user.setWorkspaceCost("w1", 0.505, []);
+    await user.addOwnCost({ kind: "transcription", model: "m", estimated: true, usd: 0.002, source: "voice" });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(await costOf()).toBe(0.5);
+    expect(await runInDurableObject(user, (_instance, state) =>
+        makeUserStorage(state.storage).directoryCostUsd.get())).toBe(0.5);
+
+    // The next activity report brings the exact total along.
+    await runInDurableObject(user, (_instance, state) => {
+      makeUserStorage(state.storage).directoryLoginAt.put(0);
+    });
+    await user.authenticate(token);
+    await expect.poll(costOf).toBeCloseTo(0.507, 10);
+  });
+
+  it("coalesces a burst of costs into the latest total", async () => {
+    const { username, user } = await newAccount();
+    await user.newWorkspace("w1", "Workspace");
+    // Each call is a cent past the last; calls made while a push is in flight are one more push.
+    for (let n = 1; n <= 20; n++) await user.setWorkspaceCost("w1", n * 0.02, []);
+    await expect.poll(async () => (await listed(username))?.totalCost).toBeCloseTo(0.4, 10);
+  });
+
   it("reports the creation of an account created by Cloudflare Access", async () => {
     const email = `feed-${crypto.randomUUID()}@example.com`;
     const user = env.TEST_USER.getByName(email);

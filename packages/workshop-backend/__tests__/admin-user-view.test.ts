@@ -16,7 +16,7 @@ import { RpcTarget } from "capnweb";
 import {
   ADMIN_ACCESS_ERROR_CODES, ADMIN_LIST_MAX_LIMIT, ADMIN_USER_METHODS, getAdminAccessErrorCode,
   type AdminUserAccessRecord, type AdminUserView, type AdminWorkspaceAccess,
-  type AiChatAuthorInfo,
+  type AiChatAuthorInfo, type CostLine,
 } from "@gadgets/workshop-shared/api";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import type { AdminViewTerms } from "../src/admin-access.js";
@@ -190,6 +190,7 @@ async function answersOf(view: AdminUserView) {
     listSessions: await view.listSessions(),
     listBlueprints: await view.listBlueprints(),
     getDiagnostics: await view.getDiagnostics(),
+    getCostSummary: await view.getCostSummary(),
   });
 }
 
@@ -274,6 +275,12 @@ const MODEL_URL_KEY = "url-key-6b40d9";
 const MODEL_HEADER_VALUE = "header-value-1e97c4";
 const BILLING_ACCOUNT_NAME = "Billing Name 7f20b6";
 
+// What the account spent outside any workspace, as a stored cost line.
+const OWN_COST_LINE: CostLine = {
+  source: "voice", kind: "transcription", model: "@cf/openai/whisper", estimated: true,
+  usd: 0.125, requests: 1,
+};
+
 type Seeded = {
   // The browser session's token, as createAccount() returned it.
   token: string;
@@ -333,6 +340,10 @@ async function seed(user: Live): Promise<Seeded> {
   for (let n of [1, 2, 3, 4]) await instance.newWorkspace(`ws-owned-${n}`, `Owned ${n}`);
   await instance.setWorkspaceLastActive("ws-owned-1", LAST_ACTIVE);
   instance.setWorkspaceCost("ws-owned-1", 1.25, []);
+  // The cost reaches the directory, whose acknowledgement writes directoryCostUsd: one that landed
+  // later would change what the read-only cases compare.
+  await vi.waitFor(() => expect(storage.directoryCostUsd.get()).toBe(1.25),
+      { timeout: 10_000, interval: 20 });
   await instance.setWorkspaceLastActive("ws-owned-2", LAST_ACTIVE);
   await instance.setWorkspaceLastActive("ws-owned-3", LAST_ACTIVE);
   await instance.recordSharedWorkspaceOpen("ws-shared", "Shared notes", OWNER, "build", []);
@@ -354,6 +365,7 @@ async function seed(user: Live): Promise<Seeded> {
   storage.gadgets.put(
       { ...storage.gadgets.get("ws-owned-2")!, notificationMute: { until: MUTE_UNTIL } });
   storage.directoryLoginAt.put(LAST_LOGIN);
+  storage.ownCostLines.put([OWN_COST_LINE]);
 
   // Each seeded session was created in the past, so the browser session is the latest.
   let now = Date.now();
@@ -518,6 +530,7 @@ describe("a view's answers", () => {
       ["listSessions", {}, "metadata", undefined],
       ["listBlueprints", {}, "metadata", undefined],
       ["getDiagnostics", {}, "metadata", undefined],
+      ["getCostSummary", {}, "metadata", undefined],
     ]);
     expect(records.map(record => record.method)).toStrictEqual([...ADMIN_USER_METHODS]);
     for (let record of records) {
@@ -534,8 +547,8 @@ describe("a view's answers", () => {
         state.storage.sql.exec<{ kind: string; method: string; exposed: string | null }>(
             `SELECT kind, json_extract(record, '$.method') AS method, exposed FROM admin_audit
              WHERE json_extract(record, '$.userId') = ? ORDER BY seq`, user.id).toArray());
-    // The open and one call of each of the seven methods, in the audit's order.
-    expect(rows).toHaveLength(8);
+    // The open and one call of each of the eight methods, in the audit's order.
+    expect(rows).toHaveLength(9);
     expect(rows).toStrictEqual(ADMIN_USER_METHODS.map(
         method => ({ kind: "user", method, exposed: "metadata" })));
   }));
@@ -719,6 +732,21 @@ describe("a view's answers", () => {
       { held: "added", title: "Library 6", version: 16, lastUpdated: past(36) },
     ]);
 
+    // The workspace's uncounted breakdown shows as earlier, and the voice line is the user's own.
+    let earlier: CostLine = {
+      source: "chat", kind: "text", model: "earlier", estimated: false, usd: 1.25, requests: 0,
+    };
+    expect(answers.getCostSummary).toStrictEqual({
+      totalCost: 1.375,
+      byKind: { text: 1.25, transcription: 0.125 },
+      byModel: { earlier: 1.25, "@cf/openai/whisper": 0.125 },
+      workspaces: [{ workspaceId: "ws-owned-1", title: "Owned 1", totalCost: 1.25, lines: [earlier] }],
+      deletedWorkspaces: { totalCost: 0, lines: [] },
+      own: { totalCost: 0.125, lines: [OWN_COST_LINE] },
+    });
+    // The view answers what the user reads of themselves.
+    expect(answers.getCostSummary).toStrictEqual(await user.instance.getCostSummary());
+
     // The lapsed flow and the lapsed handoff are not counted, and billing has no name.
     expect(answers.getDiagnostics).toStrictEqual({
       nextAlarm: new Date(seeded.alarmAt),
@@ -820,6 +848,17 @@ describe("the access level", () => {
     ]);
   }));
 
+  it("refuses getCostSummary, recorded, while the setting is off", () => withAccount(async user => {
+    await createAccount(user);
+    let view = await open(user);
+    user.config.adminWorkspaceAccess = "off";
+    expect(await codeOf(view.getCostSummary())).toBe(ADMIN_ACCESS_ERROR_CODES.accessOff);
+    expect((await recordsOf(user.id)).map(r => [r.method, r.access, r.refused])).toStrictEqual([
+      ["inspectUser", "metadata", undefined],
+      ["getCostSummary", "off", ADMIN_ACCESS_ERROR_CODES.accessOff],
+    ]);
+  }));
+
   it("answers again once the setting is back at metadata", () => withAccount(async user => {
     await createAccount(user);
     let view = await open(user);
@@ -876,10 +915,10 @@ describe("the access level", () => {
 
     let records = await recordsOf(user.id);
     let levels = (from: number, to: number) => new Set(records.slice(from, to).map(r => r.access));
-    // The open, then seven calls at each of the three settings.
-    expect(records).toHaveLength(1 + 3 * 7);
-    expect(levels(0, 1 + 2 * 7)).toStrictEqual(new Set(["metadata"]));
-    expect(levels(1 + 2 * 7, records.length)).toStrictEqual(new Set(["content"]));
+    // The open, then eight calls at each of the three settings.
+    expect(records).toHaveLength(1 + 3 * 8);
+    expect(levels(0, 1 + 2 * 8)).toStrictEqual(new Set(["metadata"]));
+    expect(levels(1 + 2 * 8, records.length)).toStrictEqual(new Set(["content"]));
     for (let record of records) expect(record.refused).toBeUndefined();
   }));
 

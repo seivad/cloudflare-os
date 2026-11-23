@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { MAX_DIRECTORY_TEXT_LENGTH } from "@gadgets/workshop-shared/api";
 import { describe, expect, it } from "vitest";
@@ -303,6 +303,64 @@ describe("UserDirectoryDurableObject.listUsers activity, sorting and ownership",
     await stub.syncWorkspace(workspace("w4", "Other", "stranger"), 1);
     const { users } = await stub.listUsers({ limit: 10 });
     expect(users).toEqual([listed("idle", "Idle"), { ...listed("owner", "Owner"), ownedWorkspaces: 3 }]);
+  });
+
+  it("lists reported total costs, keeps the latest, and filters by hasSpend", async () => {
+    const stub = directory("spend");
+    await stub.syncUser(user("big", "Big"), 0, { totalCost: 12.5 });
+    await stub.syncUser(user("small", "Small"), 0, { lastLogin: new Date(DAY), totalCost: 0.25 });
+    await stub.syncUser(user("none", "None"), 0, { totalCost: 0 });
+    await stub.syncUser(user("unreported", "Unreported"), 0);
+    // A later report replaces the figure; one without a total leaves it alone.
+    await stub.syncUser(user("small", "Small"), 0, { totalCost: 0.5 });
+    await stub.syncUser(user("small", "Small"), 0, { lastLogin: new Date(2 * DAY) });
+
+    const everyone = await stub.listUsers({ limit: 10 });
+    expect(everyone.users.map(listedUser => [listedUser.id, listedUser.totalCost])).toEqual([
+      ["big", 12.5], ["none", 0], ["small", 0.5], ["unreported", undefined],
+    ]);
+    expect(everyone.users[3]).not.toHaveProperty("totalCost");
+    const spenders = await stub.listUsers({ limit: 10, hasSpend: true });
+    expect(spenders.users.map(listedUser => listedUser.id)).toEqual(["big", "small"]);
+    const all = await stub.listUsers({ limit: 10, hasSpend: false });
+    expect(all.users).toHaveLength(4);
+  });
+
+  it("sorts by totalCost with stable cursor paging, users with none reported last", async () => {
+    const stub = directory("sort-cost");
+    const spend = (totalCost: number) => ({ totalCost });
+    await stub.syncUser(user("a", "A"), 0, spend(2));
+    await stub.syncUser(user("b", "B"), 0);
+    await stub.syncUser(user("c", "C"), 0, spend(0.1 + 0.2));
+    await stub.syncUser(user("d", "D"), 0, spend(2));
+    await stub.syncUser(user("e", "E"), 0);
+
+    for (const [direction, expected] of [
+      ["desc", ["a", "d", "c", "b", "e"]], ["asc", ["c", "a", "d", "b", "e"]],
+    ] as const) {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await stub.listUsers({ limit: 2, sort: "totalCost", direction, cursor });
+        seen.push(...page.users.map(listedUser => listedUser.id));
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      expect(seen).toEqual(expected);
+    }
+  });
+
+  it("adds the cost column to a table that predates it, keeping its rows", async () => {
+    const stub = directory("migrate");
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("ALTER TABLE user_activity DROP COLUMN total_cost_usd");
+      state.storage.sql.exec("INSERT INTO users (id, name, search_text, rev) VALUES ('old', 'Old', 'old', 0)");
+      state.storage.sql.exec("INSERT INTO user_activity (id, created, last_login) VALUES ('old', 5, 6)");
+    });
+    // A new instance of the object runs the constructor over the old table.
+    await evictDurableObject(stub);
+    await stub.syncUser(user("old", "Old"), 0, { totalCost: 3 });
+    const { users } = await stub.listUsers({ limit: 10, hasSpend: true });
+    expect(users).toEqual([listed("old", "Old", { created: new Date(5), lastLogin: new Date(6), totalCost: 3 })]);
   });
 
   it("keeps id order and plain-id cursors when no sort is given", async () => {

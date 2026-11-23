@@ -463,7 +463,8 @@ describe("AdminApiImpl directory listings", () => {
     });
     const [forwarded] = callsTo("directory", "listUsers")[0]!.args as [Record<string, unknown>];
     expect(forwarded).toStrictEqual({
-      query: "a", cursor, limit: 2, activeSince: undefined, sort: undefined, direction: undefined,
+      query: "a", cursor, limit: 2, activeSince: undefined, hasSpend: undefined, sort: undefined,
+      direction: undefined,
     });
   });
 
@@ -471,11 +472,11 @@ describe("AdminApiImpl directory listings", () => {
     const { mint, callsTo } = deployment(
         { handlers: { directory: { listUsers: () => ({ users: [] }) } } });
     const activeSince = new Date(1_000);
-    await mint().listUsers({ activeSince, sort: "lastLogin", direction: "desc" });
+    await mint().listUsers({ activeSince, hasSpend: true, sort: "totalCost", direction: "desc" });
     const [forwarded] = callsTo("directory", "listUsers")[0]!.args as [Record<string, unknown>];
     expect(forwarded).toStrictEqual({
-      query: undefined, cursor: undefined, limit: 50, activeSince, sort: "lastLogin",
-      direction: "desc",
+      query: undefined, cursor: undefined, limit: 50, activeSince, hasSpend: true,
+      sort: "totalCost", direction: "desc",
     });
     expect(await rejection(mint().listUsers({ activeSince: new Date(NaN) })))
         .toBeInstanceOf(TypeError);
