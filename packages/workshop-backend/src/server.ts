@@ -86,6 +86,10 @@ export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
     CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback,
     AgentSelfLoopback };
 
+// Re-export the class an Overseer starts in a paused gadget's storage to read it. No binding names
+// it: it is reached only through the Overseer's `ctx.exports`, as one of its facets.
+export { GadgetStorageReader } from "./gadget-storage-reader";
+
 // Re-export service-binding entrypoint for external channel integrations.
 export { ExternalMessageGateway };
 

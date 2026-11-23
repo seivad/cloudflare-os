@@ -586,7 +586,13 @@ async function memberVisibleState(ws: Workspace) {
   };
 }
 
-// Calls each of the seventeen view methods once on the seed, and returns their answers by method.
+// The view's one method that needs "content", and the rest of the audit's methods, which need
+// "metadata": the open and eighteen view methods.
+const CONTENT_METHOD = "measureGadget";
+const METADATA_METHODS = ADMIN_WORKSPACE_METHODS.filter(method => method !== CONTENT_METHOD);
+
+// Calls each of the eighteen view methods that need "metadata" once on the seed, and returns their
+// answers by method.
 async function everyAnswer(ws: Workspace, view: AdminWorkspaceView) {
   return {
     describe: await view.describe(),
@@ -606,6 +612,7 @@ async function everyAnswer(ws: Workspace, view: AdminWorkspaceView) {
     listAutoApprovals: await view.listAutoApprovals(),
     listBlueprints: await view.listBlueprints(),
     getDiagnostics: await view.getDiagnostics(),
+    listGadgetDataSizes: await view.listGadgetDataSizes(),
   };
 }
 
@@ -660,7 +667,8 @@ describe("opening an admin view", () => {
 });
 
 describe("a metadata view", () => {
-  it("records every one of its calls, and refuses none", () => withWorkspace(async ws => {
+  it("records every one of its calls, and refuses only the one that needs content",
+      () => withWorkspace(async ws => {
     let view = await open(ws);
     await view.describe();
     await view.listChats();
@@ -681,6 +689,9 @@ describe("a metadata view", () => {
     await view.listAutoApprovals();
     await view.listBlueprints();
     await view.getDiagnostics();
+    await view.listGadgetDataSizes();
+    expect(await codeOf(view.measureGadget(ws.gadgetId)))
+        .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
 
     let records = await deploymentRecords(ws);
     expect(records.map(r => [r.method, r.args, r.access, r.refused])).toStrictEqual([
@@ -705,6 +716,9 @@ describe("a metadata view", () => {
       ["listAutoApprovals", {}, "metadata", undefined],
       ["listBlueprints", {}, "metadata", undefined],
       ["getDiagnostics", {}, "metadata", undefined],
+      ["listGadgetDataSizes", {}, "metadata", undefined],
+      ["measureGadget", { gadgetId: ws.gadgetId }, "metadata",
+       ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
     ]);
     // The list above is kept by hand: a method the audit names fails here until it is called
     // above, and its record asserted.
@@ -720,9 +734,9 @@ describe("a metadata view", () => {
         state.storage.sql.exec<{ kind: string; method: string; exposed: string | null }>(
             `SELECT kind, json_extract(record, '$.method') AS method, exposed FROM admin_audit
              WHERE workspace_id = ? ORDER BY seq`, ws.id).toArray());
-    // The open and one call of each of the seventeen methods, in the audit's order.
-    expect(rows).toHaveLength(18);
-    expect(rows).toStrictEqual(ADMIN_WORKSPACE_METHODS.map(
+    // The open and one call of each of the eighteen metadata methods, in the audit's order.
+    expect(rows).toHaveLength(19);
+    expect(rows).toStrictEqual(METADATA_METHODS.map(
         method => ({ kind: "workspace", method, exposed: "metadata" })));
   }));
 
@@ -732,8 +746,8 @@ describe("a metadata view", () => {
     expect(view).toBeInstanceOf(RpcTarget);
     expect(rpcSurface(view)).toStrictEqual(
         new Set(ADMIN_WORKSPACE_METHODS.filter(method => method !== "inspectWorkspace")));
-    // The open and seventeen view methods.
-    expect(ADMIN_WORKSPACE_METHODS).toHaveLength(18);
+    // The open and nineteen view methods.
+    expect(ADMIN_WORKSPACE_METHODS).toHaveLength(20);
     for (let name of [
       "getChat", "readChatAttachment", "readFile", "readFileAtCommit", "readPendingFile",
     ]) {
@@ -789,7 +803,7 @@ describe("a metadata view", () => {
     let view = await open(ws);
     let answers = await everyAnswer(ws, view);
     expect(Object.keys(answers)).toStrictEqual(
-        ADMIN_WORKSPACE_METHODS.filter(method => method !== "inspectWorkspace"));
+        METADATA_METHODS.filter(method => method !== "inspectWorkspace"));
     let answered = JSON.stringify(answers);
     for (let sentinel of [...Object.values(WITHHELD), BLUEPRINT_ID, "/blueprint-screenshot/"]) {
       expect(answered, sentinel).not.toContain(sentinel);
@@ -957,6 +971,78 @@ describe("an inspection", () => {
   }));
 });
 
+describe("measuring a gadget", () => {
+  // The cap and the choice that put "content" in force.
+  function allowContent(ws: Workspace): void {
+    ws.config.adminWorkspaceAccess = "content";
+    setEnv(ws, { ADMIN_WORKSPACE_ACCESS_MAX: "content" });
+  }
+
+  it("is refused and recorded below content, measuring nothing", () => withWorkspace(async ws => {
+    let view = await open(ws);
+    // A choice of content held to metadata by the cap is still below it.
+    ws.config.adminWorkspaceAccess = "content";
+    expect(await codeOf(view.measureGadget(ws.gadgetId)))
+        .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
+    expect(await view.listGadgetDataSizes()).toStrictEqual([]);
+    expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.access, r.refused]))
+        .toStrictEqual([
+          ["measureGadget", "metadata", ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
+          ["listGadgetDataSizes", "metadata", undefined],
+        ]);
+  }));
+
+  it("answers at content, recorded, and keeps the size it measured and nothing else",
+      () => withWorkspace(async ws => {
+    allowContent(ws);
+    let view = await open(ws);
+    let before = await memberVisibleState(ws);
+    let measured = await view.measureGadget(ws.gadgetId);
+    expect(measured).toStrictEqual({ bytes: expect.any(Number), measuredAt: expect.any(Date) });
+    expect(measured.bytes).toBeGreaterThan(0);
+    expect(await view.listGadgetDataSizes())
+        .toStrictEqual([{ gadgetId: ws.gadgetId, ...measured }]);
+
+    // The measurement is the one thing written to the workspace.
+    let after = await memberVisibleState(ws);
+    let written = after.storage.filter(([key]) =>
+        !before.storage.some(([earlier]) => earlier === key));
+    expect(written).toHaveLength(1);
+    expect(after.storage.filter(([key]) => key !== written[0]![0]))
+        .toStrictEqual(before.storage);
+    expect({ ...after, storage: [] }).toStrictEqual({ ...before, storage: [] });
+
+    let records = (await deploymentRecords(ws)).slice(1);
+    expect(records.map(r => [r.method, r.args, r.access, r.refused])).toStrictEqual([
+      ["measureGadget", { gadgetId: ws.gadgetId }, "content", undefined],
+      ["listGadgetDataSizes", {}, "content", undefined],
+    ]);
+    // A size is not content.
+    let exposed = await runInDurableObject(env.TEST_ADMIN_AUDIT.getByName(""), (_log, state) =>
+        state.storage.sql.exec<{ exposed: string }>(
+            "SELECT DISTINCT exposed FROM admin_audit WHERE workspace_id = ?", ws.id).toArray());
+    expect(exposed).toStrictEqual([{ exposed: "metadata" }]);
+  }));
+
+  it("records a read that fails, and lists no size for a deleted gadget",
+      () => withWorkspace(async ws => {
+    allowContent(ws);
+    let view = await open(ws);
+    await expect(view.measureGadget(999)).rejects.toThrow("No permanent gadget has id 999.");
+    await view.measureGadget(ws.gadgetId);
+    // A size kept for a gadget since deleted (as by a removal racing the read) is not listed.
+    ws.impl.storage.gadgetDataSizes.put({ gadgetId: 998, bytes: 1, measuredAt: new Date(0) });
+    expect((await view.listGadgetDataSizes()).map(size => size.gadgetId))
+        .toStrictEqual([ws.gadgetId]);
+    expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.refused]))
+        .toStrictEqual([
+          ["measureGadget", { gadgetId: 999 }, undefined],
+          ["measureGadget", { gadgetId: ws.gadgetId }, undefined],
+          ["listGadgetDataSizes", {}, undefined],
+        ]);
+  }));
+});
+
 describe("a live view's checks", () => {
   it("refuses, recorded, a call once the setting is off", () => withWorkspace(async ws => {
     let view = await open(ws);
@@ -1005,8 +1091,8 @@ describe("a live view's checks", () => {
     ]);
   }));
 
-  // "content" lets through only the methods that need it, and this view's seventeen need
-  // "metadata" alone, so each answers there as it does at "metadata", withholding what it
+  // "content" lets through only the methods that need it, and eighteen of this view's methods
+  // need "metadata" alone, so each answers there as it does at "metadata", withholding what it
   // withholds, while its record names the level in force.
   it("answers every call at content as at metadata, recording the level in force",
       () => withWorkspace(async ws => {
@@ -1021,10 +1107,10 @@ describe("a live view's checks", () => {
 
     let records = await deploymentRecords(ws);
     let levels = (from: number, to: number) => new Set(records.slice(from, to).map(r => r.access));
-    // The open, then seventeen calls at each of the three settings.
-    expect(records).toHaveLength(1 + 3 * 17);
-    expect(levels(0, 1 + 2 * 17)).toStrictEqual(new Set(["metadata"]));
-    expect(levels(1 + 2 * 17, records.length)).toStrictEqual(new Set(["content"]));
+    // The open, then eighteen calls at each of the three settings.
+    expect(records).toHaveLength(1 + 3 * 18);
+    expect(levels(0, 1 + 2 * 18)).toStrictEqual(new Set(["metadata"]));
+    expect(levels(1 + 2 * 18, records.length)).toStrictEqual(new Set(["content"]));
     for (let record of records) expect(record.refused).toBeUndefined();
     // Every answer still held metadata alone.
     let exposed = await runInDurableObject(env.TEST_ADMIN_AUDIT.getByName(""), (_log, state) =>

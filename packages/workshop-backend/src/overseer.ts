@@ -6,9 +6,10 @@ import { Overseer, WorkspaceMetadata, UiBundle, WorkpieceId, WorkpieceSummary, W
 import {
   ADMIN_ACCESS_ERROR_CODES, MAX_ADMIN_AUDIT_ARG_LENGTH, createAdminAccessError,
   type AdminAccessRecord, type AdminAutoApproval, type AdminChatAttachment, type AdminChatState,
-  type AdminGatekeeperInfo, type AdminObserver, type AdminPendingChange,
+  type AdminGadgetDataSize, type AdminGadgetMeasurement, type AdminGatekeeperInfo,
+  type AdminObserver, type AdminPendingChange, type AdminWorkspaceAccess,
   type AdminWorkspaceDescription, type AdminWorkspaceDiagnostics, type AdminWorkspaceMethod,
-  type AdminWorkspaceView,
+  type AdminWorkspaceView, type GadgetDataFile,
 } from "@gadgets/workshop-shared/api";
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange,
   MAX_CODE_CHANGE_SIZE, transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
@@ -79,6 +80,8 @@ import {
   type AdminViewTerms,
 } from "./admin-access";
 import { adminViewCall } from "./admin-view";
+import { createExportDeadline, MAX_EXPORT_BYTES, MAX_EXPORT_DURATION_MS } from "./export-limits";
+import type { GadgetStorageReader } from "./gadget-storage-reader";
 import type { AdminAuditDurableObject } from "./admin-audit";
 import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryDurableObject } from "./user-directory";
 import { chatChangeStatuses, foldCompactedCode, isTurnPrompt } from "./agent-compaction";
@@ -2593,6 +2596,7 @@ class OverseerImpl implements AgentHooks {
     let facetName = this.gadgetFacetName(id);
     this.storage.gadgets.delete(id);  // notifies workpiece subscribers
     this.liveCalls.forgetGadget(id);
+    this.storage.gadgetDataSizes.delete(id);
     this.#runningChatIds.delete(id);
     this.ctx.facets.delete(facetName);
     // An agent spawner may bind the gadget (see GatekeeperRecord.bindings).
@@ -5515,6 +5519,71 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  // The gadgets whose facet runs the GadgetStorageReader now, each with the promise that settles
+  // once the facet is free to run the gadget's own class again (see readGadgetStorage()). Every
+  // path to a gadget's facet goes through restore(), which waits on it.
+  #storageReads = new Map<WorkpieceId, Promise<void>>();
+
+  // Reads a permanent gadget's stored data, which only a facet running in the gadget's storage
+  // can open: the gadget's facet is aborted and, in the same synchronous step, started as the
+  // Workshop's own GadgetStorageReader, under a nonce drawn for this read. `measure` answers with
+  // the storage's size, `dump` with all of it as data.json holds it (GadgetDataFile). Either
+  // keeps the size as the gadget's last measured. A read that takes longer than `maxDurationMs`,
+  // or whose copy passes `maxBytes`, fails. On every path the reader is aborted and the lock
+  // released, so the next call to the gadget starts its own class with its data, and anyone
+  // connected sees it reconnect once. Reads of one gadget run one at a time.
+  async readGadgetStorage(gadgetId: WorkpieceId, mode: "measure",
+      limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<AdminGadgetMeasurement>;
+  async readGadgetStorage(gadgetId: WorkpieceId, mode: "dump",
+      limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<GadgetDataFile>;
+  async readGadgetStorage(gadgetId: WorkpieceId, mode: "measure" | "dump",
+      {maxBytes = MAX_EXPORT_BYTES, maxDurationMs = MAX_EXPORT_DURATION_MS} = {})
+      : Promise<AdminGadgetMeasurement | GadgetDataFile> {
+    let read: Promise<void> | undefined;
+    while ((read = this.#storageReads.get(gadgetId))) await read;
+    // Checked with nothing awaited before the lock is taken.
+    const record = this.storage.gadgets.get(gadgetId);
+    if (record?.type !== "gadget" || record.pending) {
+      throw new Error(`No permanent gadget has id ${gadgetId}.`);
+    }
+    let released = Promise.withResolvers<void>();
+    this.#storageReads.set(gadgetId, released.promise);
+
+    let facetName = this.gadgetFacetName(gadgetId);
+    let deadline = createExportDeadline(
+        `Reading the gadget's data took longer than ${maxDurationMs / 1000} seconds.`,
+        maxDurationMs);
+    try {
+      // Whatever ran in the facet, mainline or a chat's version, runs nothing until the read
+      // ends, and proposedChangesChanged() must not abort the reader.
+      this.#runningChatIds.delete(gadgetId);
+      this.ctx.facets.abort(facetName, new Error("Paused while an admin takes a copy"));
+      let nonce = crypto.randomUUID();
+      let reader = this.ctx.facets.get<GadgetStorageReader>(facetName, () => ({
+        class: this.ctx.exports.GadgetStorageReader({props: {nonce}}),
+        id: facetName,
+      }));
+      let measuredAt = new Date();
+      let result: AdminGadgetMeasurement | GadgetDataFile = mode === "measure"
+          ? {bytes: await deadline.race(reader.measure(nonce)), measuredAt}
+          : JSON.parse(await deadline.race(reader.dump(nonce, {
+              gadget: {id: gadgetId, name: record.title}, exportedAt: measuredAt, maxBytes,
+            })));
+      let bytes = "bytes" in result ? result.bytes : result.sizeBytes;
+      // Unless the gadget was deleted while it was read.
+      if (this.storage.gadgets.get(gadgetId)) {
+        this.storage.gadgetDataSizes.put({gadgetId, bytes, measuredAt});
+      }
+      return result;
+    } finally {
+      deadline.clear();
+      this.ctx.facets.abort(facetName, new Error("An admin's copy is taken"));
+      this.#runningChatIds.delete(gadgetId);
+      this.#storageReads.delete(gadgetId);
+      released.resolve();
+    }
+  }
+
   // Get an RpcStub for the gadget facet, which can be returned to the client.
   //
   // `joinAs` counts the returned stub toward #hasCollaboratorSession for its own lifetime, like
@@ -7425,6 +7494,9 @@ class OverseerImpl implements AgentHooks {
         .filter(record => record.type === "gadget")  // worktrees have no facet to restart
         .map(gadget => gadget.id);
     for (let id of ids) {
+      // A gadget whose storage is being read starts again, with this code, once the read ends;
+      // aborting the reader would fail the read.
+      if (this.#storageReads.has(id)) continue;
       this.ctx.facets.abort(this.gadgetFacetName(id),
           new Error("Gadget restarted due to code update."));
     }
@@ -12207,8 +12279,24 @@ class OverseerImpl implements AgentHooks {
     return targets?.size === 1 ? targets.values().next().value : undefined;
   }
 
+  // restore() of a gadget's facet stub.
+  #restoreGadget(params: OverseerRestoreParams & {type: "gadget"})
+      : Fetcher<DurableObject> | Promise<Fetcher<DurableObject>> {
+    // Old params (persisted before multi-gadget support, sealed inside hook callbacks) have
+    // no gadgetId; they resolve to the default gadget. If that gadget was deleted (or there
+    // is no default), this fails with an explicit error rather than silently retargeting.
+    let gadgetId = this.resolveGadgetId(params.gadgetId);
+    // While an admin's copy is taken the facet runs the GadgetStorageReader, which a stub minted
+    // now would reach: wait for the gadget's own class (see readGadgetStorage()).
+    let read = this.#storageReads.get(gadgetId);
+    if (read) return read.then(() => this.#restoreGadget(params));
+    this.getGadgetRecord(gadgetId);  // validate it exists
+    return this.#getGadgetFacetRaw(gadgetId, this.#resolveGadgetChatId(gadgetId, params.chatId));
+  }
+
   restore(params: OverseerRestoreParams)
-      : Fetcher<DurableObject> | Fetcher<RestoreForgerEntrypoint> | Fetcher<Gatekeeper<any>> |
+      : Fetcher<DurableObject> | Promise<Fetcher<DurableObject>> |
+        Fetcher<RestoreForgerEntrypoint> | Fetcher<Gatekeeper<any>> |
         WorktreeReplicatorImpl | SpawnedAgentImpl {
     switch (params.type) {
       case "worktreeReplicator":
@@ -12224,13 +12312,7 @@ class OverseerImpl implements AgentHooks {
           }
         }
 
-        // Old params (persisted before multi-gadget support, sealed inside hook callbacks) have
-        // no gadgetId; they resolve to the default gadget. If that gadget was deleted (or there
-        // is no default), this fails with an explicit error rather than silently retargeting.
-        let gadgetId = this.resolveGadgetId(params.gadgetId);
-        this.getGadgetRecord(gadgetId);  // validate it exists
-        return this.#getGadgetFacetRaw(
-            gadgetId, this.#resolveGadgetChatId(gadgetId, params.chatId));
+        return this.#restoreGadget(params);
       }
 
       case "gatekeeper":
@@ -15097,12 +15179,13 @@ class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
   // at each call, so its audit log and logger are the Overseer's at that call, and the environment
   // is read at each use within it.
   async #call<T>(method: AdminWorkspaceMethod, args: Record<string, string | number | undefined>,
-      read: () => T | Promise<T>): Promise<T> {
+      read: () => T | Promise<T>, requires?: Exclude<AdminWorkspaceAccess, "off">): Promise<T> {
     let impl = this.#impl;
     return adminViewCall({
       env: () => impl.env,
       audits: impl.adminAudits,
       logger: impl.logger,
+      requires,
       assertLive: () => this.#assertLive(),
       recordOf: (access, refused) => this.#recordOf(method, args, access, refused),
     }, read);
@@ -15444,6 +15527,22 @@ class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
         nextAlarm: nextAlarm === null ? undefined : new Date(nextAlarm),
         ownerRegistrationPending: storage.ownerRegistrationPending.get(),
       };
+    });
+  }
+
+  // Needs "content": it pauses the gadget to read its storage, though it answers with a size.
+  async measureGadget(gadgetId: WorkpieceId): Promise<AdminGadgetMeasurement> {
+    return this.#call("measureGadget", {gadgetId},
+        () => this.#impl.readGadgetStorage(gadgetId, "measure"), "content");
+  }
+
+  async listGadgetDataSizes(): Promise<AdminGadgetDataSize[]> {
+    return this.#call("listGadgetDataSizes", {}, () => {
+      let storage = this.#impl.storage;
+      return [...storage.gadgetDataSizes.list()]
+          .filter(({gadgetId}) => storage.gadgets.get(gadgetId)?.type === "gadget")
+          .map(({gadgetId, bytes, measuredAt}) => ({gadgetId, bytes, measuredAt}))
+          .toSorted((a, b) => a.gadgetId - b.gadgetId);
     });
   }
 }

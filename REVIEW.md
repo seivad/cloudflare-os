@@ -58,6 +58,10 @@ through logs and errors, then everything else.
   account's data to an admin without these, a method that returns content without that
   requirement or any content beyond a gadget's code and data, or a `withhold*` helper applied
   conditionally (by level included).
+- A gadget's facet is reached only through the Overseer's `restore()`, which waits while
+  `readGadgetStorage()` holds the facet as the `GadgetStorageReader` (docs/admin-access.md,
+  Reading a gadget's stored data). Flag a `ctx.facets.get()` of a gadget's facet anywhere else, an
+  abort of one that a read in progress does not skip, and a binding that names the reader's class.
 - That an `AdminUserView` never calls a gatekeeper is a type, so check the diff, not a call graph:
   `AdminUserViewImpl` reaches the account only through `AdminUserViewHost`, whose `UserStoreReads`
   leaves out the collections that hold gatekeeper stubs and whose `connectedAccounts()` yields

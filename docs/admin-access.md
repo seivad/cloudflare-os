@@ -164,8 +164,10 @@ refused open and refuses (see [Which refusals are recorded](#which-refusals-are-
 
 The view (`AdminWorkspaceViewImpl`) is not an `Overseer`. It joins no presence, session count or
 outputs fan-out, and starts no agent, ambient capsule or gatekeeper facet; waking the Durable Object
-still resumes turns a previous instance left running, as any wake does. It offers these reads,
-shaped as the matching `Overseer` reads are where there is one:
+still resumes turns a previous instance left running, as any wake does. Its one call that touches a
+gadget's facet is `measureGadget()` (see
+[Reading a gadget's stored data](#reading-a-gadgets-stored-data)). It offers these reads, shaped as
+the matching `Overseer` reads are where there is one:
 
 - **The workspace**: `describe()` and `getDiagnostics()`, whose counts come with the size of the
   workspace's storage and who has it open. Its `sessions` count what collaborators hold on the
@@ -185,6 +187,9 @@ shaped as the matching `Overseer` reads are where there is one:
   `listObservers()` lists which collaborators hold an observer record, and the account each chose
   for each connection. `listObserverRequirements()` lists what a recipient of a share would have
   to verify: the connections that sharing the workspace, or one gadget, asks them to pass.
+- **Gadget data**: `measureGadget()`, which needs `"content"`, measures the size of a permanent
+  gadget's stored data and keeps it; `listGadgetDataSizes()` lists the sizes kept, each with when
+  it was measured, for the gadgets that still exist, reading nothing else.
 
 Three of these give less than their names promise:
 
@@ -245,6 +250,44 @@ An admin read never reaches a connection, and reads only what the workspace stor
 Beyond the workspace's own storage, a view reads only its owner's profile, from their account: in
 `describe()`, and in `listShareLinks()`, which uses the same lookup and only when the owner created
 a link.
+
+### Reading a gadget's stored data
+
+A gadget's data (its SQLite database, which holds its key-value storage too) belongs to its facet,
+and only a class running in that facet can open it. So `OverseerImpl.readGadgetStorage()` pauses
+the gadget and starts the Workshop's own class in its storage in its place:
+
+1. It waits for any read of the same gadget to end, checks that the id names a permanent gadget
+   (a pending gadget, a worktree and an unknown id are refused, pausing nothing), and takes the
+   gadget's export lock (`#storageReads`) with nothing awaited since the check.
+2. In one synchronous step it aborts the gadget's facet ("Paused while an admin takes a copy")
+   and gets the same facet name with `ctx.exports.GadgetStorageReader({props: {nonce}})`, a nonce
+   drawn for this read. A facet that is aborted and got again with another class opens the same
+   storage. The reader (`gadget-storage-reader.ts`) is exported from the Worker so that
+   `ctx.exports` has it, and no binding names it, so nothing but a facet runs it; it refuses every
+   call that does not carry the nonce, and never writes.
+3. It reads within the export limits (`export-limits.ts`): `measure` asks for
+   `ctx.storage.sql.databaseSize`; `dump` asks for every table but the internal ones (`_cf_*`,
+   `sqlite_*`) and every key-value entry (`ctx.storage.kv.list()`, since `_cf_KV` cannot be read
+   through SQL), encoded as `GadgetDataFile` (`data.json`), and fails once the encoding passes
+   100 MB. A read that takes longer than 30 seconds fails too.
+4. A read that succeeds keeps the size as the gadget's last measured (`gadgetDataSizes`, forgotten
+   when the gadget is deleted). On every path, the reader is aborted, the gadget's
+   `#runningChatIds` entry reset and the lock released, so the next call to the gadget starts its
+   own class with its data.
+
+Every path to a gadget's facet goes through the Overseer's `restore()`: the stubs
+`getGadgetFacetFetcher()` mints for page connections, agent tools, hooks and bindings between
+gadgets, and the persistent stubs a gadget or a hook stored. While the lock is held, `restore()`
+waits on it and then restores as usual, so a call that reaches the gadget during a read gets the
+gadget's own class once the read ends, never the reader. A connection opened before the read is
+cut off by its pause and reconnects once. A code update during a read leaves the reader running:
+the gadget starts with the new code when the read ends. Facets cannot set alarms, so a read
+leaves none to fire on the reader.
+
+`measureGadget()` changes what members see in that one way, the reconnect, and writes only the
+size it measured to the workspace. Its record's `exposed` stays `metadata`: it answers with a
+size.
 
 ### Who created a connection
 
@@ -430,7 +473,8 @@ cap govern both inspections, of a workspace and of a user's account:
     share link to the blueprint's code, as a workspace's is). What an account stores as a
     credential is never returned (see [User inspection](#user-inspection)).
 - **content**: everything `"metadata"` shows, and the view methods that need `"content"`, which
-  read a gadget's code and its stored data. Nothing else `"metadata"` withholds is offered: every
+  read a gadget's code and its stored data (`measureGadget()`, which reads the stored data to
+  measure it and answers with its size). Nothing else `"metadata"` withholds is offered: every
   other method of either view answers at `"content"` exactly as at `"metadata"`, withholding what
   it withholds there (chat messages, attachments, file contents outside a gadget's code, commit
   messages and the rest), and its record names `"content"` as the level in force. It is in force
@@ -571,6 +615,8 @@ read nothing the level withholds:
 | `listAutoApprovals()` | Each rule's connection, kind of action and who turned it on | Nothing |
 | `listBlueprints()` | Each published blueprint's title, description, version and code date | Each `id`, and `screenshotUrl`, which holds the id |
 | `getDiagnostics()` | Counts, the chats with an agent turn recorded, the storage's version and size, times and who is present | Nothing |
+| `listGadgetDataSizes()` | Each measured gadget's id, its data's size and when it was measured | Nothing: it reads the sizes kept, never a gadget |
+| `measureGadget()` (needs `"content"`) | The size of a gadget's stored data, and when it was measured | The data: the reader measures it, and only the size leaves the server |
 
 The open (`inspectWorkspace`) returns the view and nothing of the workspace.
 
@@ -584,8 +630,9 @@ descriptions.
 ### Recorded before anything leaves
 
 An access record is written to the deployment-wide `AdminAuditDurableObject`, and only then is the
-answer returned. Nothing is written to the workspace, so `listActions()`, `subscribeToActions()`
-and everything else a member reads can never show an inspection. Nor is anything written to an
+answer returned. Nothing is written to the workspace but the size `measureGadget()` measured, which
+no member reads, so `listActions()`, `subscribeToActions()` and everything else a member reads can
+never show an inspection. Nor is anything written to an
 inspected account. If the write fails, the call fails and returns nothing.
 
 A setting record is written to the deployment-wide log before the change is stored: a change whose
@@ -747,7 +794,10 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   presence and alarm as they were; and the view's surface being exactly what the audit names: every
   method in `ADMIN_WORKSPACE_METHODS` is recorded, and the view class exposes no other member over
   RPC, and none that reads content (a helper must be `#private`: the class's public members, not its
-  interface, are its RPC surface).
+  interface, are its RPC surface). `measureGadget()` refused and recorded below `"content"`; at
+  `"content"`, answered, recorded at it with `exposed` `metadata`, and its size the one thing
+  written to the workspace; a failed read recorded; and `listGadgetDataSizes()` leaving out a
+  gadget since deleted.
 - `admin-user-view.test.ts`: the user view, from an id that names no account and creates none to the
   per-call checks; every method recorded and none refused, each record stored with `exposed`
   `metadata` in the table; what the answers withhold, shown first in what the user is served from;
@@ -767,6 +817,16 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
      wake, with no view opened, sees the notification delivered and the alarm armed, and every
      stored record outside notification delivery's own unchanged (the sessions, workspaces,
      connected accounts, profile and directory state among them).
+- `gadget-storage-reader.test.ts`: `data.json`'s encoding (rows lossless, BLOBs as `$bytes`,
+  each key-value kind JSON cannot hold tagged, an object with a `$` key wrapped, a value that
+  refers to itself refused, internal tables left out, the byte limit stopping the read); the reader
+  refusing every call without its nonce; and `readGadgetStorage()` on a
+  real gadget facet: a measure and a copy of its tables and key-value storage, the gadget coming
+  back with its data, a connection and a stored persistent stub restored during a read each
+  waiting for it and reaching the gadget's own class, a read that fails (over its byte limit)
+  restoring the gadget, keeping nothing and releasing the lock, two reads of one gadget in turn
+  with a code update between, a pending gadget refused, and the size forgotten when the gadget is
+  deleted.
 - `connection-creator.test.ts`: the creator stamped at each creation path, and absent on an ambient
   capsule and on a resource whose turn has no record; and which member sessions the live-session
   counts include: none of the owner's, a collaborator's by its role.
@@ -805,6 +865,13 @@ Integration suites, in `packages/integration-tests/__tests__/`:
   and the user then sees what they saw before.
 - `workshop-admin-audit.test.ts`: every setting change recorded before it takes effect, sessions,
   filters, stats across two admins, and a refused change when its record cannot be written.
+- `admin-gadget-export.test.ts`: on a deployment whose cap and level are `"content"`, a gadget
+  that keeps notes in SQL and a counter in its key-value storage, measured and listed, then
+  answering with its data and taking one more write; the owner's and a collaborator's connections
+  interleaved with reads, each reconnecting only when a read's pause cut it off and never reaching
+  the reader; a pending gadget and an unknown id refused, the next read going ahead; and
+  `measureGadget()` refused below `"content"` (`accessInsufficient`), recorded at the level in
+  force.
 - `workshop-admin-bounds.test.ts`: the bounds' defaults (`"content"` refused for the bound), and a
   redeploy that tightens them (an invalid cap failing closed) and demotes an admin. The redeploy
   ends every session, the demoted admin's view among them, so the per-call re-check that stops a

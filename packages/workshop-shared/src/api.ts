@@ -1977,7 +1977,8 @@ export const ADMIN_WORKSPACE_METHODS = [
   "inspectWorkspace", "describe", "listChats", "getChatState", "listChatAttachments",
   "listActions", "listFiles", "getCommitLog", "listFilesAtCommit", "listChangedPaths",
   "listPendingChanges", "listGatekeepers", "listObservers", "listObserverRequirements",
-  "listShareLinks", "listAutoApprovals", "listBlueprints", "getDiagnostics",
+  "listShareLinks", "listAutoApprovals", "listBlueprints", "getDiagnostics", "measureGadget",
+  "listGadgetDataSizes",
 ] as const satisfies readonly ("inspectWorkspace" | keyof AdminWorkspaceView)[];
 
 /** One of ADMIN_WORKSPACE_METHODS. */
@@ -2771,6 +2772,25 @@ export type AdminWorkspaceDiagnostics = {
   ownerRegistrationPending: boolean;
 };
 
+/** The size of a gadget's stored data, as AdminWorkspaceView.measureGadget() measured it. */
+export type AdminGadgetMeasurement = {
+  /** The size of the gadget's own storage (its SQLite database, which holds its key-value
+   * storage too), in bytes. */
+  bytes: number;
+  /** When it was measured. */
+  measuredAt: Date;
+};
+
+/** A gadget's last measured data size, as AdminWorkspaceView.listGadgetDataSizes() lists it. */
+export type AdminGadgetDataSize = {
+  /** The gadget. */
+  gadgetId: WorkpieceId;
+  /** Its storage's size when last measured, in bytes (see AdminGadgetMeasurement.bytes). */
+  bytes: number;
+  /** When it was last measured. */
+  measuredAt: Date;
+};
+
 /** One call made on a chat's callable agent that is not in the chat yet, as
  * AdminChatState.queuedCalls lists it. Its arguments, which its caller wrote, are not shown. */
 export type AdminQueuedAgentCall = {
@@ -2900,8 +2920,10 @@ export type AdminAutoApproval = {
 
 /**
  * A deployment admin's read-only view of one workspace's metadata, minted by
- * AdminApi.inspectWorkspace(). Nothing it does changes the workspace or is seen by its members:
- * it joins no presence and no session count, and starts no agent or connection. Apart from the
+ * AdminApi.inspectWorkspace(). Nothing it does changes the workspace or is seen by its members,
+ * except a read of a gadget's stored data (measureGadget()), which pauses the gadget while it
+ * reads and keeps the size it measured: it joins no presence and no session count, and starts no
+ * agent or connection. Apart from the
  * methods documented as needing the "content" level, it returns what the "metadata" access level
  * shows (see ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that level withholds, at either
  * level: no method returns a chat's messages, an attachment's bytes or a file's content.
@@ -3029,6 +3051,21 @@ export interface AdminWorkspaceView extends RpcTarget {
   /** The workspace's operational state. Admin access records are not part of it: they are kept
    * only in the deployment-wide log (AdminApi.listAdminAudit()). */
   getDiagnostics(): Promise<AdminWorkspaceDiagnostics>;
+
+  /**
+   * Measures the size of a permanent gadget's stored data, and keeps it as the gadget's last
+   * measured size (listGadgetDataSizes()). Needs the "content" level, though it answers with a
+   * size alone: only a facet running in the gadget's storage can read it, so the gadget is paused
+   * while the Workshop's own reader takes its place, and anyone connected to it sees it reconnect
+   * once. Calls that reach the gadget meanwhile wait for it. Throws for a pending gadget, a
+   * worktree, or an id that names no gadget, and when the read takes longer than an export may.
+   */
+  measureGadget(gadgetId: WorkpieceId): Promise<AdminGadgetMeasurement>;
+
+  /** The size each gadget's data had when last measured or copied by an admin, for the gadgets
+   * that still exist and have been measured, in gadget id order. Reads only what the workspace
+   * kept of those measurements: no gadget is paused or asked. */
+  listGadgetDataSizes(): Promise<AdminGadgetDataSize[]>;
 }
 
 /** A user's account as AdminUserView.describe() presents it. */
@@ -7789,6 +7826,42 @@ export interface WorkpieceClient extends RpcTarget {
    */
   remove(): Promise<void>;
 }
+
+/** A value in a GadgetDataFile: JSON. A value JSON cannot hold is an object with a single key
+ * that starts with "$" and names its kind (see GadgetDataFile). */
+export type GadgetDataValue =
+  null | boolean | number | string | GadgetDataValue[] | { [key: string]: GadgetDataValue };
+
+/**
+ * A copy of a gadget's stored data (the `data.json` of an admin's export): its SQLite tables and
+ * its key-value storage, as JSON.
+ *
+ * Rows are lossless: a `BLOB` cell is `{"$bytes": "<base64>"}`, and a number JSON cannot hold
+ * (`NaN`, `Infinity`, `-Infinity`, `-0`) is `{"$number": "<its name>"}`. A key-value value JSON
+ * cannot hold is tagged the same way: `$bytes` (a Uint8Array), `$arrayBuffer` (base64),
+ * `$typedArray` (`{type, bytes}`), `$date` (ISO 8601, or null for an invalid date), `$bigint`
+ * (decimal), `$map` (`[key, value]` pairs), `$set` (values), `$regexp` (`{source, flags}`),
+ * `$error` (`{name, message}`), `$undefined` (true), `$number`; and an object with a key that
+ * starts with "$" is `{"$object": {...}}`, so that it is never read as a tag. Internal tables
+ * (`_cf_*`, `sqlite_*`) are left out; the key-value storage is `kv`.
+ */
+export type GadgetDataFile = {
+  /** What the file is. */
+  format: "cloudflare-os/gadget-data";
+  /** The version of this format. */
+  version: 1;
+  /** The gadget the data is of: its id in its workspace, and its title. */
+  gadget: { id: WorkpieceId; name: string };
+  /** When the copy was taken, ISO 8601. */
+  exportedAt: string;
+  /** The size of the gadget's storage when copied, in bytes (see AdminGadgetMeasurement.bytes). */
+  sizeBytes: number;
+  /** The gadget's SQLite tables, in the order they were created: each one's name, the statement
+   * that created it, and its rows. */
+  sql: { name: string; createSql: string; rows: { [column: string]: GadgetDataValue }[] }[];
+  /** The gadget's key-value storage, in key order. */
+  kv: { key: string; value: GadgetDataValue }[];
+};
 
 /** Describes a file export format supported by a Gadget. */
 export type GadgetExportFormat = {

@@ -1598,6 +1598,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           byProfile(record: CallParticipantRecord) { return record.profileId; },
         },
       }),
+      // Each gadget's stored data size as an admin last measured or copied it
+      // (OverseerImpl.readGadgetStorage()), which AdminWorkspaceView.listGadgetDataSizes() lists.
+      // Forgotten when the gadget is deleted.
+      gadgetDataSizes: collection<{gadgetId: WorkpieceId; bytes: number; measuredAt: Date}>()({
+        primaryKey: "gadgetId",
+      }),
       // Who started each gadget's call session and its PIN, if they locked it.
       callStarts: collection<CallStartRecord>()({primaryKey: "gadgetId"}),
       // RealtimeKit cleanup still owed: a participant to delete, which revokes every ticket it was
