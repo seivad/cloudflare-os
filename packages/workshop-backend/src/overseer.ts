@@ -6,7 +6,8 @@ import { Overseer, WorkspaceMetadata, UiBundle, WorkpieceId, WorkpieceSummary, W
 import {
   ADMIN_ACCESS_ERROR_CODES, MAX_ADMIN_AUDIT_ARG_LENGTH, createAdminAccessError,
   type AdminAccessRecord, type AdminAutoApproval, type AdminChatAttachment, type AdminChatState,
-  type AdminGadgetDataSize, type AdminGadgetMeasurement, type AdminGatekeeperInfo,
+  type AdminGadgetDataSize, type AdminGadgetExportMode, type AdminGadgetMeasurement,
+  type AdminGatekeeperInfo,
   type AdminObserver, type AdminPendingChange, type AdminWorkspaceAccess,
   type AdminWorkspaceDescription, type AdminWorkspaceDiagnostics, type AdminWorkspaceMethod,
   type AdminWorkspaceView, type GadgetDataFile,
@@ -84,6 +85,10 @@ import {
   createExportDeadline, MAX_EXPORT_BYTES, MAX_EXPORT_DURATION_MS, type ExportDeadline,
 } from "./export-limits";
 import type { GadgetStorageReader } from "./gadget-storage-reader";
+import {
+  buildGadgetArchive, gadgetExportReadme, zipGadgetEverything,
+} from "./admin-gadget-export";
+import { fileNameSlug } from "@gadgets/workshop-shared/zip";
 import type { AdminAuditDurableObject } from "./admin-audit";
 import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryDurableObject } from "./user-directory";
 import { chatChangeStatuses, foldCompactedCode, isTurnPrompt } from "./agent-compaction";
@@ -5529,7 +5534,9 @@ class OverseerImpl implements AgentHooks {
   // Reads a permanent gadget's stored data, which only a facet running in the gadget's storage
   // can open: the gadget's facet is aborted and, in the same synchronous step, started as the
   // Workshop's own GadgetStorageReader, under a nonce drawn for this read. `measure` answers with
-  // the storage's size, `dump` with all of it as data.json holds it (GadgetDataFile). Either
+  // the storage's size, `dump` with all of it as data.json holds it (GadgetDataFile), and
+  // `dumpJson` with the same as the JSON text the reader wrote, for a caller that only stores it
+  // (exportGadgetCopy()), so that a copy near the limit is not parsed and written out again. Each
   // keeps the size as the gadget's last measured. A read that takes longer than `maxDurationMs`,
   // or whose copy passes `maxBytes`, fails. On every path the reader is aborted and the lock
   // released, so the next call to the gadget starts its own class with its data, and anyone
@@ -5538,9 +5545,11 @@ class OverseerImpl implements AgentHooks {
       limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<AdminGadgetMeasurement>;
   async readGadgetStorage(gadgetId: WorkpieceId, mode: "dump",
       limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<GadgetDataFile>;
-  async readGadgetStorage(gadgetId: WorkpieceId, mode: "measure" | "dump",
+  async readGadgetStorage(gadgetId: WorkpieceId, mode: "dumpJson",
+      limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<string>;
+  async readGadgetStorage(gadgetId: WorkpieceId, mode: "measure" | "dump" | "dumpJson",
       {maxBytes = MAX_EXPORT_BYTES, maxDurationMs = MAX_EXPORT_DURATION_MS} = {})
-      : Promise<AdminGadgetMeasurement | GadgetDataFile> {
+      : Promise<AdminGadgetMeasurement | GadgetDataFile | string> {
     let read: Promise<void> | undefined;
     while ((read = this.#storageReads.get(gadgetId))) await read;
     // Checked with nothing awaited before the lock is taken.
@@ -5566,12 +5575,26 @@ class OverseerImpl implements AgentHooks {
         id: facetName,
       }));
       let measuredAt = new Date();
-      let result: AdminGadgetMeasurement | GadgetDataFile = mode === "measure"
-          ? {bytes: await deadline.race(reader.measure(nonce)), measuredAt}
-          : JSON.parse(await deadline.race(reader.dump(nonce, {
-              gadget: {id: gadgetId, name: record.title}, exportedAt: measuredAt, maxBytes,
-            })));
-      let bytes = "bytes" in result ? result.bytes : result.sizeBytes;
+      let result: AdminGadgetMeasurement | GadgetDataFile | string;
+      let bytes: number;
+      if (mode === "measure") {
+        bytes = await deadline.race(reader.measure(nonce));
+        result = {bytes, measuredAt};
+      } else {
+        let json = await deadline.race(reader.dump(nonce, {
+          gadget: {id: gadgetId, name: record.title}, exportedAt: measuredAt, maxBytes,
+        }));
+        if (mode === "dump") {
+          let file: GadgetDataFile = JSON.parse(json);
+          bytes = file.sizeBytes;
+          result = file;
+        } else {
+          // The size again rather than parsing the text for it: nothing writes while the reader
+          // holds the storage, so it is the size the text records.
+          bytes = await deadline.race(reader.measure(nonce));
+          result = json;
+        }
+      }
       // Unless the gadget was deleted while it was read.
       if (this.storage.gadgets.get(gadgetId)) {
         this.storage.gadgetDataSizes.put({gadgetId, bytes, measuredAt});
@@ -5589,6 +5612,63 @@ class OverseerImpl implements AgentHooks {
         released.resolve();
       }
     }
+  }
+
+  // An admin's copy of a permanent gadget (AdminWorkspaceView.exportGadget()), whole, as the
+  // bytes of the file to save; see admin-gadget-export.ts. "code" is a `.gadget` archive of the
+  // gadget's committed head, with the metadata createBlueprint() would derive, publishing and
+  // writing nothing. "everything" is a ZIP of that archive, the gadget's data.json (read by
+  // readGadgetStorage(), which pauses the gadget and keeps the size) and a README. The copy fails,
+  // naming the limit, once it would pass `maxBytes` or take longer than `maxDurationMs`.
+  async exportGadgetCopy(gadgetId: WorkpieceId, mode: AdminGadgetExportMode,
+      {maxBytes = MAX_EXPORT_BYTES, maxDurationMs = MAX_EXPORT_DURATION_MS} = {})
+      : Promise<Uint8Array> {
+    let deadline = createExportDeadline(
+        `Copying the gadget took longer than ${maxDurationMs / 1000} seconds.`, maxDurationMs);
+    try {
+      return await deadline.race(this.#buildGadgetCopy(gadgetId, mode, maxBytes, maxDurationMs));
+    } finally {
+      deadline.clear();
+    }
+  }
+
+  async #buildGadgetCopy(gadgetId: WorkpieceId, mode: AdminGadgetExportMode, maxBytes: number,
+      maxDurationMs: number): Promise<Uint8Array> {
+    // The owner is the author, as when they publish.
+    let author = await retryOnDoReset(() => this.ownerUserDo().whoami(), this.logger);
+    // Read after the await, with nothing awaited from here to the bindings, so that the files and
+    // the bindings are of one head.
+    let record = this.storage.gadgets.get(gadgetId);
+    if (record?.type !== "gadget" || record.pending || record.commitId === undefined) {
+      throw new Error(`No gadget with committed code has id ${gadgetId}.`);
+    }
+    let files = this.gitCache.readCommitFiles(record.commitId);
+    if (files.size === 0) throw new Error(`Gadget ${gadgetId} has no code to copy.`);
+    let exportedAt = new Date();
+    let archive = await buildGadgetArchive(files, {
+      title: record.title,
+      description: "",
+      author,
+      created: exportedAt,
+      version: 1,
+      lastUpdated: exportedAt,
+      // Throws for a connection a blueprint cannot express, as publishing does.
+      bindings: this.collectBindingMetadata(gadgetId),
+      ...(record.output ? {output: record.output} : {}),
+    });
+
+    let copy = archive;
+    if (mode === "everything") {
+      let dataJson = await this.readGadgetStorage(gadgetId, "dumpJson", {maxBytes, maxDurationMs});
+      let slug = fileNameSlug(record.title);
+      let readme = gadgetExportReadme({title: record.title, slug, exportedAt});
+      copy = await zipGadgetEverything({slug, archive, dataJson, readme});
+    }
+    if (copy.byteLength > maxBytes) {
+      throw new Error(`The copy of the gadget is larger than ${maxBytes} bytes, the most an ` +
+          `export holds.`);
+    }
+    return copy;
   }
 
   // Get an RpcStub for the gadget facet, which can be returned to the client.
@@ -15551,6 +15631,15 @@ class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
           .map(({gadgetId, bytes, measuredAt}) => ({gadgetId, bytes, measuredAt}))
           .toSorted((a, b) => a.gadgetId - b.gadgetId);
     });
+  }
+
+  // Needs "content". The copy is built whole by the read, so it is recorded before any of it
+  // leaves; the audit stores the record with `exposed` 'content'.
+  async exportGadget(gadgetId: WorkpieceId, mode: AdminGadgetExportMode)
+      : Promise<ReadableStream<Uint8Array>> {
+    let copy = await this.#call("exportGadget", {gadgetId, mode},
+        () => this.#impl.exportGadgetCopy(gadgetId, mode), "content");
+    return new Blob([copy]).stream();
   }
 }
 

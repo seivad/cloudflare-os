@@ -1,8 +1,10 @@
+import { inflateRawSync } from "node:zlib";
 import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import {
   ADMIN_ACCESS_ERROR_CODES, getAdminAccessErrorCode,
-  type AdminApi, type AdminWorkspaceView, type GadgetClient, type Overseer, type WorkpieceId,
+  type AdminApi, type AdminWorkspaceView, type GadgetClient, type Overseer, type TreeNode,
+  type WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import { diffFiles, type CodeContent } from "@gadgets/workshop-shared/code-change";
 import { ADMIN_USERNAME, startHarness, type Harness } from "../src/harness.js";
@@ -11,10 +13,11 @@ import {
   connect, nextUsernames, signUp, stubFor, waitFor, WorkpieceRecorder,
 } from "../src/rpc-client.js";
 
-// An admin's read of a gadget's stored data, end to end: measureGadget() on a deployment whose cap
-// and level are "content", the gadget paused while the Workshop's reader takes its place, the
-// connections made meanwhile, and the refusal below "content". The level is deployment-wide, so
-// this file owns its harness and its cases run in order.
+// An admin's read of a gadget's stored data and copy of the gadget, end to end: measureGadget()
+// and exportGadget() on a deployment whose cap and level are "content", the gadget paused while
+// the Workshop's reader takes its place, the connections made meanwhile, a copy of the code that
+// another account imports, and the refusals below "content". The level is deployment-wide, so this
+// file owns its harness and its cases run in order.
 
 const REASON = "Reviewing the notes gadget";
 const network = new NetworkInterceptor();
@@ -140,6 +143,75 @@ function inspect(workspaceId: string): Promise<RpcStub<AdminWorkspaceView>> {
   return admin.inspectWorkspace(workspaceId, REASON);
 }
 
+const bytesOf = async (stream: ReadableStream<Uint8Array>) =>
+  new Uint8Array(await new Response(stream).arrayBuffer());
+
+const streamOf = (bytes: Uint8Array): ReadableStream<Uint8Array> => new Response(bytes).body!;
+
+/** The container version in a `.gadget` archive's header: 2 for one whose content is a release. */
+const archiveVersion = (archive: Uint8Array) =>
+  new DataView(archive.buffer, archive.byteOffset, archive.byteLength).getUint32(8);
+
+/** A ZIP's entries by name, as bytes, read from its central directory and inflated. */
+function unzip(bytes: Uint8Array): Map<string, Uint8Array> {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const end = bytes.byteLength - 22;
+  expect(view.getUint32(end, true)).toBe(0x06054b50);
+  const entries = new Map<string, Uint8Array>();
+  let at = view.getUint32(end + 16, true);
+  for (let i = view.getUint16(end + 10, true); i > 0; i--) {
+    const packedSize = view.getUint32(at + 20, true);
+    const nameLength = view.getUint16(at + 28, true);
+    const local = view.getUint32(at + 42, true);
+    const dataAt = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    entries.set(
+        new TextDecoder().decode(bytes.subarray(at + 46, at + 46 + nameLength)),
+        new Uint8Array(inflateRawSync(bytes.subarray(dataAt, dataAt + packedSize))));
+    at += 46 + nameLength;
+  }
+  return entries;
+}
+
+function treePaths(nodes: TreeNode[], prefix = ""): string[] {
+  return nodes.flatMap(node => {
+    const path = prefix ? `${prefix}/${node.name}` : node.name;
+    return node.kind === "dir" ? treePaths(node.children, path) : [path];
+  });
+}
+
+/** The files of the one gadget a workspace made from a blueprint holds, at its head. */
+async function installedCode(ws: RpcStub<Overseer>): Promise<Record<string, string>> {
+  const { defaultGadgetId } = await ws.getMetadata();
+  if (defaultGadgetId === undefined) throw new Error("The workspace has no default gadget");
+  const workpieces = new WorkpieceRecorder();
+  using stub = stubFor(workpieces);
+  using _subscription = await ws.subscribeToWorkpieces(stub);
+  await workpieces.loaded;
+  const summary = workpieces.summaries.get(defaultGadgetId);
+  if (summary?.type !== "gadget" || summary.commitId === undefined) {
+    throw new Error(`Gadget ${defaultGadgetId} has no committed head`);
+  }
+  const paths = treePaths(await ws.listTree(summary.commitId));
+  const code: Record<string, string> = {};
+  for (const [path, file] of await ws.readFilesAtCommit(summary.commitId, paths)) {
+    if (file.kind !== "text") throw new Error(`${path} is ${file.kind}`);
+    code[path] = file.text;
+  }
+  return code;
+}
+
+/** Import `archive` as a new account and make a workspace of it, returning its gadget's files and
+ * the blueprint's metadata. */
+async function importAndInstall(archive: Uint8Array) {
+  const [username] = nextUsernames("exportimporter");
+  using publicApi = connect(harness.url);
+  using api = await signUp(publicApi, username!);
+  const blueprintId = await api.importBlueprint(streamOf(archive));
+  const metadata = (await publicApi.getBlueprint(blueprintId))?.metadata;
+  using ws = await api.newWorkspaceFromBlueprint(blueprintId, {});
+  return { metadata, code: await installedCode(ws) };
+}
+
 it("measures a gadget's stored data, and the gadget goes on with its data", async () => {
   await withNotesGadget(["first", "second"], async ({ gadget, gadgetId, workspaceId }) => {
     using view = await inspect(workspaceId);
@@ -158,6 +230,70 @@ it("measures a gadget's stored data, and the gadget goes on with its data", asyn
     expect(records.map(record => [record.method, record.access, record.refused])).toEqual([
       ["listGadgetDataSizes", "content", undefined],
       ["measureGadget", "content", undefined],
+    ]);
+  });
+});
+
+it("copies a gadget's code as a blueprint archive another account imports and installs",
+    async () => {
+  await withNotesGadget(["kept"], async ({ gadget, gadgetId, workspaceId }) => {
+    using view = await inspect(workspaceId);
+    using connected = await gadget.connectToGadget() as NotesGadget;
+    expect(await connected.notes()).toEqual({ bodies: ["kept"], count: 1 });
+    const archive = await bytesOf(await view.exportGadget(gadgetId, "code"));
+    expect(archiveVersion(archive)).toBe(2);
+
+    const { metadata, code } = await importAndInstall(archive);
+    expect(metadata).toMatchObject({ title: "Notes", description: "", version: 1, bindings: {} });
+    expect(code).toEqual({ "server.js": SERVER_JS });
+
+    // Code alone: the gadget was never paused, so the connection made before the copy goes on.
+    expect(await connected.notes()).toEqual({ bodies: ["kept"], count: 1 });
+    expect(await view.listGadgetDataSizes()).toEqual([]);
+    const [record] = (await admin.listAdminAudit({ kind: "workspace", limit: 2 })).records.slice(1);
+    expect(record).toMatchObject({
+      kind: "workspace", workspaceId, method: "exportGadget", args: { gadgetId, mode: "code" },
+      access: "content",
+    });
+    expect(record).not.toHaveProperty("refused");
+  });
+});
+
+it("copies everything: the code archive, the gadget's data.json and a README", async () => {
+  await withNotesGadget(["first", "second"], async ({ gadget, gadgetId, workspaceId }) => {
+    using view = await inspect(workspaceId);
+    const entries = unzip(await bytesOf(await view.exportGadget(gadgetId, "everything")));
+    expect([...entries.keys()]).toEqual(["notes.gadget", "notes.data.json", "README.md"]);
+
+    const data = JSON.parse(new TextDecoder().decode(entries.get("notes.data.json")));
+    expect(data).toEqual({
+      format: "cloudflare-os/gadget-data",
+      version: 1,
+      gadget: { id: gadgetId, name: "Notes" },
+      exportedAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+      sizeBytes: expect.any(Number),
+      sql: [{
+        name: "notes",
+        createSql: "CREATE TABLE notes(id INTEGER PRIMARY KEY, body)",
+        rows: [{ id: 1, body: "first" }, { id: 2, body: "second" }],
+      }],
+      kv: [{ key: "count", value: 2 }],
+    });
+    expect(await view.listGadgetDataSizes())
+        .toEqual([{ gadgetId, bytes: data.sizeBytes, measuredAt: expect.any(Date) }]);
+    expect(new TextDecoder().decode(entries.get("README.md"))).toContain("**Import blueprint**");
+
+    // The archive inside is the code copy, which imports as one.
+    const archive = entries.get("notes.gadget")!;
+    expect(archiveVersion(archive)).toBe(2);
+    expect((await importAndInstall(archive)).code).toEqual({ "server.js": SERVER_JS });
+
+    // The gadget goes on with its data.
+    expect(await notesOf(gadget)).toEqual({ bodies: ["first", "second"], count: 2 });
+    const { records } = await admin.listAdminAudit({ kind: "workspace", limit: 2 });
+    expect(records.map(record => [record.method, record.args, record.access])).toEqual([
+      ["listGadgetDataSizes", {}, "content"],
+      ["exportGadget", { gadgetId, mode: "everything" }, "content"],
     ]);
   });
 });
@@ -201,7 +337,7 @@ it("lets the owner's and a collaborator's connections interleaved with reads see
   });
 });
 
-it("refuses a pending gadget's read and goes on reading the next", async () => {
+it("refuses a pending gadget's read and copy, and goes on reading the next", async () => {
   await withNotesGadget(["kept"], async ({ ws, gadget, gadgetId, workspaceId }) => {
     const chatId = await ws.newChat("Draft", null);
     using pending = await ws.createGadget("Draft gadget", chatId, "DRAFT");
@@ -211,12 +347,17 @@ it("refuses a pending gadget's read and goes on reading the next", async () => {
     await expect(view.measureGadget(pendingId))
         .rejects.toThrow(`No permanent gadget has id ${pendingId}.`);
     await expect(view.measureGadget(9999)).rejects.toThrow("No permanent gadget has id 9999.");
+    await expect(view.exportGadget(pendingId, "code"))
+        .rejects.toThrow(`No gadget with committed code has id ${pendingId}.`);
+    await expect(view.exportGadget(pendingId, "everything"))
+        .rejects.toThrow(`No gadget with committed code has id ${pendingId}.`);
     expect((await view.measureGadget(gadgetId)).bytes).toBeGreaterThan(0);
     expect(await notesOf(gadget)).toEqual({ bodies: ["kept"], count: 1 });
   });
 });
 
-it("refuses measureGadget below content, recording the refusal and reading nothing", async () => {
+it("refuses measureGadget and exportGadget below content, recording each refusal and reading " +
+    "nothing", async () => {
   await withNotesGadget(["kept"], async ({ gadget, gadgetId, workspaceId }) => {
     using view = await inspect(workspaceId);
     await admin.setAdminWorkspaceAccess("metadata");
@@ -227,6 +368,13 @@ it("refuses measureGadget below content, recording the refusal and reading nothi
       expect(record).toMatchObject({
         kind: "workspace", workspaceId, admin: ADMIN_USERNAME, method: "measureGadget",
         args: { gadgetId }, reason: REASON, access: "metadata",
+        refused: ADMIN_ACCESS_ERROR_CODES.accessInsufficient,
+      });
+      expect(await codeOf(view.exportGadget(gadgetId, "everything")))
+          .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
+      const [exportRecord] = (await admin.listAdminAudit({ kind: "workspace", limit: 1 })).records;
+      expect(exportRecord).toMatchObject({
+        method: "exportGadget", args: { gadgetId, mode: "everything" }, access: "metadata",
         refused: ADMIN_ACCESS_ERROR_CODES.accessInsufficient,
       });
       expect(await view.listGadgetDataSizes()).toEqual([]);

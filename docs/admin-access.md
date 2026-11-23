@@ -164,8 +164,8 @@ refused open and refuses (see [Which refusals are recorded](#which-refusals-are-
 
 The view (`AdminWorkspaceViewImpl`) is not an `Overseer`. It joins no presence, session count or
 outputs fan-out, and starts no agent, ambient capsule or gatekeeper facet; waking the Durable Object
-still resumes turns a previous instance left running, as any wake does. Its one call that touches a
-gadget's facet is `measureGadget()` (see
+still resumes turns a previous instance left running, as any wake does. Its calls that touch a
+gadget's facet are `measureGadget()` and `exportGadget(gadgetId, "everything")` (see
 [Reading a gadget's stored data](#reading-a-gadgets-stored-data)). It offers these reads, shaped as
 the matching `Overseer` reads are where there is one:
 
@@ -190,6 +190,10 @@ the matching `Overseer` reads are where there is one:
 - **Gadget data**: `measureGadget()`, which needs `"content"`, measures the size of a permanent
   gadget's stored data and keeps it; `listGadgetDataSizes()` lists the sizes kept, each with when
   it was measured, for the gadgets that still exist, reading nothing else.
+- **A copy of a gadget**: `exportGadget(gadgetId, mode)`, which needs `"content"`, returns a file to
+  save: the gadget's code as a `.gadget` blueprint archive (`"code"`), or that archive in a ZIP with
+  the gadget's stored data and a README (`"everything"`). See
+  [Copying a gadget](#copying-a-gadget).
 
 Three of these give less than their names promise:
 
@@ -288,6 +292,36 @@ leaves none to fire on the reader.
 `measureGadget()` changes what members see in that one way, the reconnect, and writes only the
 size it measured to the workspace. Its record's `exposed` stays `metadata`: it answers with a
 size.
+
+### Copying a gadget
+
+`exportGadget(gadgetId, mode)` builds the whole copy (`OverseerImpl.exportGadgetCopy()`, with the
+files built by `admin-gadget-export.ts`) before the call is recorded, and only then returns it, as a
+stream of the bytes built. It returns the file alone; the browser names it `<slug>.gadget` or
+`<slug>.zip` from the gadget's title, with `fileNameSlug()` (`@gadgets/workshop-shared/zip`).
+
+- **`"code"`** is a `.gadget` archive (version 2) of the gadget's committed head, which any
+  Cloudflare OS takes in through **Import blueprint** (`AuthenticatedApi.importBlueprint()`). Its
+  release is the snapshot release of the head's files (`buildSnapshotRelease()`, packed by
+  `buildReleasePack()` from those objects alone), so it carries none of the gadget's history and no
+  commit message, and nothing is written to the workspace's git store. Its metadata is what
+  `createBlueprint()` derives: the gadget's title, an empty description, the owner's profile as
+  author, the connections as blueprint bindings (`collectBindingMetadata()`, which refuses a
+  connection a blueprint cannot express, as publishing does) and the gadget's output format, at
+  version 1. Nothing is published, and the gadget is not paused.
+- **`"everything"`** is a ZIP of `<slug>.gadget` (that archive), `<slug>.data.json` and
+  `README.md`. The data is read as `measureGadget()` reads (the steps above), its size kept as the
+  gadget's last measured; `readGadgetStorage(…, "dumpJson")` hands over the JSON text the reader
+  wrote, which goes into the ZIP as it is, so a copy near the limit is not parsed and written out
+  again. The README says what each file is, and that the data restores by hand for now: nothing
+  imports a `data.json`, and a gadget made from the archive starts empty.
+
+A pending gadget, a worktree, an unknown id and a gadget whose head holds no files are refused,
+reading nothing. The copy fails, naming the limit, once it would be larger than 100 MB or take
+longer than 30 seconds (`export-limits.ts`); the data read inside it has the same limits of its
+own. A copy's record is stored with `exposed` `content` (see
+[Three kinds of record](#three-kinds-of-record)), whether its read succeeded or failed; a refused
+one is `metadata`.
 
 ### Who created a connection
 
@@ -472,15 +506,15 @@ cap govern both inspections, of a workspace and of a user's account:
     names, avatar, granted resource types and what it provides) and blueprints' ids (an id is a
     share link to the blueprint's code, as a workspace's is). What an account stores as a
     credential is never returned (see [User inspection](#user-inspection)).
-- **content**: everything `"metadata"` shows, and the view methods that need `"content"`, which
-  read a gadget's code and its stored data (`measureGadget()`, which reads the stored data to
-  measure it and answers with its size). Nothing else `"metadata"` withholds is offered: every
-  other method of either view answers at `"content"` exactly as at `"metadata"`, withholding what
-  it withholds there (chat messages, attachments, file contents outside a gadget's code, commit
-  messages and the rest), and its record names `"content"` as the level in force. It is in force
-  only while the deployment's `ADMIN_WORKSPACE_ACCESS_MAX` names it and an admin has chosen it
-  (see [The environment's bounds](#the-environments-bounds)), so a deployment that sets neither
-  never has it.
+- **content**: everything `"metadata"` shows, and the view methods that need `"content"`, which read
+  a gadget's code and its stored data (`exportGadget()`, which returns them, and `measureGadget()`,
+  which reads the stored data to measure it and answers with its size). Nothing else `"metadata"`
+  withholds is offered: every other method of either view answers at `"content"` exactly as at
+  `"metadata"`, withholding what it withholds there (chat messages, attachments, file contents
+  outside a gadget's code, commit messages and the rest), and its record names `"content"` as the
+  level in force. It is in force only while the deployment's `ADMIN_WORKSPACE_ACCESS_MAX` names it
+  and an admin has chosen it (see [The environment's bounds](#the-environments-bounds)), so a
+  deployment that sets neither never has it.
 
 Beyond a gadget's code and stored data at `"content"`, no level and no method returns what
 `"metadata"` withholds. [What the metadata level withholds](#what-the-metadata-level-withholds)
@@ -578,17 +612,19 @@ names is refused (capnweb-validate checks it against the method union); one that
 has gives an empty page.
 
 The store's table admits exactly these kinds, by a CHECK on its `kind` column, and its `exposed`
-column holds `'metadata'` for every access record, of either kind, whatever its `access`: a call at
-`"content"` to a method that needs only `"metadata"` answers with metadata. The column's CHECK
-already admits `'content'`, and the level lives in the record's JSON, which no CHECK constrains, so
-the `"content"` level needed no rebuild of the table. SQLite cannot alter a CHECK, so a table whose
-stored definition differs from the current one is rebuilt once, when the log's Durable Object next
-starts: its rows are copied into a table of the current definition, each keeping its `seq`.
-AUTOINCREMENT's high-water mark is not carried, so a `seq` above the highest row copied (one whose
-row has since been deleted) can be handed out again, which only a list cursor held across the
-rebuild could notice. A rebuild that fails, as it does on a table of a later definition holding rows
-of a kind this CHECK refuses, rolls back whole: it leaves the stored table with its rows, is logged
-(`admin.audit.table.rebuild.failed`), and the log goes on appending the kinds that table admits.
+column says what a call could answer with: `'content'` for an `exportGadget()` the level let
+through, and `'metadata'` for every other access record, of either kind, whatever its `access`: a
+call at `"content"` to a method that needs only `"metadata"` answers with metadata, and
+`measureGadget()` answers with a size. The column's CHECK already admits `'content'`, and the level
+lives in the record's JSON, which no CHECK constrains, so the `"content"` level needed no rebuild of
+the table. SQLite cannot alter a CHECK, so a table whose stored definition differs from the current
+one is rebuilt once, when the log's Durable Object next starts: its rows are copied into a table of
+the current definition, each keeping its `seq`. AUTOINCREMENT's high-water mark is not carried, so a
+`seq` above the highest row copied (one whose row has since been deleted) can be handed out again,
+which only a list cursor held across the rebuild could notice. A rebuild that fails, as it does on a
+table of a later definition holding rows of a kind this CHECK refuses, rolls back whole: it leaves
+the stored table with its rows, is logged (`admin.audit.table.rebuild.failed`), and the log goes on
+appending the kinds that table admits.
 
 ### What the metadata level withholds
 
@@ -617,6 +653,7 @@ read nothing the level withholds:
 | `getDiagnostics()` | Counts, the chats with an agent turn recorded, the storage's version and size, times and who is present | Nothing |
 | `listGadgetDataSizes()` | Each measured gadget's id, its data's size and when it was measured | Nothing: it reads the sizes kept, never a gadget |
 | `measureGadget()` (needs `"content"`) | The size of a gadget's stored data, and when it was measured | The data: the reader measures it, and only the size leaves the server |
+| `exportGadget()` (needs `"content"`) | A gadget's committed files as a blueprint archive, with, for `"everything"`, its stored data and a README | The gadget's history and commit messages, its chats and everything else of the workspace |
 
 The open (`inspectWorkspace`) returns the view and nothing of the workspace.
 
@@ -630,10 +667,10 @@ descriptions.
 ### Recorded before anything leaves
 
 An access record is written to the deployment-wide `AdminAuditDurableObject`, and only then is the
-answer returned. Nothing is written to the workspace but the size `measureGadget()` measured, which
-no member reads, so `listActions()`, `subscribeToActions()` and everything else a member reads can
-never show an inspection. Nor is anything written to an
-inspected account. If the write fails, the call fails and returns nothing.
+answer returned. Nothing is written to the workspace but the size `measureGadget()` or an
+`"everything"` copy measured, which no member reads, so `listActions()`, `subscribeToActions()` and
+everything else a member reads can never show an inspection. Nor is anything written to an inspected
+account. If the write fails, the call fails and returns nothing.
 
 A setting record is written to the deployment-wide log before the change is stored: a change whose
 record cannot be written is refused.
@@ -700,8 +737,9 @@ limit of its own: kept whole, an over-long title would overflow the row (the pla
 listing past the RPC size limit.
 
 The store's table also has an `exposed` column with an index (`admin_audit_exposed`): `append()`
-writes `metadata` there for every access record and nothing for a setting record. The column is not
-part of a record the API returns, and no query filters by it.
+writes `content` there for a call of a method that returns content (`exportGadget()`) that the
+level let through, answered or failed, `metadata` for every other access record, and nothing for a
+setting record. The column is not part of a record the API returns, and no query filters by it.
 
 ### Retention and pruning
 
@@ -755,14 +793,15 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   nothing stored or recorded, `"content"` refused until the cap names it, and a stored one
   reported as `"off"` until an admin chooses.
 - `admin-audit.test.ts`: the deployment-wide log's listing, filters, cursors, schema (the CHECKs
-  tying the workspace columns to records of access to a workspace, and `exposed` stored as
-  `metadata` for every access record, of a workspace or of a user's account, and null for a
+  tying the workspace columns to records of access to a workspace, and `exposed` stored as `content`
+  for an `exportGadget()` the level let through, `metadata` for every other access record (a refused
+  export, `measureGadget()`, and every call into a user's account among them), and null for a
   setting record), retention, stats (per day, the top admins, by kind), the method and target
-  indexes (a workspace's owner and an inspected user through one), and multi-MiB titles. Records
-  of access to users' accounts are listed by kind and by a method name both views share, keep a
-  long user id as a long owner is kept, and are counted. The table's rebuild: a table that knows
-  no user records, one that indexes the workspace owner alone, a current one left alone, and a
-  later one kept, logged and still appended to.
+  indexes (a workspace's owner and an inspected user through one), and multi-MiB titles. Records of
+  access to users' accounts are listed by kind and by a method name both views share, keep a long
+  user id as a long owner is kept, and are counted. The table's rebuild: a table that knows no user
+  records, one that indexes the workspace owner alone, a current one left alone, and a later one
+  kept, logged and still appended to.
 - `admin-api-impl.test.ts`: `AdminApiImpl`'s inspection path, opens refused while access is off (by
   the setting or by a cap), the setter's validator refusing a value that is not a level with a
   `TypeError`, listings and forwarding. For `inspectUser()`: the order of its checks, an empty
@@ -797,7 +836,18 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   interface, are its RPC surface). `measureGadget()` refused and recorded below `"content"`; at
   `"content"`, answered, recorded at it with `exposed` `metadata`, and its size the one thing
   written to the workspace; a failed read recorded; and `listGadgetDataSizes()` leaving out a
-  gadget since deleted.
+  gadget since deleted. `exportGadget()` refused and recorded below `"content"` (stored as
+  `metadata`); `"code"` an archive of the head's files with the metadata publishing derives, its
+  release the files' snapshot release, leaving the workspace as it was; `"everything"` a ZIP of
+  that archive, the `data.json` a dump reads and the README, keeping the size; each recorded once
+  with its mode and stored as `content`; a pending gadget, an unknown id and a gadget with no files
+  refused and recorded; and a copy past its size limit failing with the limit named, the gadget
+  readable after.
+- `admin-gadget-export.test.ts`: the code archive reading back as Import blueprint reads it (its
+  metadata, and its pack's files), and the `"everything"` ZIP holding the archive, the data as
+  given and the README.
+- `zip.test.ts`: `zipFiles()` keeping text and binary entries, empty ones and a view into a larger
+  buffer, each checked against its CRC-32 and its local header; and `fileNameSlug()`.
 - `admin-user-view.test.ts`: the user view, from an id that names no account and creates none to the
   per-call checks; every method recorded and none refused, each record stored with `exposed`
   `metadata` in the table; what the answers withhold, shown first in what the user is served from;
@@ -873,8 +923,11 @@ Integration suites, in `packages/integration-tests/__tests__/`:
   interleaved with reads, each reconnecting only when a read's pause cut it off and never reaching
   the reader (reads are quick, so few land during one: the wait itself is proven in
   `gadget-storage-reader.test.ts`); a pending gadget and an unknown id refused, the next read
-  going ahead; and `measureGadget()` refused below `"content"` (`accessInsufficient`), recorded
-  at the level in force.
+  going ahead; a copy of the code imported by another account and installed with the gadget's
+  files, the connection open before it never cut off; an `"everything"` copy whose `data.json`
+  holds the gadget's rows and counter and whose archive installs too, the gadget answering with its
+  data after; a pending gadget's copy refused; and `measureGadget()` and `exportGadget()` refused
+  below `"content"` (`accessInsufficient`), recorded at the level in force.
 - `workshop-admin-bounds.test.ts`: the bounds' defaults (`"content"` refused for the bound), and a
   redeploy that tightens them (an invalid cap failing closed) and demotes an admin. The redeploy
   ends every session, the demoted admin's view among them, so the per-call re-check that stops a

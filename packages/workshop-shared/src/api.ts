@@ -1978,7 +1978,7 @@ export const ADMIN_WORKSPACE_METHODS = [
   "listActions", "listFiles", "getCommitLog", "listFilesAtCommit", "listChangedPaths",
   "listPendingChanges", "listGatekeepers", "listObservers", "listObserverRequirements",
   "listShareLinks", "listAutoApprovals", "listBlueprints", "getDiagnostics", "measureGadget",
-  "listGadgetDataSizes",
+  "listGadgetDataSizes", "exportGadget",
 ] as const satisfies readonly ("inspectWorkspace" | keyof AdminWorkspaceView)[];
 
 /** One of ADMIN_WORKSPACE_METHODS. */
@@ -2922,11 +2922,12 @@ export type AdminAutoApproval = {
  * A deployment admin's read-only view of one workspace's metadata, minted by
  * AdminApi.inspectWorkspace(). It joins no presence and no session count, and starts no agent or
  * connection. Nothing it does changes the workspace or is seen by its members, with one exception:
- * measureGadget() pauses the gadget while it reads its stored data, and keeps the size it
- * measured. Apart from the methods documented as needing the "content" level, it returns what the
- * "metadata" access level shows (see ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that level
- * withholds, at either level: no method returns a chat's messages, an attachment's bytes or a
- * file's content.
+ * measureGadget() and exportGadget() (an "everything" copy) pause the gadget while they read its
+ * stored data, and keep the size they found. Apart from the methods documented as needing the
+ * "content" level, it returns what the "metadata" access level shows (see
+ * ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that level withholds, at either level: no other
+ * method returns a chat's messages, an attachment's bytes or a file's content, and exportGadget()
+ * returns a gadget's committed files and stored data alone.
  *
  * Each call first passes three checks, refused unrecorded with a code from
  * ADMIN_ACCESS_ERROR_CODES: the view has not expired (`viewExpired`), its admin is still a
@@ -3066,7 +3067,36 @@ export interface AdminWorkspaceView extends RpcTarget {
    * that still exist and have been measured, in gadget id order. Reads only what the workspace
    * kept of those measurements: no gadget is paused or asked. */
   listGadgetDataSizes(): Promise<AdminGadgetDataSize[]>;
+
+  /**
+   * A copy of a permanent gadget, as a file to save. Needs the "content" level, and is the one
+   * call the audit log stores as having exposed content (an attempt the level let through
+   * included).
+   *
+   * - `"code"`: a `.gadget` blueprint archive of the gadget's committed head, which any Cloudflare
+   *   OS takes in through AuthenticatedApi.importBlueprint() (Import blueprint). Its release is
+   *   the snapshot release of those files, so it carries none of the gadget's history or commit
+   *   messages, and its metadata is what GadgetClient.createBlueprint() would derive (the
+   *   gadget's title, its owner as author, its connections as blueprint bindings, its output
+   *   format), at version 1. Nothing is published and the gadget is not paused.
+   * - `"everything"`: a ZIP of `<slug>.gadget` (that archive), `<slug>.data.json` (the gadget's
+   *   stored data, a GadgetDataFile) and `README.md` (what each file is), where `<slug>` is
+   *   fileNameSlug() (`@gadgets/workshop-shared/zip`) of the gadget's title. The data is read as
+   *   measureGadget() reads, pausing the gadget, and its size is kept as the gadget's last
+   *   measured.
+   *
+   * The whole copy is built before it is recorded and returned. Throws for a pending gadget, a
+   * worktree, or an id that names no gadget; for a gadget with no committed files; for a
+   * connection that a blueprint cannot express (as publishing does); and when the copy would be
+   * larger than 100 MB or take longer than 30 seconds, naming the limit.
+   */
+  exportGadget(gadgetId: WorkpieceId, mode: AdminGadgetExportMode)
+      : Promise<ReadableStream<Uint8Array>>;
 }
+
+/** What AdminWorkspaceView.exportGadget() copies: a gadget's code alone ("code"), or its code, its
+ * stored data and a README ("everything"). */
+export type AdminGadgetExportMode = "code" | "everything";
 
 /** A user's account as AdminUserView.describe() presents it. */
 export type AdminUserDescription = {

@@ -772,7 +772,8 @@ it("records each call into a workspace", async () => {
     }
 
     // The table behind the log, which is always getByName(""). Its `exposed` column holds
-    // 'metadata' for every access record, refused ones included, and nothing for a setting change.
+    // 'metadata' for every access record here, refused ones included (only a copy of a gadget,
+    // which this deployment's level never allows, is 'content'), and nothing for a setting change.
     const storage = await harness.server.getWorker("workshop-backend")
         .getDurableObjectStorage("AdminAuditDurableObject", { name: "" });
     expect(await storage.exec<{ exposed: string | null }>(

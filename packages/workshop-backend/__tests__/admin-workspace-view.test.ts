@@ -25,6 +25,11 @@ import type { OverseerDurableObject } from "../src/overseer.js";
 import type { AdminAuditDurableObject } from "../src/admin-audit.js";
 import type { AdminViewTerms } from "../src/admin-access.js";
 import { encodeGitTree, gitObjectOid } from "../src/git-codec.js";
+import { parseBlueprintArchive } from "../src/blueprint-archive.js";
+import {
+  buildSnapshotRelease, listReleaseFiles, readReleasePack,
+} from "../src/blueprint-release.js";
+import { unzipBytes } from "./unzip.js";
 import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 import { putAction } from "./fixtures.js";
 import { rpcSurface } from "./rpc-surface.js";
@@ -586,10 +591,11 @@ async function memberVisibleState(ws: Workspace) {
   };
 }
 
-// The view's one method that needs "content", and the rest of the audit's methods, which need
+// The view's two methods that need "content", and the rest of the audit's methods, which need
 // "metadata": the open and eighteen view methods.
-const CONTENT_METHOD = "measureGadget";
-const METADATA_METHODS = ADMIN_WORKSPACE_METHODS.filter(method => method !== CONTENT_METHOD);
+const CONTENT_METHODS: readonly string[] = ["measureGadget", "exportGadget"];
+const METADATA_METHODS =
+    ADMIN_WORKSPACE_METHODS.filter(method => !CONTENT_METHODS.includes(method));
 
 // Calls each of the eighteen view methods that need "metadata" once on the seed, and returns their
 // answers by method.
@@ -667,7 +673,7 @@ describe("opening an admin view", () => {
 });
 
 describe("a metadata view", () => {
-  it("records every one of its calls, and refuses only the one that needs content",
+  it("records every one of its calls, and refuses only the ones that need content",
       () => withWorkspace(async ws => {
     let view = await open(ws);
     await view.describe();
@@ -691,6 +697,8 @@ describe("a metadata view", () => {
     await view.getDiagnostics();
     await view.listGadgetDataSizes();
     expect(await codeOf(view.measureGadget(ws.gadgetId)))
+        .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
+    expect(await codeOf(view.exportGadget(ws.gadgetId, "code")))
         .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
 
     let records = await deploymentRecords(ws);
@@ -719,6 +727,8 @@ describe("a metadata view", () => {
       ["listGadgetDataSizes", {}, "metadata", undefined],
       ["measureGadget", { gadgetId: ws.gadgetId }, "metadata",
        ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
+      ["exportGadget", { gadgetId: ws.gadgetId, mode: "code" }, "metadata",
+       ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
     ]);
     // The list above is kept by hand: a method the audit names fails here until it is called
     // above, and its record asserted.
@@ -746,8 +756,8 @@ describe("a metadata view", () => {
     expect(view).toBeInstanceOf(RpcTarget);
     expect(rpcSurface(view)).toStrictEqual(
         new Set(ADMIN_WORKSPACE_METHODS.filter(method => method !== "inspectWorkspace")));
-    // The open and nineteen view methods.
-    expect(ADMIN_WORKSPACE_METHODS).toHaveLength(20);
+    // The open and twenty view methods.
+    expect(ADMIN_WORKSPACE_METHODS).toHaveLength(21);
     for (let name of [
       "getChat", "readChatAttachment", "readFile", "readFileAtCommit", "readPendingFile",
     ]) {
@@ -971,13 +981,22 @@ describe("an inspection", () => {
   }));
 });
 
-describe("measuring a gadget", () => {
-  // The cap and the choice that put "content" in force.
-  function allowContent(ws: Workspace): void {
-    ws.config.adminWorkspaceAccess = "content";
-    setEnv(ws, { ADMIN_WORKSPACE_ACCESS_MAX: "content" });
-  }
+// The cap and the choice that put "content" in force.
+function allowContent(ws: Workspace): void {
+  ws.config.adminWorkspaceAccess = "content";
+  setEnv(ws, { ADMIN_WORKSPACE_ACCESS_MAX: "content" });
+}
 
+// The audit table's `exposed` column for this workspace's records, oldest first, with each one's
+// method.
+function exposedColumn(ws: Workspace): Promise<{ method: string; exposed: string }[]> {
+  return runInDurableObject(env.TEST_ADMIN_AUDIT.getByName(""), (_log, state) =>
+      state.storage.sql.exec<{ method: string; exposed: string }>(
+          `SELECT json_extract(record, '$.method') AS method, exposed FROM admin_audit
+           WHERE workspace_id = ? ORDER BY seq`, ws.id).toArray());
+}
+
+describe("measuring a gadget", () => {
   it("is refused and recorded below content, measuring nothing", () => withWorkspace(async ws => {
     let view = await open(ws);
     // A choice of content held to metadata by the cap is still below it.
@@ -1040,6 +1059,141 @@ describe("measuring a gadget", () => {
           ["measureGadget", { gadgetId: ws.gadgetId }, undefined],
           ["listGadgetDataSizes", {}, undefined],
         ]);
+  }));
+});
+
+describe("exporting a gadget", () => {
+  const bytesOf = async (stream: ReadableStream<Uint8Array>) =>
+      new Uint8Array(await new Response(stream).arrayBuffer());
+
+  // A `.gadget` archive read back as Import blueprint reads it: its metadata, and its release's
+  // files.
+  async function readArchive(archive: Uint8Array) {
+    let { metadata, content } = await parseBlueprintArchive(new Blob([archive]).stream());
+    let objects = await readReleasePack(await bytesOf(content), metadata.commitId!);
+    return { metadata, files: Object.fromEntries(listReleaseFiles(objects, metadata.commitId!)) };
+  }
+
+  // What the seeded gadget's code archive holds: its head's files, and the metadata publishing it
+  // would derive, at version 1, its release the snapshot release of those files.
+  function expectSeededArchive(ws: Workspace, archive: { metadata: unknown; files: unknown }) {
+    let head = ws.impl.gitCache.readCommitFiles(ws.commitId);
+    expect(archive.files)
+        .toStrictEqual({ "notes.txt": `${WITHHELD.file}\n`, "todo.txt": "todo\n" });
+    expect(archive.metadata).toStrictEqual({
+      title: "Notes", description: "", author: OWNER, version: 1,
+      created: expect.any(Date), lastUpdated: expect.any(Date),
+      // As the archive's JSON carries them.
+      bindings: JSON.parse(JSON.stringify(ws.impl.collectBindingMetadata(ws.gadgetId))),
+      commitId: buildSnapshotRelease(head).commitId,
+    });
+    expect(Object.keys((archive.metadata as { bindings: object }).bindings))
+        .toStrictEqual(["REPO"]);
+  }
+
+  it("is refused and recorded below content, reading nothing", () => withWorkspace(async ws => {
+    let view = await open(ws);
+    // A choice of content held to metadata by the cap is still below it.
+    ws.config.adminWorkspaceAccess = "content";
+    expect(await codeOf(view.exportGadget(ws.gadgetId, "everything")))
+        .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
+    expect(await view.listGadgetDataSizes()).toStrictEqual([]);
+    expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.access, r.refused]))
+        .toStrictEqual([
+          ["exportGadget", { gadgetId: ws.gadgetId, mode: "everything" }, "metadata",
+           ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
+          ["listGadgetDataSizes", {}, "metadata", undefined],
+        ]);
+    // A refused call answered with nothing.
+    expect((await exposedColumn(ws)).map(row => row.exposed))
+        .toStrictEqual(["metadata", "metadata", "metadata"]);
+  }));
+
+  it("copies the code as a blueprint archive of the committed head, writing nothing",
+      () => withWorkspace(async ws => {
+    allowContent(ws);
+    let view = await open(ws);
+    let before = await memberVisibleState(ws);
+    let archive = await bytesOf(await view.exportGadget(ws.gadgetId, "code"));
+    expectSeededArchive(ws, await readArchive(archive));
+    // Nothing published, no git object stored, no size kept, and the gadget never paused.
+    expect(await memberVisibleState(ws)).toStrictEqual(before);
+
+    expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.access, r.refused]))
+        .toStrictEqual([["exportGadget", { gadgetId: ws.gadgetId, mode: "code" }, "content",
+                         undefined]]);
+    expect(await exposedColumn(ws)).toStrictEqual([
+      { method: "inspectWorkspace", exposed: "metadata" },
+      { method: "exportGadget", exposed: "content" },
+    ]);
+  }));
+
+  it("copies everything: the code archive, data.json and a README, keeping the size",
+      () => withWorkspace(async ws => {
+    allowContent(ws);
+    let view = await open(ws);
+    let entries =
+        await unzipBytes(await bytesOf(await view.exportGadget(ws.gadgetId, "everything")));
+    expect([...entries.keys()]).toStrictEqual(["notes.gadget", "notes.data.json", "README.md"]);
+    expectSeededArchive(ws, await readArchive(entries.get("notes.gadget")!));
+
+    let decoder = new TextDecoder();
+    let data = JSON.parse(decoder.decode(entries.get("notes.data.json")));
+    // What a dump reads now, but for when it was taken.
+    let dump = await ws.impl.readGadgetStorage(ws.gadgetId, "dump");
+    expect(data).toStrictEqual({ ...dump, exportedAt: expect.any(String) });
+    expect(data.format).toBe("cloudflare-os/gadget-data");
+    expect(data.version).toBe(1);
+    expect(data.gadget).toStrictEqual({ id: ws.gadgetId, name: "Notes" });
+    expect(decoder.decode(entries.get("README.md"))).toContain("| `notes.data.json` |");
+
+    let [size] = await view.listGadgetDataSizes();
+    expect(size).toStrictEqual({
+      gadgetId: ws.gadgetId, bytes: data.sizeBytes, measuredAt: expect.any(Date),
+    });
+    expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.access]))
+        .toStrictEqual([
+          ["exportGadget", { gadgetId: ws.gadgetId, mode: "everything" }, "content"],
+          ["listGadgetDataSizes", {}, "content"],
+        ]);
+    expect((await exposedColumn(ws)).map(row => row.exposed))
+        .toStrictEqual(["metadata", "content", "metadata"]);
+  }));
+
+  it("refuses a gadget with no committed code, naming it, and records the attempt",
+      () => withWorkspace(async ws => {
+    allowContent(ws);
+    let pending = ws.impl.createGadget("Draft gadget", "DRAFT", DRAFT_CHAT_ID);
+    let empty = ws.impl.createGadget(
+        "Empty", "EMPTY", undefined, undefined, await commitFiles(ws, {}));
+    let view = await open(ws);
+    await expect(view.exportGadget(pending.id, "code"))
+        .rejects.toThrow(`No gadget with committed code has id ${pending.id}.`);
+    await expect(view.exportGadget(999, "everything"))
+        .rejects.toThrow("No gadget with committed code has id 999.");
+    await expect(view.exportGadget(empty.id, "code"))
+        .rejects.toThrow(`Gadget ${empty.id} has no code to copy.`);
+    expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.refused]))
+        .toStrictEqual([
+          ["exportGadget", { gadgetId: pending.id, mode: "code" }, undefined],
+          ["exportGadget", { gadgetId: 999, mode: "everything" }, undefined],
+          ["exportGadget", { gadgetId: empty.id, mode: "code" }, undefined],
+        ]);
+    // An attempt at content is recorded as one, whatever its read then did.
+    expect((await exposedColumn(ws)).map(row => row.exposed))
+        .toStrictEqual(["metadata", "content", "content", "content"]);
+  }));
+
+  it("fails a copy past the size limit, naming it, and leaves the gadget readable",
+      () => withWorkspace(async ws => {
+    const TOO_LARGE = "The copy of the gadget is larger than 100 bytes, the most an export holds.";
+    await expect(ws.impl.exportGadgetCopy(ws.gadgetId, "code", { maxBytes: 100 }))
+        .rejects.toThrow(TOO_LARGE);
+    await expect(ws.impl.exportGadgetCopy(ws.gadgetId, "everything", { maxBytes: 100 }))
+        .rejects.toThrow(TOO_LARGE);
+    // The read it took released the gadget.
+    expect((await ws.impl.readGadgetStorage(ws.gadgetId, "measure")).bytes).toBeGreaterThan(0);
+    expect((await ws.impl.exportGadgetCopy(ws.gadgetId, "code")).byteLength).toBeGreaterThan(100);
   }));
 });
 

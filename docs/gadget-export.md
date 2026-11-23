@@ -3,7 +3,9 @@
 A gadget's files leave the Workshop through its **export formats**: the list the Export menu shows
 (`GadgetClient.getExportFormats()` / `export()`). A gadget with no `ExportHandler` gets HTML and PDF;
 one that exports an `ExportHandler` from `server.js` lists its own
-(`packages/workshop-backend/src/gadget-export.ts`). Two things build on that list.
+(`packages/workshop-backend/src/gadget-export.ts`). Two things build on that list. A deployment
+admin's copy of a gadget is apart from it (see
+[An admin's copy of a gadget](#an-admins-copy-of-a-gadget)).
 
 ## Saving a file from inside a gadget
 
@@ -73,8 +75,24 @@ target as in the Workshop; the viewer is named by Cloudflare Access's
 
 The runtime files are copied into `src/generated/project-runtime.txt` by
 `scripts/build-browser-runtime.ts`, with Cap'n Web's two builds, version and licence.
+The ZIP is written by `zipFiles()` (`packages/workshop-shared/src/zip.ts`), which the admin's copy
+below and the browser use too, and the directory is named by its `fileNameSlug()`.
 `__tests__/project-export.test.ts` covers the files and the archive; the integration tests export a
 gadget through a running Workshop and read the ZIP back (`workshop-blueprints.test.ts`), and check
 that a "use" collaborator is neither offered the project nor given it (`workshop-use-role.test.ts`).
 Changing `project-runtime/` means running a project under `wrangler dev` in a browser: unzip an
 export, `npx wrangler dev`, and open the page.
+
+## An admin's copy of a gadget
+
+A deployment admin whose access level is `"content"` can take a copy of any permanent gadget
+through `AdminWorkspaceView.exportGadget(gadgetId, mode)`, recorded in the admin audit log before it
+leaves the server ([admin-access.md](admin-access.md#copying-a-gadget) has the whole of it):
+
+| Mode | File | What it holds |
+| --- | --- | --- |
+| `"code"` | `<slug>.gadget` | A blueprint archive of the gadget's committed head, as publishing would make it but publishing nothing: any Cloudflare OS takes it in through **Import blueprint**. No history, no data. |
+| `"everything"` | `<slug>.zip` | That archive, `<slug>.data.json` (the gadget's SQLite tables and key-value storage, `"format": "cloudflare-os/gadget-data"`, `"version": 1`) and a `README.md` saying what each file is. Taking the data pauses the gadget, so anyone connected reconnects once. |
+
+`<slug>` is `fileNameSlug()` of the gadget's title. Nothing imports a `data.json` yet: it restores
+by hand, as its README says. The export limits apply: 30 seconds and 100 MB.

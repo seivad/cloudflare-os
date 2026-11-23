@@ -17,6 +17,7 @@
 // and its README says what to bind instead.
 
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import { fileNameSlug, zipFiles } from "@gadgets/workshop-shared/zip";
 // The runtime a project carries, as JSON (scripts/build-browser-runtime.ts writes it).
 import PROJECT_RUNTIME from "./generated/project-runtime.txt";
 
@@ -93,18 +94,10 @@ const EMPTY_CLIENT = `// This gadget had no client.js, so there is no page: its 
 document.body.textContent = "This gadget has no page.";
 `;
 
-/** A Worker name for `title`: lowercase letters, digits and dashes, at most 54 characters. */
+/** A Worker name for `title`: lowercase letters, digits and dashes, at most 54 characters
+ * (fileNameSlug()). */
 export function projectSlug(title: string): string {
-  const slug = title
-    .normalize("NFKD")
-    // An accented letter keeps its letter: the accent, now a mark of its own, is dropped.
-    .replace(/\p{M}+/gu, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 54)
-    .replace(/-+$/, "");
-  return slug || "gadget";
+  return fileNameSlug(title);
 }
 
 /** Whether a gadget file's path is one a project can hold: relative, with no empty, `.` or `..` part. */
@@ -312,88 +305,12 @@ export const PROJECT = ${JSON.stringify({
 
 // ---- The archive --------------------------------------------------------------------------------
 
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
-function crc32(bytes: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-/** General-purpose flag bit 11: the entry's name is UTF-8. */
-const UTF8_NAMES = 0x0800;
-/** 1980-01-01 00:00 as MS-DOS keeps a date: a project's files carry no time of their own. */
-const DOS_DATE = 0x0021;
-
 /**
- * A ZIP of text files, in the order given. Each entry is deflated whole first, so its sizes and
- * checksum go in its own header, which every unzip tool reads; a project is a few hundred
- * kilobytes, so nothing here needs to stream.
+ * A ZIP of text files, in the order given (zipFiles()). A project is a few hundred kilobytes, so
+ * nothing here needs to stream.
  */
-export async function zipTextFiles(files: ReadonlyMap<string, string>): Promise<Uint8Array> {
-  const encoder = new TextEncoder();
-  const parts: Uint8Array[] = [];
-  const central: Uint8Array[] = [];
-  let offset = 0;
-  for (const [path, text] of files) {
-    const name = encoder.encode(path);
-    const raw = encoder.encode(text);
-    const packed = await deflate(raw);
-    // Shared by the local header (from its byte 4) and the central one (from its byte 6).
-    const fields = new DataView(new ArrayBuffer(26));
-    fields.setUint16(0, 20, true);  // version needed: 2.0
-    fields.setUint16(2, UTF8_NAMES, true);
-    fields.setUint16(4, 8, true);  // method: deflate
-    fields.setUint16(6, 0, true);  // time
-    fields.setUint16(8, DOS_DATE, true);
-    fields.setUint32(10, crc32(raw), true);
-    fields.setUint32(14, packed.length, true);
-    fields.setUint32(18, raw.length, true);
-    fields.setUint16(22, name.length, true);
-    fields.setUint16(24, 0, true);  // extra field length
-    const shared = new Uint8Array(fields.buffer);
-
-    const local = new Uint8Array(30 + name.length);
-    new DataView(local.buffer).setUint32(0, 0x04034b50, true);
-    local.set(shared, 4);
-    local.set(name, 30);
-
-    const header = new Uint8Array(46 + name.length);
-    const view = new DataView(header.buffer);
-    view.setUint32(0, 0x02014b50, true);
-    view.setUint16(4, (3 << 8) | 20, true);  // made on Unix, so the mode below is read
-    header.set(shared, 6);
-    // Comment length, disk and internal attributes stay zero. A regular file, rw-r--r--.
-    view.setUint32(38, (0o100644 << 16) >>> 0, true);
-    view.setUint32(42, offset, true);
-    header.set(name, 46);
-
-    parts.push(local, packed);
-    central.push(header);
-    offset += local.length + packed.length;
-  }
-  const centralSize = central.reduce((sum, header) => sum + header.length, 0);
-  const end = new Uint8Array(22);
-  const view = new DataView(end.buffer);
-  view.setUint32(0, 0x06054b50, true);
-  view.setUint16(8, central.length, true);
-  view.setUint16(10, central.length, true);
-  view.setUint32(12, centralSize, true);
-  view.setUint32(16, offset, true);
-  return new Uint8Array(await new Blob([...parts, ...central, end]).arrayBuffer());
+export function zipTextFiles(files: ReadonlyMap<string, string>): Promise<Uint8Array> {
+  return zipFiles(files);
 }
 
 /** The project for a gadget as a ZIP archive: one directory, named by `projectSlug(input.title)`. */

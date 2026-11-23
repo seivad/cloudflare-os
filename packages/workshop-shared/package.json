@@ -46,6 +46,10 @@
     "./ui-page": {
       "types": "./src/ui-page.ts",
       "import": "./src/ui-page.ts"
+    },
+    "./zip": {
+      "types": "./src/zip.ts",
+      "import": "./src/zip.ts"
     }
   },
   "scripts": {

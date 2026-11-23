@@ -1,7 +1,7 @@
 import {
   MAX_ADMIN_AUDIT_ARG_LENGTH,
   type AdminAuditPage, type AdminAuditQuery, type AdminAuditRecord, type AdminAuditStats,
-  type AdminAuditStatsQuery,
+  type AdminAuditStatsQuery, type AdminWorkspaceMethod,
 } from "@gadgets/workshop-shared/api";
 import { DurableObject } from "cloudflare:workers";
 import {
@@ -24,6 +24,11 @@ const TOP_LIMIT = 10;
 const METHOD = "json_extract(record, '$.method')";
 const TARGET =
     "coalesce(json_extract(record, '$.userId'), json_extract(record, '$.workspaceOwner'))";
+
+// The AdminWorkspaceView methods whose answer holds content (a gadget's files and stored data),
+// so whose records the audit stores with `exposed` 'content'. measureGadget() needs the "content"
+// level but answers with a size, so it is not one.
+const CONTENT_METHODS: ReadonlySet<AdminWorkspaceMethod> = new Set(["exportGadget"]);
 
 // The table's definition from its opening parenthesis: the text SQLite stores for it, which the
 // constructor compares with this one.
@@ -63,9 +68,10 @@ type AuditRow = {
  *
  * Schema (the integration suite installs a trigger on the table by this name). Each field of a
  * record is stored once: kind, at (epoch ms), admin and, for access to a workspace, workspace_id
- * and workspace_title are columns, and `exposed` is 'metadata' for every access record; the rest
- * of the record is JSON in `record`. The constructor rebuilds a table stored under another
- * definition.
+ * and workspace_title are columns, and `exposed` is 'content' for an access record of a call that
+ * could answer with content (an exportGadget() the level let through) and 'metadata' for every
+ * other access record; the rest of the record is JSON in `record`. The constructor rebuilds a
+ * table stored under another definition.
  *   admin_audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
  *     kind TEXT NOT NULL CHECK (kind IN ('workspace', 'user', 'setting')), admin TEXT NOT NULL,
  *     workspace_id TEXT, workspace_title TEXT,
@@ -159,9 +165,13 @@ export class AdminAuditDurableObject extends DurableObject<Cloudflare.Env> {
       let { kind: _kind, at: _at, admin: _admin, ...fields } = record;
       rest = fields;
     }
-    // The table's `exposed` column says what an access record's answer held, and a view answers
-    // with metadata alone.
-    let exposed = record.kind === "setting" ? null : "metadata";
+    // The table's `exposed` column says what an access record's call could answer with: content
+    // for a call of a method that returns content (CONTENT_METHODS) that the level let through,
+    // whether its read then succeeded or failed; metadata for every other access record.
+    let exposed = record.kind === "setting" ? null
+        : record.kind === "workspace" && CONTENT_METHODS.has(record.method) &&
+            record.refused === undefined
+        ? "content" : "metadata";
     this.ctx.storage.sql.exec(
       `INSERT INTO admin_audit (at, kind, admin, workspace_id, workspace_title, exposed, record)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,

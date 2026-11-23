@@ -313,14 +313,22 @@ describe("AdminAuditDurableObject schema", () => {
     expect(await sql(log, "SELECT seq FROM admin_audit")).toHaveLength(3);
   });
 
-  it("stores exposed as 'metadata' for every access record, and null for a setting record",
-      async () => {
+  it("stores exposed as 'content' for an export the level let through, 'metadata' for every " +
+      "other access record, and null for a setting record", async () => {
     let log = auditLog();
     let records: AdminAuditRecord[] = [
       access(),
       access({ access: "off", refused: ADMIN_ACCESS_ERROR_CODES.accessOff }),
       // A call whose read failed.
       access({ method: "getChatState", args: { chatId: 999 } }),
+      // A copy of a gadget, answered or attempted, and one refused, which read nothing.
+      access({ method: "exportGadget", args: { gadgetId: 1, mode: "code" }, access: "content" }),
+      access({
+        method: "exportGadget", args: { gadgetId: 1, mode: "everything" }, access: "metadata",
+        refused: ADMIN_ACCESS_ERROR_CODES.accessInsufficient,
+      }),
+      // Needs content, but answers with a size.
+      access({ method: "measureGadget", args: { gadgetId: 1 }, access: "content" }),
       userAccess(),
       userAccess({
         method: "inspectUser", access: "off", refused: ADMIN_ACCESS_ERROR_CODES.accessOff,
@@ -332,7 +340,9 @@ describe("AdminAuditDurableObject schema", () => {
 
     expect(await sql(log, "SELECT kind, exposed FROM admin_audit ORDER BY seq")).toEqual([
       { kind: "workspace", exposed: "metadata" }, { kind: "workspace", exposed: "metadata" },
-      { kind: "workspace", exposed: "metadata" }, { kind: "user", exposed: "metadata" },
+      { kind: "workspace", exposed: "metadata" }, { kind: "workspace", exposed: "content" },
+      { kind: "workspace", exposed: "metadata" }, { kind: "workspace", exposed: "metadata" },
+      { kind: "user", exposed: "metadata" },
       { kind: "user", exposed: "metadata" }, { kind: "user", exposed: "metadata" },
       { kind: "setting", exposed: null },
     ]);
@@ -348,7 +358,7 @@ describe("AdminAuditDurableObject schema", () => {
     await expectRejection(insertRow(log, "workspace", "w1", "t", "bogus"),
         "CHECK constraint failed");
     await expectRejection(insertRow(log, "user", null, null, "bogus"), "CHECK constraint failed");
-    expect(await sql(log, "SELECT seq FROM admin_audit")).toHaveLength(7);
+    expect(await sql(log, "SELECT seq FROM admin_audit")).toHaveLength(records.length);
   });
 
   it("keeps a long user id as a long owner is kept, and finds its account and workspaces by it",
