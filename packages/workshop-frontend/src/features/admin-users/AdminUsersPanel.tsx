@@ -4,6 +4,7 @@ import { CaretLeft, CaretRight } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { AdminApi, AdminUserPage } from '@gadgets/workshop-shared/api'
 import { logRpcFailure } from '../../rpcErrors'
+import { UserPanel } from './UserPanel'
 import { UsersTable } from './UsersTable'
 import {
   DEFAULT_USERS_FILTER, sortedBy, usersQueryOf, type ActiveFilter, type UsersFilter,
@@ -163,6 +164,14 @@ export const AdminUsersPanel = ({ admin, selectedUserId, onSelectUser }: {
             </nav>
           )}
         </>
+      )}
+      {selectedUserId !== undefined && (
+        <UserPanel
+          admin={admin}
+          userId={selectedUserId}
+          userName={page?.users.find((user) => user.id === selectedUserId)?.name}
+          onClose={() => onSelectUser(undefined)}
+        />
       )}
     </div>
   )
