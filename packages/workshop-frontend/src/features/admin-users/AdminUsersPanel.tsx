@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, Input, Loader, Select } from '@cloudflare/kumo'
 import { CaretLeft, CaretRight } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
-import type { AdminApi, AdminUserPage } from '@gadgets/workshop-shared/api'
+import type { AdminApi, AdminUserPage, AdminWorkspaceAccess } from '@gadgets/workshop-shared/api'
 import { logRpcFailure } from '../../rpcErrors'
 import { UserPanel } from './UserPanel'
 import { UsersTable } from './UsersTable'
@@ -27,8 +27,10 @@ type Answer = { request: string } & ({ page: AdminUserPage } | { failed: true })
  * search, the filter or the order starts again from the first page. A row opens that user through
  * `onSelectUser`; `selectedUserId` names the open one.
  */
-export const AdminUsersPanel = ({ admin, selectedUserId, onSelectUser }: {
+export const AdminUsersPanel = ({ admin, accessLevel, selectedUserId, onSelectUser }: {
   admin: RpcStub<AdminApi>
+  /** The admin access level in force, when known (see UserPanel). */
+  accessLevel?: AdminWorkspaceAccess
   selectedUserId?: string
   onSelectUser: (id?: string) => void
 }) => {
@@ -169,6 +171,7 @@ export const AdminUsersPanel = ({ admin, selectedUserId, onSelectUser }: {
         <UserPanel
           admin={admin}
           userId={selectedUserId}
+          accessLevel={accessLevel}
           userName={page?.users.find((user) => user.id === selectedUserId)?.name}
           onClose={() => onSelectUser(undefined)}
         />

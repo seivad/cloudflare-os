@@ -522,6 +522,7 @@ export default function AdminPage() {
       {activeTab === 'users' && (
         <AdminUsersPanel
           admin={admin.api}
+          accessLevel={auditSettings?.adminWorkspaceAccess.effective}
           selectedUserId={selectedUserId}
           onSelectUser={(id) => void navigate({ to: '/admin', search: { tab: 'users', user: id }, replace: true })}
         />

@@ -1,5 +1,5 @@
 import { Loader, Table } from '@cloudflare/kumo'
-import type { AdminWorkspaceDescription, ShareLinkInfo } from '@gadgets/workshop-shared/api'
+import type { AdminWorkspaceDescription, ShareLinkInfo, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { formatFullTimestamp } from '../../utils/formatTimestamp'
 import type { AdminViews } from './useAdminViews'
 import { useOwnedWorkspaceData } from './useOwnedWorkspaceData'
@@ -7,8 +7,8 @@ import { useOwnedWorkspaceData } from './useOwnedWorkspaceData'
 type Loaded = { description: AdminWorkspaceDescription; links: ShareLinkInfo[] }
 
 /** A gadget's title among the workspace's workpieces, falling back to its id. */
-const titleOf = (description: AdminWorkspaceDescription, gadgetId: string) =>
-  description.workpieces.find((piece) => piece.id === gadgetId)?.title ?? gadgetId
+const titleOf = (description: AdminWorkspaceDescription, gadgetId: WorkpieceId) =>
+  description.workpieces.find((piece) => piece.id === gadgetId)?.title ?? String(gadgetId)
 
 /** What a share link grants: the one gadget, the gadgets of an old multi-gadget link, or the workspace. */
 const linkScope = (description: AdminWorkspaceDescription, link: ShareLinkInfo): string => {

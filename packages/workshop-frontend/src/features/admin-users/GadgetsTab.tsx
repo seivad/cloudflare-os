@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Loader, Table } from '@cloudflare/kumo'
-import type { AdminGatekeeperInfo, AdminUserWorkspace, GadgetSummary } from '@gadgets/workshop-shared/api'
+import type { AdminGatekeeperInfo, AdminUserWorkspace, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { AdminViews } from './useAdminViews'
 import { useOwnedWorkspaceData } from './useOwnedWorkspaceData'
 
@@ -17,7 +17,7 @@ const connectionLabel = (gatekeeper: AdminGatekeeperInfo): string => {
 }
 
 /** The labels of the settled connections bound to a gadget; pending bindings are not yet its own. */
-export const connectionsOf = (gadgetId: string, gatekeepers: AdminGatekeeperInfo[]): string[] =>
+export const connectionsOf = (gadgetId: WorkpieceId, gatekeepers: AdminGatekeeperInfo[]): string[] =>
   gatekeepers
     .filter((gatekeeper) => gatekeeper.bindings.some((binding) => binding.gadgetId === gadgetId && binding.chatId === undefined))
     .map(connectionLabel)

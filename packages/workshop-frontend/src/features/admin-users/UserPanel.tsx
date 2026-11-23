@@ -3,13 +3,12 @@ import { Badge, Button, Loader, Tabs } from '@cloudflare/kumo'
 import { Drawer } from '@cloudflare/kumo/primitives/drawer'
 import { X } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
-import type { AdminApi, AdminUserDescription } from '@gadgets/workshop-shared/api'
+import type { AdminApi, AdminUserDescription, AdminWorkspaceAccess } from '@gadgets/workshop-shared/api'
 import { BlueprintsTab } from './BlueprintsTab'
 import { describeFailure, ACCESS_OFF_TEXT } from './describeFailure'
-import { GadgetsTab } from './GadgetsTab'
+import { DownloadAll, GadgetsWithDownloads, UsageWithSizes } from './GadgetDownloads'
 import { ReasonPrompt } from './ReasonPrompt'
 import { SharingTab } from './SharingTab'
-import { UsageTab } from './UsageTab'
 import { useAdminViews } from './useAdminViews'
 import { WorkspacesTab } from './WorkspacesTab'
 
@@ -27,13 +26,16 @@ const TABS: { value: UserPanelTab; label: string }[] = [
 /**
  * A user's profile as a drawer over the Users table. It asks for a reason first, then reads the
  * account through `AdminApi.inspectUser()` and each workspace through `inspectWorkspace()`, so
- * every read is recorded in the admin audit log. `userName` only prefills the reason. When admin
+ * every read is recorded in the admin audit log. `userName` only prefills the reason. `accessLevel`, when known, disables the download controls
+ * below "content" up front; the server refuses them whatever the UI shows. When admin
  * access is turned off the panel says so and shows nothing of the account.
  */
-export const UserPanel = ({ admin, userId, userName, onClose }: {
+export const UserPanel = ({ admin, userId, userName, accessLevel, onClose }: {
   admin: RpcStub<AdminApi>
   userId: string
   userName?: string
+  /** The admin access level in force, when known: below "content" the download controls are disabled. */
+  accessLevel?: AdminWorkspaceAccess
   onClose: () => void
 }) => {
   const views = useAdminViews(admin, userId)
@@ -73,7 +75,10 @@ export const UserPanel = ({ admin, userId, userName, onClose }: {
                 </Drawer.Title>
                 <p className="truncate font-mono text-xs text-kumo-subtle">{userId}</p>
               </div>
-              <Button variant="ghost" shape="square" aria-label="Close" icon={X} onClick={onClose} />
+              <div className="flex items-start gap-2">
+                {description !== null && <DownloadAll views={views} userId={userId} level={accessLevel} />}
+                <Button variant="ghost" shape="square" aria-label="Close" icon={X} onClick={onClose} />
+              </div>
             </header>
             <div className="flex-1 overflow-y-auto p-4">
               {reason === null && (
@@ -100,8 +105,8 @@ export const UserPanel = ({ admin, userId, userName, onClose }: {
                   />
                   {tab === 'workspaces' && <WorkspacesTab views={views} />}
                   {tab === 'blueprints' && <BlueprintsTab views={views} />}
-                  {tab === 'usage' && <UsageTab views={views} />}
-                  {tab === 'gadgets' && <GadgetsTab views={views} />}
+                  {tab === 'usage' && <UsageWithSizes views={views} />}
+                  {tab === 'gadgets' && <GadgetsWithDownloads views={views} level={accessLevel} />}
                   {tab === 'sharing' && <SharingTab views={views} />}
                 </div>
               )}
