@@ -748,6 +748,17 @@ describe('AdminAuditPanel', () => {
       expect(details.textContent).toContain('chatId: 3')
     })
 
+    it('shows a call refused for needing Content at the level that was in force', async () => {
+      const admin = fakeAdmin()
+      admin.listAdminAudit.mockResolvedValue(testPage([
+        accessRecord({ access: 'metadata', refused: ADMIN_ACCESS_ERROR_CODES.accessInsufficient }),
+      ]))
+      await render(settingsWith(), admin)
+
+      expect(logRows()[0].querySelector('[title="Needs Content"]')?.textContent).toBe('Refused')
+      expect(detail(await expand(), 'Access')).toBe('Metadata · refused: Needs Content')
+    })
+
     it('shows a call that was not refused with its kind alone, and names an untitled workspace in its details', async () => {
       const admin = fakeAdmin()
       admin.listAdminAudit.mockResolvedValue(testPage([
@@ -1010,20 +1021,41 @@ describe('AdminAuditPanel', () => {
       expect(help.slice(help.indexOf('Of a user’s account'), help.indexOf('Off refuses'))).toContain(part)
     })
 
-    it('offers Off and Metadata, in that order, and names no other level', async () => {
+    it('says what Content adds, and nothing else', async () => {
       await render()
 
-      expect((await openOptions(accessSelect())).map((option) => option.textContent)).toEqual(['Off', 'Metadata'])
-      expect(await enabledOptions(accessSelect())).toEqual(['Off', 'Metadata'])
+      expect(card('Inspection access').textContent)
+        .toContain('Content adds a gadget’s code and stored data, and nothing else Metadata withholds.')
+    })
+
+    it('offers Off, Metadata and Content, in that order, and names no other level', async () => {
+      await render()
+
+      expect((await openOptions(accessSelect())).map((option) => option.textContent))
+        .toEqual(['Off', 'Metadata', 'Content'])
       expect(card('Inspection access').textContent).not.toContain('Full')
-      // Metadata is the highest level, so the deployment's maximum limits nothing.
+    })
+
+    it('leaves Content out of reach until the deployment’s maximum names it', async () => {
+      await render()
+
+      expect(await enabledOptions(accessSelect())).toEqual(['Off', 'Metadata'])
+      expect(card('Inspection access').textContent)
+        .toContain('Content needs this deployment’s ADMIN_WORKSPACE_ACCESS_MAX set to content.')
+    })
+
+    it('offers every level when the deployment’s maximum is Content', async () => {
+      await render(settingsWith({ access: { max: 'content' } }))
+
+      expect(await enabledOptions(accessSelect())).toEqual(['Off', 'Metadata', 'Content'])
       expect(card('Inspection access').textContent).not.toContain('ADMIN_WORKSPACE_ACCESS_MAX')
     })
 
     it('leaves only Off when the deployment allows no inspection', async () => {
       await render(heldDown())
 
-      expect((await openOptions(accessSelect())).map((option) => option.textContent)).toEqual(['Off', 'Metadata'])
+      expect((await openOptions(accessSelect())).map((option) => option.textContent))
+        .toEqual(['Off', 'Metadata', 'Content'])
       expect(await enabledOptions(accessSelect())).toEqual(['Off'])
       expect(card('Inspection access').textContent).toContain('ADMIN_WORKSPACE_ACCESS_MAX allows no inspection')
     })

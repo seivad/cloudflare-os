@@ -120,12 +120,15 @@ const accessHelp = ({ chosen, effective, max }: AuditSettings['adminWorkspaceAcc
       'observations and hooks. Titles, file names, commit authors, share links’ notes, blueprint ' +
       'descriptions, and the names and hashes of attachments stay, and can echo content. Of a ' +
       'user’s account, Metadata withholds what each connected account’s gatekeeper says of it ' +
-      '(its names, avatar and what it grants) and the ids of the user’s blueprints. Off refuses ' +
+      '(its names, avatar and what it grants) and the ids of the user’s blueprints. Content adds ' +
+      'a gadget’s code and stored data, and nothing else Metadata withholds. Off refuses ' +
       'inspection, and reaches views already open within about a minute.',
   ]
   if (max === 'off') {
     help.push('This deployment’s ADMIN_WORKSPACE_ACCESS_MAX allows no inspection (a value that is ' +
       'not a level counts as off).')
+  } else if (max === 'metadata') {
+    help.push('Content needs this deployment’s ADMIN_WORKSPACE_ACCESS_MAX set to content.')
   }
   if (chosen !== effective) {
     help.push(`The level set here is ${ACCESS_LEVEL_NAMES[chosen]}, which that maximum limits to ` +

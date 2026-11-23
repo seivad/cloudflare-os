@@ -676,8 +676,11 @@ window reaching past the retention counts nothing there.
 The Audit tab shows the week's total, its count per day and its most active admins, each record's
 kind (Workspace access, User access, Setting change), and each call's target user (a workspace's
 owner, or the user whose account was inspected) in a column of its own. It filters its log by
-admin, action, kind, workspace and target user. Its access setting offers Off and Metadata, and
-says what Metadata withholds of a workspace and of a user's account.
+admin, action, kind, workspace and target user. Its access setting offers Off, Metadata and
+Content, Content only while the deployment's maximum names it; it says what Metadata withholds of
+a workspace and of a user's account, and that Content adds a gadget's code and stored data and
+nothing else. A call refused for needing Content shows as refused, "Needs Content", at the level
+that was in force.
 
 ## Error codes
 
