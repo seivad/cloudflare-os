@@ -51,6 +51,10 @@ describe("maxAdminWorkspaceAccess", () => {
         .toBe("metadata");
     expect(maxAdminWorkspaceAccess(envWith({ ADMIN_WORKSPACE_ACCESS_MAX: "\tMetadata\n" })))
         .toBe("metadata");
+    expect(maxAdminWorkspaceAccess(envWith({ ADMIN_WORKSPACE_ACCESS_MAX: "content" })))
+        .toBe("content");
+    expect(maxAdminWorkspaceAccess(envWith({ ADMIN_WORKSPACE_ACCESS_MAX: " Content " })))
+        .toBe("content");
   });
 
   // A value meant to turn inspection off must never grant the default, and neither must one that
@@ -97,6 +101,10 @@ describe("adminAccessPolicy", () => {
     expect(lowerAdminWorkspaceAccess("off", "metadata")).toBe("off");
     expect(lowerAdminWorkspaceAccess("metadata", "metadata")).toBe("metadata");
     expect(lowerAdminWorkspaceAccess("off", "off")).toBe("off");
+    expect(lowerAdminWorkspaceAccess("content", "metadata")).toBe("metadata");
+    expect(lowerAdminWorkspaceAccess("metadata", "content")).toBe("metadata");
+    expect(lowerAdminWorkspaceAccess("content", "off")).toBe("off");
+    expect(lowerAdminWorkspaceAccess("content", "content")).toBe("content");
   });
 
   it("holds the admins' choices within the environment's bounds", () => {
@@ -113,6 +121,28 @@ describe("adminAccessPolicy", () => {
     expect(adminAccessPolicy({ adminWorkspaceAccess: "off", adminAuditRetentionDays: 400 },
         envWith({ ADMIN_WORKSPACE_ACCESS_MAX: "metadata" })))
         .toEqual({ access: "off", retentionDays: 400 });
+  });
+
+  // "content" shows more than "metadata", so a deployment that sets no cap never has it in force,
+  // whatever its admins chose.
+  it("holds a choice of content to the cap, which must name it", () => {
+    let content = { adminWorkspaceAccess: "content", adminAuditRetentionDays: 90 } as const;
+    expect(adminAccessPolicy(content, envWith({})).access).toBe("metadata");
+    expect(adminAccessPolicy(content, envWith({ ADMIN_WORKSPACE_ACCESS_MAX: "" })).access)
+        .toBe("metadata");
+    expect(adminAccessPolicy(content, envWith({ ADMIN_WORKSPACE_ACCESS_MAX: "metadata" })).access)
+        .toBe("metadata");
+    for (let cap of ["off", "full"]) {
+      expect(adminAccessPolicy(content, envWith({ ADMIN_WORKSPACE_ACCESS_MAX: cap })).access, cap)
+          .toBe("off");
+    }
+    expect(adminAccessPolicy(content, envWith({ ADMIN_WORKSPACE_ACCESS_MAX: "content" })).access)
+        .toBe("content");
+    // A cap of content raises no choice: the admins' own stays in force.
+    for (let chosen of ["off", "metadata"] as const) {
+      expect(adminAccessPolicy({ adminWorkspaceAccess: chosen, adminAuditRetentionDays: 90 },
+          envWith({ ADMIN_WORKSPACE_ACCESS_MAX: "content" })).access).toBe(chosen);
+    }
   });
 });
 

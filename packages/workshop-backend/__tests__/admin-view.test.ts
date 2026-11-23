@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ADMIN_ACCESS_ERROR_CODES, getAdminAccessErrorCode, type AdminAccessRecord,
+  type AdminWorkspaceAccess,
 } from "@gadgets/workshop-shared/api";
 import { assertAdminViewLive, type AdminViewTerms } from "../src/admin-access.js";
 import { adminViewCall, type AdminViewCallHost } from "../src/admin-view.js";
@@ -18,6 +19,11 @@ const ADMIN = "admin@example.test";
 const REASON = "Support ticket 42";
 // A deployment whose admins turned access off.
 const OFF = { config: { adminWorkspaceAccess: "off" } } as const;
+// A deployment that allows content, and whose admins chose it.
+const CONTENT = {
+  config: { adminWorkspaceAccess: "content" },
+  vars: { ADMIN_WORKSPACE_ACCESS_MAX: "content" },
+} as const;
 
 type Refusal = AdminAccessRecord["refused"];
 
@@ -25,13 +31,15 @@ function termsOf(overrides: Partial<AdminViewTerms> = {}): AdminViewTerms {
   return { via: "api", expiresAt: new Date(Date.now() + 60_000), ...overrides };
 }
 
-// The record the fake host builds for a call: fixed but for what adminViewCall() decides.
-function recordOf(terms: AdminViewTerms, refused?: Refusal): AdminAccessRecord {
+// The record the fake host builds for a call: fixed but for what adminViewCall() decides, the level
+// in force and why the call was refused.
+function recordOf(terms: AdminViewTerms, access: AdminWorkspaceAccess = "metadata",
+    refused?: Refusal): AdminAccessRecord {
   return {
     kind: "workspace", workspaceId: "workspace-1", workspaceOwner: "owner@example.test",
     workspaceTitle: "Title", at: new Date(0), admin: ADMIN, sessionId: "session-1",
     via: terms.via, method: "describe", args: {}, reason: REASON,
-    access: refused ? "off" : "metadata", ...(refused ? { refused } : {}),
+    access, ...(refused ? { refused } : {}),
   };
 }
 
@@ -44,14 +52,16 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 /**
  * A host for adminViewCall(), minted on `terms` over the defaults. Its environment lists ADMIN in
  * ADMINS beside `vars`, and its BLUEPRINTS serves `config` as the deployment's, after
- * `onConfigRead`. Its check number `microtaskAtCheck` queues a microtask that notes itself in the
- * log. `log` lists what the call did, in order; `recorded` holds what recordOf() was given,
- * `appended` the audit namespace's calls and `warnings` the logger's.
+ * `onConfigRead`. Its calls need the level `requires`. Its check number `microtaskAtCheck` queues a
+ * microtask that notes itself in the log. `log` lists what the call did, in order; `recorded`
+ * holds the refusals recordOf() was given and `levels` the levels, `appended` the audit
+ * namespace's calls and `warnings` the logger's.
  */
 function fakeView(options: {
   config?: Partial<Record<keyof AdminConfig, unknown>>;
   vars?: Record<string, unknown>;
   terms?: Partial<AdminViewTerms>;
+  requires?: AdminViewCallHost["requires"];
   onConfigRead?: () => void | Promise<void>;
   microtaskAtCheck?: number;
   append?: () => Promise<void>;
@@ -59,6 +69,7 @@ function fakeView(options: {
   let log: string[] = [];
   let checks = 0;
   let recorded: (Refusal | undefined)[] = [];
+  let levels: AdminWorkspaceAccess[] = [];
   let appended: { name: string; args: unknown[] }[] = [];
   let warnings: unknown[][] = [];
   let terms = termsOf(options.terms);
@@ -93,11 +104,13 @@ function fakeView(options: {
       assertAdminViewLive(terms, ADMIN, env());
       if (++checks === options.microtaskAtCheck) queueMicrotask(() => log.push("microtask"));
     },
-    recordOf: refused => {
+    recordOf: (access, refused) => {
       log.push("recordOf");
       recorded.push(refused);
-      return recordOf(terms, refused);
+      levels.push(access);
+      return recordOf(terms, access, refused);
     },
+    ...(options.requires ? { requires: options.requires } : {}),
   };
   // Replaces the environment under the view, as a deployment's can change under a live one.
   let setVars = (changed: Record<string, unknown>) => { vars = { ...vars, ...changed }; };
@@ -106,7 +119,7 @@ function fakeView(options: {
     log.push("read");
     return answer;
   };
-  return { host, terms, log, recorded, appended, warnings, setVars, reads };
+  return { host, terms, log, recorded, levels, appended, warnings, setVars, reads };
 }
 
 // What `call` rejected with, failing the test if it resolved.
@@ -188,7 +201,67 @@ describe("adminViewCall", () => {
       expect(view.log).toStrictEqual(["assertLive", "config", "assertLive", "recordOf", "append"]);
       expect(view.recorded).toStrictEqual([accessOff]);
       expect(view.appended).toStrictEqual(
-          [{ name: "", args: [recordOf(view.terms, accessOff)] }]);
+          [{ name: "", args: [recordOf(view.terms, "off", accessOff)] }]);
+    }
+  });
+
+  it("refuses a call that needs content while off as any other", async () => {
+    let { accessOff } = ADMIN_ACCESS_ERROR_CODES;
+    for (let deployment of [
+      { ...CONTENT, config: { adminWorkspaceAccess: "off" } },
+      { ...CONTENT, vars: { ADMIN_WORKSPACE_ACCESS_MAX: "off" } },
+    ]) {
+      let view = fakeView({ ...deployment, requires: "content" });
+      expect(await codeOf(adminViewCall(view.host, view.reads("answer")))).toBe(accessOff);
+      expect(view.log).toStrictEqual(["assertLive", "config", "assertLive", "recordOf", "append"]);
+      expect(view.appended).toStrictEqual(
+          [{ name: "", args: [recordOf(view.terms, "off", accessOff)] }]);
+    }
+  });
+
+  it("records and refuses a call that needs more than the level in force, having read nothing",
+      async () => {
+    let { accessInsufficient } = ADMIN_ACCESS_ERROR_CODES;
+    for (let deployment of [
+      // The default level, and a choice of content held down by a cap that is unset or metadata.
+      {},
+      { config: { adminWorkspaceAccess: "content" } },
+      {
+        config: { adminWorkspaceAccess: "content" },
+        vars: { ADMIN_WORKSPACE_ACCESS_MAX: "metadata" },
+      },
+      // A cap that allows content, while the admins chose metadata.
+      { vars: { ADMIN_WORKSPACE_ACCESS_MAX: "content" } },
+    ]) {
+      let view = fakeView({ ...deployment, requires: "content" });
+      expect(await codeOf(adminViewCall(view.host, view.reads("answer"))),
+          JSON.stringify(deployment)).toBe(accessInsufficient);
+      expect(view.log).toStrictEqual(["assertLive", "config", "assertLive", "recordOf", "append"]);
+      // The record names the level in force, which refused it.
+      expect(view.appended).toStrictEqual(
+          [{ name: "", args: [recordOf(view.terms, "metadata", accessInsufficient)] }]);
+    }
+  });
+
+  it("answers a call that needs content once the deployment allows it and an admin chose it",
+      async () => {
+    let view = fakeView({ ...CONTENT, requires: "content" });
+    expect(await adminViewCall(view.host, view.reads("answer"))).toBe("answer");
+    expect(view.log).toStrictEqual([
+      "assertLive", "config", "assertLive", "read", "assertLive", "recordOf", "append",
+    ]);
+    expect(view.appended).toStrictEqual([{ name: "", args: [recordOf(view.terms, "content")] }]);
+  });
+
+  it("answers a call that needs metadata alone at content as at metadata, naming the level",
+      async () => {
+    // Without `requires`, and with it at its default.
+    for (let requires of [undefined, "metadata"] as const) {
+      let view = fakeView({ ...CONTENT, requires });
+      let answer = { title: "a title" };
+      expect(await adminViewCall(view.host, () => answer)).toBe(answer);
+      expect(view.recorded).toStrictEqual([undefined]);
+      expect(view.appended).toStrictEqual([{ name: "", args: [recordOf(view.terms, "content")] }]);
     }
   });
 
@@ -201,6 +274,7 @@ describe("adminViewCall", () => {
     config.adminWorkspaceAccess = "metadata";
     expect(await adminViewCall(view.host, view.reads("answer"))).toBe("answer");
     expect(view.recorded).toStrictEqual([ADMIN_ACCESS_ERROR_CODES.accessOff, undefined]);
+    expect(view.levels).toStrictEqual(["off", "metadata"]);
   });
 
   it("records a read that fails as an attempt", async () => {
@@ -227,6 +301,10 @@ describe("adminViewCall", () => {
     let refused = fakeView({ ...OFF, microtaskAtCheck: 2 });
     await rejection(adminViewCall(refused.host, refused.reads("answer")));
     expect(refused.log.slice(-3)).toStrictEqual(["recordOf", "append", "microtask"]);
+
+    let insufficient = fakeView({ requires: "content", microtaskAtCheck: 2 });
+    await rejection(adminViewCall(insufficient.host, insufficient.reads("answer")));
+    expect(insufficient.log.slice(-3)).toStrictEqual(["recordOf", "append", "microtask"]);
 
     let failed = fakeView({ microtaskAtCheck: 3 });
     await rejection(adminViewCall(failed.host, noSuchChat));
@@ -298,6 +376,12 @@ describe("adminViewCall", () => {
     let refused = fakeView({ ...OFF, append });
     expect(await rejection(adminViewCall(refused.host, refused.reads("answer")))).toBe(failure);
     expect(refused.warnings).toHaveLength(1);
+
+    let insufficient = fakeView({ requires: "content", append });
+    expect(await rejection(adminViewCall(insufficient.host, insufficient.reads("answer"))))
+        .toBe(failure);
+    expect(insufficient.log).not.toContain("read");
+    expect(insufficient.warnings).toHaveLength(1);
 
     let failed = fakeView({ append });
     expect(await rejection(adminViewCall(failed.host, noSuchChat))).toBe(failure);

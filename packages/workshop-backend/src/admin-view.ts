@@ -6,9 +6,9 @@
 
 import {
   ADMIN_ACCESS_ERROR_CODES, createAdminAccessError,
-  type AdminAccessRecord, type AdminUserAccessRecord,
+  type AdminAccessRecord, type AdminUserAccessRecord, type AdminWorkspaceAccess,
 } from "@gadgets/workshop-shared/api";
-import { adminAccessPolicy } from "./admin-access.js";
+import { adminAccessPolicy, lowerAdminWorkspaceAccess } from "./admin-access.js";
 import { readAdminConfig } from "./admin-config.js";
 import type { AdminAuditDurableObject } from "./admin-audit.js";
 import type { WorkshopLogger } from "./observability.js";
@@ -23,21 +23,27 @@ export type AdminViewCallHost = {
   readonly audits: DurableObjectNamespace<AdminAuditDurableObject>;
   /** Where a record that could not be appended is reported. */
   readonly logger: WorkshopLogger;
+  /** The lowest level in force at which the call may read: "metadata" when absent. A method that
+   * reads what "metadata" withholds names "content". */
+  readonly requires?: Exclude<AdminWorkspaceAccess, "off">;
   /** Throws the refusal that stops a call unrecorded: assertAdminViewLive(), then the view's own
    * once what it reads no longer exists. */
   assertLive(): void;
-  /** Builds the call's record, as refused when `refused` names why. Synchronous: adminViewCall()
-   * builds and sends a record with nothing awaited since its last check. */
-  recordOf(refused?: AdminAccessRecord["refused"]): AdminAccessRecord | AdminUserAccessRecord;
+  /** Builds the call's record at `access`, the level in force, as refused when `refused` names
+   * why. Synchronous: adminViewCall() builds and sends a record with nothing awaited since its
+   * last check. */
+  recordOf(access: AdminWorkspaceAccess, refused?: AdminAccessRecord["refused"])
+      : AdminAccessRecord | AdminUserAccessRecord;
 };
 
 /**
  * Runs one call of an admin view, of a workspace or of a user's account, so that every view records
- * the same way. Checks the view, reads the deployment's setting and checks again. While the
- * setting is "off" the call is recorded and refused, having read nothing. Any other call reads its
+ * the same way. Checks the view, reads the deployment's setting and checks again. While the level
+ * in force is "off" the call is recorded and refused (`accessOff`), having read nothing, and so is
+ * a call whose view.requires is above that level (`accessInsufficient`). Any other call reads its
  * answer with `read`, is checked once more, and is recorded. Only then is it answered, so nothing
  * it read leaves the server unrecorded. A read that fails is recorded as an attempt, and the call
- * fails with the read's error. Each record is view.recordOf()'s, appended to
+ * fails with the read's error. Each record is view.recordOf()'s at the level in force, appended to
  * view.audits.getByName("") with no retention (the policy comes from the KV mirror, and a stale one
  * must not prune); an append that fails is logged through view.logger (warn, event
  * "admin.audit.append.failed", operation: the record's method, error) and rethrown, so the call
@@ -52,9 +58,15 @@ export async function adminViewCall<T>(view: AdminViewCallHost, read: () => T | 
   // must stay empty, with nothing appended for it deployment-wide either.
   view.assertLive();
 
-  if (adminAccessPolicy(config, view.env()).access === "off") {
-    await append(view, ADMIN_ACCESS_ERROR_CODES.accessOff);
+  let { access } = adminAccessPolicy(config, view.env());
+  if (access === "off") {
+    await append(view, access, ADMIN_ACCESS_ERROR_CODES.accessOff);
     throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.accessOff);
+  }
+  let requires = view.requires ?? "metadata";
+  if (lowerAdminWorkspaceAccess(access, requires) !== requires) {
+    await append(view, access, ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
+    throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
   }
 
   let answer: T;
@@ -62,21 +74,22 @@ export async function adminViewCall<T>(view: AdminViewCallHost, read: () => T | 
     answer = await read();
   } catch (err) {
     view.assertLive();
-    await append(view);
+    await append(view, access);
     throw err;
   }
   // Checked again, with nothing awaited before the record, for the same reasons: the read may
   // have awaited.
   view.assertLive();
-  await append(view);
+  await append(view, access);
   return answer;
 }
 
-// Records one call in the deployment-wide log, as refused when `refused` names why. The record
-// is built and sent before the first await, so that the caller's last check still holds.
-async function append(view: AdminViewCallHost, refused?: AdminAccessRecord["refused"])
-    : Promise<void> {
-  let record = view.recordOf(refused);
+// Records one call in the deployment-wide log at `access`, the level in force, as refused when
+// `refused` names why. The record is built and sent before the first await, so that the caller's
+// last check still holds.
+async function append(view: AdminViewCallHost, access: AdminWorkspaceAccess,
+    refused?: AdminAccessRecord["refused"]): Promise<void> {
+  let record = view.recordOf(access, refused);
   try {
     // No retention: the policy comes from the KV mirror, and a stale one must not prune.
     await view.audits.getByName("").append(record);

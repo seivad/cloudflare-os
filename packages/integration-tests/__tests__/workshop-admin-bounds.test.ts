@@ -66,6 +66,9 @@ it("holds the admins' choices within the deployment's defaults", async () => {
   const before = await newest(admin, "setting");
   // Not a level, so the setter refuses it as a value of the wrong type, whatever the bound.
   await expect(admin.setAdminWorkspaceAccess("full" as never)).rejects.toThrow(TypeError);
+  // A level, above the default cap.
+  await expect(admin.setAdminWorkspaceAccess("content"))
+      .rejects.toThrow(/ADMIN_WORKSPACE_ACCESS_MAX/);
   await expect(admin.setAdminAuditRetentionDays(89))
       .rejects.toThrow(/ADMIN_AUDIT_RETENTION_MIN_DAYS/);
   expect(await newest(admin, "setting")).toEqual(before);

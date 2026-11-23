@@ -656,6 +656,7 @@ export const ADMIN_ACCESS_ERROR_CODES = {
   workspaceNotFound: "ADMIN_WORKSPACE_NOT_FOUND",
   userNotFound: "ADMIN_USER_NOT_FOUND",
   accessOff: "ADMIN_WORKSPACE_ACCESS_OFF",
+  accessInsufficient: "ADMIN_ACCESS_INSUFFICIENT",
   viewExpired: "ADMIN_VIEW_EXPIRED",
   notAdmin: "ADMIN_NOT_ADMIN",
 } as const;
@@ -669,6 +670,9 @@ const adminAccessErrors = codedErrorFamily<AdminAccessErrorCode>({
   [ADMIN_ACCESS_ERROR_CODES.userNotFound]: "User not found.",
   [ADMIN_ACCESS_ERROR_CODES.accessOff]:
       "Admin access to workspaces and users is turned off on this deployment.",
+  [ADMIN_ACCESS_ERROR_CODES.accessInsufficient]:
+      "This needs the content admin access level, which this deployment's " +
+      "ADMIN_WORKSPACE_ACCESS_MAX must allow and an admin must choose.",
   [ADMIN_ACCESS_ERROR_CODES.viewExpired]: "This admin view has expired. Inspect again.",
   [ADMIN_ACCESS_ERROR_CODES.notAdmin]:
       "Only a deployment admin can inspect a workspace or a user.",
@@ -1611,9 +1615,9 @@ export type AdminSettingsView = {
      * is above `max`. */
     chosen: AdminWorkspaceAccess;
     /** The highest level the deployment allows, which its ADMIN_WORKSPACE_ACCESS_MAX environment
-     * variable sets: "metadata" while that is unset or blank, and "off" while it holds anything
-     * that is not a level, so a misconfiguration never grants access. Only a deployment config
-     * change can raise it. */
+     * variable sets: "metadata" while that is unset or blank, so "content" only where it names
+     * "content", and "off" while it holds anything that is not a level, so a misconfiguration
+     * never grants access. Only a deployment config change can raise it. */
     max: AdminWorkspaceAccess;
   };
   /**
@@ -1912,9 +1916,16 @@ export type AdminWorkspacePage = {
  *                 a gatekeeper says of a connected account (its display names, avatar and what
  *                 it grants) and the ids of the account's blueprints are withheld, and no
  *                 credential is returned.
- * No level shows what "metadata" withholds.
+ *   - "content":  everything "metadata" shows, and the view methods documented as needing
+ *                 "content", which read a gadget's code and its stored data. Every other method
+ *                 answers as at "metadata", withholding what it withholds there: chat messages,
+ *                 attachments, commit messages and the rest stay withheld. In force only while
+ *                 the deployment's ADMIN_WORKSPACE_ACCESS_MAX names it (see
+ *                 AdminSettingsView.adminWorkspaceAccess.max) and an admin chose it, so a
+ *                 deployment that sets nothing never has it.
+ * No level shows what "metadata" withholds beyond a gadget's code and stored data.
  */
-export const ADMIN_WORKSPACE_ACCESS_LEVELS = ["off", "metadata"] as const;
+export const ADMIN_WORKSPACE_ACCESS_LEVELS = ["off", "metadata", "content"] as const;
 
 /** One of ADMIN_WORKSPACE_ACCESS_LEVELS. */
 export type AdminWorkspaceAccess = typeof ADMIN_WORKSPACE_ACCESS_LEVELS[number];
@@ -2023,9 +2034,10 @@ export const MAX_ADMIN_AUDIT_VALUE_LENGTH = 10_000;
  * never in the workspace, so nothing a workspace member can read ever shows it. A call the view
  * itself stops is not recorded. That covers a call made after the view expired, after its admin
  * stopped being an admin or after the workspace was deleted, and a call that any of these
- * overtakes while it reads. A call the access level refuses is recorded, with `refused` set, and
- * so is a call whose read fails, and so is an open refused before it reaches the workspace,
- * because the deployment's access level is "off".
+ * overtakes while it reads. A call the access level refuses is recorded, with `refused` set
+ * (because the level is "off", or below the one the method needs), and so is a call whose read
+ * fails, and so is an open refused before it reaches the workspace, because the deployment's
+ * access level is "off".
  */
 export type AdminAccessRecord = {
   /** Distinguishes this from an AdminUserAccessRecord and an AdminSettingRecord. */
@@ -2063,11 +2075,14 @@ export type AdminAccessRecord = {
   /** The reason the admin gave when opening the view. */
   reason: string;
   /** The deployment's access level when the call ran (AdminSettingsView.adminWorkspaceAccess
-   * .effective, as the call read it): "metadata", or "off" when the call was refused for that. */
+   * .effective, as the call read it): "metadata" or "content", or "off" when the call was refused
+   * for that. A call refused for needing more names the level that was in force. */
   access: AdminWorkspaceAccess;
   /** Present when the access level refused the call, which then read nothing: the code it was
-   * refused with. */
-  refused?: typeof ADMIN_ACCESS_ERROR_CODES.accessOff;
+   * refused with, `accessOff` while the level was "off", or `accessInsufficient` when the method
+   * needs a level above the one in force. */
+  refused?: typeof ADMIN_ACCESS_ERROR_CODES.accessOff
+      | typeof ADMIN_ACCESS_ERROR_CODES.accessInsufficient;
 };
 
 /**
@@ -2602,10 +2617,10 @@ export interface AdminApi {
   listWorkspaces(options?: AdminWorkspaceQuery): Promise<AdminWorkspacePage>;
 
   /**
-   * Open a read-only view of a workspace to investigate it (see AdminWorkspaceView), at the
-   * "metadata" level (see ADMIN_WORKSPACE_ACCESS_LEVELS). `reason` is required: it is recorded
-   * with the open and with every call made through the view, and is rejected when blank or, once
-   * trimmed, longer than MAX_ADMIN_ACCESS_REASON_LENGTH. The open is recorded as an
+   * Open a read-only view of a workspace to investigate it (see AdminWorkspaceView), at the level
+   * in force at each of its calls (see ADMIN_WORKSPACE_ACCESS_LEVELS). `reason` is required: it is
+   * recorded with the open and with every call made through the view, and is rejected when blank
+   * or, once trimmed, longer than MAX_ADMIN_ACCESS_REASON_LENGTH. The open is recorded as an
    * AdminAccessRecord ("inspectWorkspace") before the view is returned, so an open whose record
    * cannot be written is refused.
    *
@@ -2625,12 +2640,12 @@ export interface AdminApi {
 
   /**
    * Open a read-only view of a user's account to investigate it (see AdminUserView), as
-   * inspectWorkspace() opens one of a workspace: at the "metadata" level, with `reason` and
-   * `options` under the same rules, and refused while the deployment's one access level
-   * (AdminSettingsView.adminWorkspaceAccess.effective) is "off". `userId` is the user's canonical
-   * id, exactly as listUsers() lists it. The open is recorded as an AdminUserAccessRecord
-   * ("inspectUser") before the view is returned, so an open whose record cannot be written is
-   * refused.
+   * inspectWorkspace() opens one of a workspace: showing what the "metadata" level shows at any
+   * level above "off", with `reason` and `options` under the same rules, and refused while the
+   * deployment's one access level (AdminSettingsView.adminWorkspaceAccess.effective) is "off".
+   * `userId` is the user's canonical id, exactly as listUsers() lists it. The open is recorded as
+   * an AdminUserAccessRecord ("inspectUser") before the view is returned, so an open whose record
+   * cannot be written is refused.
    *
    * Refused with a code from ADMIN_ACCESS_ERROR_CODES, checked in this order: `notAdmin` once the
    * caller is no longer a deployment admin; `userNotFound` for an empty id; `accessOff` while the
@@ -2655,13 +2670,14 @@ export interface AdminApi {
   getAdminAuditStats(options?: AdminAuditStatsQuery): Promise<AdminAuditStats>;
 
   /**
-   * Set whether inspectWorkspace() and inspectUser() may show a workspace's and a user account's
-   * metadata (see ADMIN_WORKSPACE_ACCESS_LEVELS), DEFAULT_ADMIN_WORKSPACE_ACCESS by default.
+   * Set how much inspectWorkspace() and inspectUser() may show of a workspace and of a user's
+   * account (see ADMIN_WORKSPACE_ACCESS_LEVELS), DEFAULT_ADMIN_WORKSPACE_ACCESS by default.
    * Throws for a value that is not a level, and for a level above the deployment's maximum
    * (AdminSettingsView.adminWorkspaceAccess.max), which only its ADMIN_WORKSPACE_ACCESS_MAX
-   * environment variable can raise. "off" reaches a view already minted, of either kind, from its
-   * next call once the setting reaches it, within about a minute; a view still within its
-   * lifetime answers again once the level is back at "metadata".
+   * environment variable can raise: "content" is refused, and nothing stored, until that names
+   * it. A change reaches a view already minted, of either kind, from its next call once the
+   * setting reaches it, within about a minute; a view still within its lifetime answers again
+   * once the level is back above "off".
    */
   setAdminWorkspaceAccess(access: AdminWorkspaceAccess): Promise<void>;
 
@@ -2885,19 +2901,20 @@ export type AdminAutoApproval = {
 /**
  * A deployment admin's read-only view of one workspace's metadata, minted by
  * AdminApi.inspectWorkspace(). Nothing it does changes the workspace or is seen by its members:
- * it joins no presence and no session count, and starts no agent or connection. It returns what
- * the "metadata" access level shows (see ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that
- * level withholds: no method returns a chat's messages, an attachment's bytes or a file's
- * content.
+ * it joins no presence and no session count, and starts no agent or connection. Apart from the
+ * methods documented as needing the "content" level, it returns what the "metadata" access level
+ * shows (see ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that level withholds, at either
+ * level: no method returns a chat's messages, an attachment's bytes or a file's content.
  *
  * Each call first passes three checks, refused unrecorded with a code from
  * ADMIN_ACCESS_ERROR_CODES: the view has not expired (`viewExpired`), its admin is still a
  * deployment admin (`notAdmin`), and the workspace still exists (`workspaceNotFound`). It then
  * reads the deployment's access level (AdminSettingsView.adminWorkspaceAccess.effective), which
  * reaches live views within about a minute of a change. While that is "off" the call is
- * recorded and refused (`accessOff`), having read nothing. Any other call reads its answer,
- * never through a connection: what a connection supplied is read only as the workspace stores
- * it (the commits of a worktree checked out through one are that repository's), and the
+ * recorded and refused (`accessOff`), having read nothing, and so is a call to a method that
+ * needs "content" while the level is below it (`accessInsufficient`). Any other call reads its
+ * answer, never through a connection: what a connection supplied is read only as the workspace
+ * stores it (the commits of a worktree checked out through one are that repository's), and the
  * connection is not asked. It is then recorded as an AdminAccessRecord in the deployment-wide
  * log. Only then is the call answered: nothing it read leaves the server before its record
  * exists, and a call whose record cannot be written fails and returns nothing. The checks run
@@ -3225,7 +3242,8 @@ export type AdminUserDiagnostics = {
  * an AdminUserAccessRecord, and only then answers.
  *
  * It returns what the "metadata" access level shows of an account (see
- * ADMIN_WORKSPACE_ACCESS_LEVELS) and none of what that level withholds: no method returns what a
+ * ADMIN_WORKSPACE_ACCESS_LEVELS), at "content" as at "metadata", and none of what that level
+ * withholds: no method returns what a
  * gatekeeper says of a connected account (see AdminUserConnectedAccount) or a blueprint's id (see
  * AdminUserBlueprint). Nor does any return what the account stores as a credential: a session
  * token or its hash, the password's hash, a model's API token or extra headers, a push

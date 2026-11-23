@@ -500,6 +500,30 @@ describe("AdminSettings admin access bounds", () => {
     expect((await config()).adminWorkspaceAccess).toBe("metadata");
   });
 
+  // "content" is a level, so the setter refuses it for the bound, naming the variable that would
+  // have to allow it, and never stores it to be raised by a later cap.
+  it("refuses content until ADMIN_WORKSPACE_ACCESS_MAX allows it", async () => {
+    const { inDo, appended, config, records } = adminSettings();
+    for (let cap of [undefined, "", "metadata", "off", "full"]) {
+      await expect(inDo(admin => admin.setAdminWorkspaceAccess("content", ACTOR),
+          { more: { ADMIN_WORKSPACE_ACCESS_MAX: cap } }), String(cap))
+          .rejects.toThrow("ADMIN_WORKSPACE_ACCESS_MAX");
+    }
+    expect(appended).toEqual([]);
+    expect((await config()).adminWorkspaceAccess).toBe("metadata");
+
+    const allowed = { more: { ADMIN_WORKSPACE_ACCESS_MAX: "content" } };
+    await inDo(admin => admin.setAdminWorkspaceAccess("content", ACTOR), allowed);
+    expect(records().map(record => record.changes)).toStrictEqual([
+      [{ setting: "adminWorkspaceAccess", before: "metadata", after: "content" }],
+    ]);
+    expect((await inDo(admin => admin.getSettings("admin"), allowed)).adminWorkspaceAccess)
+        .toStrictEqual({ effective: "content", chosen: "content", max: "content" });
+    // A deploy that drops the cap keeps the choice and enforces metadata.
+    expect((await inDo(admin => admin.getSettings("admin"))).adminWorkspaceAccess)
+        .toStrictEqual({ effective: "metadata", chosen: "content", max: "metadata" });
+  });
+
   // The bound check alone would pass such a value: it sorts below every level.
   describe.each([
     ["no cap", {}],

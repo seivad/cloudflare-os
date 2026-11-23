@@ -275,10 +275,12 @@ also appends the record each view builds:
    deletion.
 4. The level in force is the admins' choice held to the environment's cap
    (`adminAccessPolicy()`). While it is `"off"`, the call is recorded with `refused` set, and then
-   refused (`accessOff`) without reading anything. Its record is sent with nothing awaited after
-   step 3's check. Turning the setting off reaches live views within about a minute (the KV
-   mirror's propagation), and a view still within its lifetime answers again once the level is
-   back at `"metadata"`.
+   refused (`accessOff`) without reading anything. A method that needs `"content"` (it passes
+   `requires: "content"` to `adminViewCall()`; every other needs `"metadata"`) is refused the same
+   way while the level is below that (`accessInsufficient`), its record naming the level that was
+   in force. Either record is sent with nothing awaited after step 3's check. Turning the setting
+   off reaches live views within about a minute (the KV mirror's propagation), and a view still
+   within its lifetime answers again once the level is back above `"off"`.
 5. The read, on the server and never through a connection. A read that throws is recorded as an
    attempt, once the checks pass again, and the call fails with the read's error: a missing
    object, a gadget whose code is pending, a commit that is not stored, a chat that does not
@@ -394,8 +396,8 @@ Object ends the view; inspect again.
 
 ### The levels
 
-`adminWorkspaceAccess` is `"off"` or `"metadata"` (the default). One setting and one cap govern
-both inspections, of a workspace and of a user's account:
+`adminWorkspaceAccess` is `"off"`, `"metadata"` (the default) or `"content"`. One setting and one
+cap govern both inspections, of a workspace and of a user's account:
 
 - **off**: `inspectWorkspace()` and `inspectUser()` are refused.
 - **metadata**: the workspace's structure. Withheld: chat messages and queued steers, chat
@@ -427,13 +429,22 @@ both inspections, of a workspace and of a user's account:
     names, avatar, granted resource types and what it provides) and blueprints' ids (an id is a
     share link to the blueprint's code, as a workspace's is). What an account stores as a
     credential is never returned (see [User inspection](#user-inspection)).
+- **content**: everything `"metadata"` shows, and the view methods that need `"content"`, which
+  read a gadget's code and its stored data. Nothing else `"metadata"` withholds is offered: every
+  other method of either view answers at `"content"` exactly as at `"metadata"`, withholding what
+  it withholds there (chat messages, attachments, file contents outside a gadget's code, commit
+  messages and the rest), and its record names `"content"` as the level in force. It is in force
+  only while the deployment's `ADMIN_WORKSPACE_ACCESS_MAX` names it and an admin has chosen it
+  (see [The environment's bounds](#the-environments-bounds)), so a deployment that sets neither
+  never has it.
 
-Content reads are not offered: no level and no method returns what `"metadata"` withholds.
-[What the metadata level withholds](#what-the-metadata-level-withholds) lists it per method.
+Beyond a gadget's code and stored data at `"content"`, no level and no method returns what
+`"metadata"` withholds. [What the metadata level withholds](#what-the-metadata-level-withholds)
+lists it per method.
 
-A deployment whose admins never chose a level is at `"metadata"`. A stored level that is not
-`"off"` or `"metadata"` counts as `"off"` until an admin chooses one, and `getSettings()` reports
-it as `chosen: "off"`.
+A deployment whose admins never chose a level is at `"metadata"`. A stored value that is not a
+level counts as `"off"` until an admin chooses one, and `getSettings()` reports it as
+`chosen: "off"`.
 
 ### The environment's bounds
 
@@ -443,7 +454,7 @@ them.
 
 | Variable | Values | Default | Effect |
 | --- | --- | --- | --- |
-| `ADMIN_WORKSPACE_ACCESS_MAX` | `off`, `metadata` (any case, trimmed) | `metadata` (unset or blank) | The highest level admins may choose. `metadata` is also the default and the highest level there is, so the variable is the operator's off switch: `off` turns inspection off whatever admins choose. Any other value is `off`, logged as an error: it bounds a security setting, so `none`, `false` or a typo of `off` must fail closed, never grant the default. |
+| `ADMIN_WORKSPACE_ACCESS_MAX` | `off`, `metadata`, `content` (any case, trimmed) | `metadata` (unset or blank) | The highest level admins may choose. `off` turns inspection off whatever admins choose; `content` is the only way to bring the `"content"` level within reach, so a deployment that does not name it never has that level. Any other value is `off`, logged as an error: it bounds a security setting, so `none`, `false` or a typo of `off` must fail closed, never grant the default. |
 | `ADMIN_AUDIT_RETENTION_MIN_DAYS` | a positive whole number of days, at most 3650 (`MAX_ADMIN_AUDIT_RETENTION_DAYS`); a larger value counts as 3650 | 90 (unset, blank or invalid; an invalid value is logged) | The fewest days the audit log keeps a record, whatever admins choose. |
 
 The admins' choice is kept in `AdminConfig` as they set it, and `adminAccessPolicy()` holds it within
@@ -451,7 +462,9 @@ the bounds wherever it is enforced: `inspectWorkspace()`, `inspectUser()`, every
 settings audit and the audit log's own floor. `getSettings()` reports `chosen`, the bound
 (`max` or `min`), and `effective`, which is what is enforced. The setters refuse a value outside the
 bounds, naming the variable; a choice stored before a bound tightened is kept but not enforced.
-`setAdminWorkspaceAccess()` refuses a value that is not a level, storing and recording nothing.
+`setAdminWorkspaceAccess()` refuses a value that is not a level, storing and recording nothing, and
+refuses `"content"` the same way, naming the variable, while the cap is below it: a choice of
+`"content"` is never stored to be raised by a later cap.
 
 ### Setting the bounds
 
@@ -470,7 +483,10 @@ Both are variables of the backend Worker (`workshop-backend`):
 ### When a variable is dropped
 
 - The cap falls back to `metadata`. A deploy that drops `ADMIN_WORKSPACE_ACCESS_MAX=off` therefore
-  turns inspection back on, at the level the admins chose: `metadata`, unless they chose Off.
+  turns inspection back on, at the level the admins chose: `metadata`, unless they chose Off. A
+  deploy that drops `ADMIN_WORKSPACE_ACCESS_MAX=content` holds a choice of Content at `metadata`,
+  and the methods that need `"content"` are refused (`accessInsufficient`) until a deploy names it
+  again.
 - The floor falls back to 90 days, and with it the retention actually kept wherever the admins
   chose less, which prunes the older records.
 
@@ -493,8 +509,9 @@ settings across deploys, while a variable only bounds what an admin session can 
   open refused before it reaches the workspace; a username is unbounded, so a long one keeps its
   start and a digest of the whole id, which keeps long ids apart), the workspace's title at the
   time, `method`, the call's arguments by name, the `reason` given at the open, the deployment's
-  `access` level when the call ran (`"metadata"`, or `"off"` for a call refused for that), and
-  `refused` when the level refused it.
+  `access` level when the call ran (`"metadata"` or `"content"`, or `"off"` for a call refused for
+  that; a call refused for needing more names the level that was in force), and `refused` when
+  the level refused it (`accessOff` or `accessInsufficient`).
 - **`AdminUserAccessRecord`** (`kind: "user"`): one admin call into a user's account, the open or a
   view method. It holds `at`, `admin`, `sessionId`, `via`, the user whose account it is (`userId`,
   by canonical user id, kept as `workspaceOwner` is: a long one keeps its start and a digest of the
@@ -517,7 +534,10 @@ names is refused (capnweb-validate checks it against the method union); one that
 has gives an empty page.
 
 The store's table admits exactly these kinds, by a CHECK on its `kind` column, and its `exposed`
-column holds `'metadata'` for every access record, of either kind. SQLite cannot alter a CHECK, so
+column holds `'metadata'` for every access record, of either kind, whatever its `access`: a call
+at `"content"` to a method that needs only `"metadata"` answers with metadata. The column's CHECK
+already admits `'content'`, and the level lives in the record's JSON, which no CHECK constrains,
+so the `"content"` level needed no rebuild of the table. SQLite cannot alter a CHECK, so
 a table whose stored definition differs from the current one is rebuilt once, when the log's
 Durable Object next starts: its rows are copied into a table of the current definition, each
 keeping its `seq`. AUTOINCREMENT's high-water mark is not carried, so a `seq` above the highest row
@@ -577,6 +597,7 @@ record cannot be written is refused.
 | Refusal | Recorded | Why |
 | --- | --- | --- |
 | A live view's call refused while the level is `"off"` (`accessOff`) | Yes, with `refused` | The admin reached the workspace or the account and asked for something. |
+| A live view's call to a method that needs `"content"`, refused while the level is `"metadata"` (`accessInsufficient`) | Yes, with `refused`, at the level in force | The admin reached the workspace and asked for content; nothing was read. |
 | A live view's call whose read throws (a missing object, a pending gadget, a malformed commit id, a commit that is not stored, a chat that does not exist, a legacy connection in a grant's scope) | Yes | The admin reached the workspace or the account and asked for something; the call returned only its error. A commit id is checked inside the read, so a malformed one is a failed read. |
 | An open refused because the authoritative setting or the cap is `"off"` | Yes, titled from the directory (cut) or `""` | No workspace is reached, so its title comes from the directory. |
 | An open refused because only the workspace's KV mirror still says `"off"` | Yes | The workspace's own check refused it. |
@@ -669,18 +690,21 @@ Expected refusals carry a code from `ADMIN_ACCESS_ERROR_CODES` (read with
 | `ADMIN_WORKSPACE_NOT_FOUND` | A malformed id, or one naming no workspace (never initialised or since deleted). |
 | `ADMIN_USER_NOT_FOUND` | An empty user id, or one naming no account; a user view's call once its account is gone. |
 | `ADMIN_WORKSPACE_ACCESS_OFF` | The level is `"off"`: by the setting, by the cap, or because either holds a value that is not a level. |
+| `ADMIN_ACCESS_INSUFFICIENT` | A view method that needs `"content"` was called while the level in force is `"metadata"`: the cap does not name `content`, or the admins did not choose it. |
 | `ADMIN_VIEW_EXPIRED` | The view's lifetime has run out. |
 
 ## Tests
 
 Unit suites, in `packages/workshop-backend/__tests__/`:
 
-- `admin-access.test.ts`: admin status, the bounds' parsing (failing closed), the policy, validation
+- `admin-access.test.ts`: admin status, the bounds' parsing (failing closed, and `content` read
+  only where the cap names it), the policy (a choice of `content` held to the cap), validation
   (the commit log's depth included), the cuts, setting values and excerpts, and each withholding
   helper on a copy.
 - `admin-config.test.ts` (`diffAdminConfig`) and `admin-settings-audit.test.ts`: what each setter
   records, before which write, and the setters' bounds: a value that is not a level refused,
-  nothing stored or recorded, and a stored one reported as `"off"` until an admin chooses.
+  nothing stored or recorded, `"content"` refused until the cap names it, and a stored one
+  reported as `"off"` until an admin chooses.
 - `admin-audit.test.ts`: the deployment-wide log's listing, filters, cursors, schema (the CHECKs
   tying the workspace columns to records of access to a workspace, and `exposed` stored as
   `metadata` for every access record, of a workspace or of a user's account, and null for a
@@ -699,7 +723,10 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
 - `admin-view.test.ts`: `adminViewCall()`, the call discipline both views share: the order of its
   checks, its read of the setting, the read and the record before the answer; each call recorded
   with no retention; a call refused and recorded while the setting or the cap is off or not a
-  level, and answered again once the level is back at `"metadata"`; a refused call and a failed
+  level, and answered again once the level is back at `"metadata"`; a call that needs `"content"`
+  refused and recorded at each level below it, the record naming the level in force, and answered
+  once the cap and the choice are both `content`; a call that needs `"metadata"` answered at
+  `"content"`, recorded at it; a refused call and a failed
   read recorded with nothing awaited since the last check; nothing recorded for a view no longer
   live; a record that cannot be written failing the call, with the method alone logged; and the
   environment read at each use.
@@ -707,7 +734,9 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   per-call checks; every method recorded and none refused, each record stored with `exposed`
   `metadata` in the table; what every answer withholds, beside the structure it keeps; a call
   refused and recorded while the setting is off, answered again once it is back at `"metadata"`,
-  and refused while the cap or a stored level is not a level; the reads that fail recorded, and a
+  and refused while the cap or a stored level is not a level; every answer at `"content"` equal
+  to the one at `"metadata"`, recorded at the level in force and stored with `exposed`
+  `metadata`; the reads that fail recorded, and a
   depth out of range refused unrecorded; a failed record returning nothing; the races with
   deletion and expiry, at the setting read and while a call reads its answer, writing nothing; a
   2,000,000-character title; the live-session counts, one for each hold a collaborator has, by
@@ -724,7 +753,8 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   `metadata` in the table; what the answers withhold, shown first in what the user is served
   from; each answer whole, and no credential in any; a call refused and recorded while the
   setting is off, answered again once it is back at `"metadata"`, and refused while the cap or a
-  stored level is not a level; a failed record returning nothing; and the case that holds the
+  stored level is not a level; every answer at `"content"` equal to the one at `"metadata"`,
+  recorded at the level in force; a failed record returning nothing; and the case that holds the
   view to its seven reads, with the walk both views' suites share (`rpc-surface.ts`). Two steps
   show the wake:
   1. The read-only case opens views and calls every method, recorded and refused, on an account
@@ -760,7 +790,8 @@ Integration suites, in `packages/integration-tests/__tests__/`:
   the directory; an inspection recorded apart from the workspace and absent from the owner's
   `listActions()` and `subscribeToActions()`; what the view withholds of what the owner reads, and
   inspection turned off; attachments, commits and a draft's paths listed without their content; no
-  level above `"metadata"` to ask for or to set, and no method that reads content; every call
+  level above `"metadata"` to ask for or to set while the cap names none (`"content"` refused for
+  the bound), and no method that reads content; every call
   recorded end to end; the creator of a connection made through `newGatekeeper()`, and none on an
   ambient one; who holds an observer record, with what was verified for each; a deleted id refused
   without being written; an audit write failure, where a call returns nothing; expiry; and long
@@ -769,15 +800,15 @@ Integration suites, in `packages/integration-tests/__tests__/`:
   the account's `openForAdmin()` by no capability a user holds; a user that does not exist refused
   with no account created, no directory entry and no record; every call into an account recorded
   with kind `"user"`, and what the view withholds of what the user reads; no level above
-  `"metadata"` to ask for or to set; a live view turned off and on with the deployment's level,
+  `"metadata"` to ask for or to set while the cap names none; a live view turned off and on with the deployment's level,
   with what that refuses recorded; an audit write failure, where a call returns nothing and
   writes nothing; and an inspection that writes nothing to the account: the open, every method
   and the refusals each sit between two reads of the account's `total_changes()`, which must be
   equal, and the user then sees what they saw before.
 - `workshop-admin-audit.test.ts`: every setting change recorded before it takes effect, sessions,
   filters, stats across two admins, and a refused change when its record cannot be written.
-- `workshop-admin-bounds.test.ts`: the bounds' defaults, and a redeploy that tightens them (an
-  invalid cap failing closed) and demotes an admin. The redeploy ends every session, the demoted
+- `workshop-admin-bounds.test.ts`: the bounds' defaults (`"content"` refused for the bound), and a
+  redeploy that tightens them (an invalid cap failing closed) and demotes an admin. The redeploy ends every session, the demoted
   admin's view among them, so the per-call re-check that stops a live view once its admin is demoted
   is covered by `admin-workspace-view.test.ts`.
 

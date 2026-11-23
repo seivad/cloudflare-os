@@ -118,15 +118,16 @@ class AdminUserViewImpl extends RpcTarget implements AdminUserView {
       audits: this.#host.audits,
       logger,
       assertLive: () => this.#assertLive(),
-      recordOf: refused => this.#recordOf(method, args, refused),
+      recordOf: (access, refused) => this.#recordOf(method, args, access, refused),
     }, read);
   }
 
-  // The record of one call, as the deployment-wide log keeps it, as refused when `refused` names
-  // why. Synchronous: adminViewCall() builds and sends a record with nothing awaited since its
-  // last check.
+  // The record of one call at `access`, the level in force, as the deployment-wide log keeps it,
+  // as refused when `refused` names why. Synchronous: adminViewCall() builds and sends a record
+  // with nothing awaited since its last check.
   #recordOf(method: AdminUserMethod, args: Record<string, string | number | undefined>,
-      refused?: AdminUserAccessRecord["refused"]): AdminUserAccessRecord {
+      access: AdminUserAccessRecord["access"], refused?: AdminUserAccessRecord["refused"])
+      : AdminUserAccessRecord {
     return {
       kind: "user",
       userId: this.#userId,
@@ -137,7 +138,7 @@ class AdminUserViewImpl extends RpcTarget implements AdminUserView {
       method,
       args: redactAdminAuditArgs(args),
       reason: this.#reason,
-      access: refused ? "off" : "metadata",
+      access,
       ...(refused ? { refused } : {}),
     };
   }

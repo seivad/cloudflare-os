@@ -26,8 +26,8 @@ declare global {
       // environment variables so that a compromised admin session cannot widen them.
       //
       // The most an admin may let AdminApi.inspectWorkspace() and AdminApi.inspectUser() show:
-      // "off" or "metadata". "metadata" when unset or blank, and "off" for any value that is not
-      // a level.
+      // "off", "metadata" or "content". "metadata" when unset or blank, so "content" only where
+      // it is named, and "off" for any value that is not a level.
       ADMIN_WORKSPACE_ACCESS_MAX?: string;
       // The fewest days the admin audit log keeps a record, whatever admins choose: a positive
       // whole number. 90 when unset, blank or invalid.

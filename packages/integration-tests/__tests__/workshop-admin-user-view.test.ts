@@ -372,7 +372,7 @@ it("records every call into an account, and withholds what its user can read", a
   expect(new Set(kinds)).toEqual(new Set(["user", "workspace"]));
 });
 
-it("has no level above metadata", async () => {
+it("has no level above metadata while the deployment's cap allows none", async () => {
   const user = await seededUser("nolevel");
 
   // An inspection has no level to ask for: the option is not one, and the view is as any other.
@@ -392,6 +392,8 @@ it("has no level above metadata", async () => {
 
   // Nor is there one to set: nothing is stored, and the view answers as it did.
   await expect(admin.setAdminWorkspaceAccess("full" as never)).rejects.toThrow(TypeError);
+  await expect(admin.setAdminWorkspaceAccess("content"))
+      .rejects.toThrow(/ADMIN_WORKSPACE_ACCESS_MAX/);
   expect((await admin.getSettings()).adminWorkspaceAccess)
       .toEqual({ effective: "metadata", chosen: "metadata", max: "metadata" });
   expect((await view.listConnectedAccounts())[0]).not.toHaveProperty("description");

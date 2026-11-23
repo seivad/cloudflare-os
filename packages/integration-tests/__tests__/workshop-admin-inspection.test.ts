@@ -634,7 +634,7 @@ it("lists attachments, commits and a draft's paths without their content", async
   }
 });
 
-it("has no level above metadata", async () => {
+it("has no level above metadata while the deployment's cap allows none", async () => {
   using stack = new DisposableStack();
   const { id, gadgetId, chatId, head, attachmentChatId, attachmentId, draftChatId } =
       await populatedWorkspace(stack, "nolevel");
@@ -658,6 +658,9 @@ it("has no level above metadata", async () => {
   const { adminWorkspaceAccess } = await admin.getSettings();
   const setting = await newestRecord({ kind: "setting" });
   await expect(admin.setAdminWorkspaceAccess("full" as never)).rejects.toThrow(TypeError);
+  // "content" is a level, but this deployment sets no cap, so the setter refuses it for the bound.
+  await expect(admin.setAdminWorkspaceAccess("content"))
+      .rejects.toThrow(/ADMIN_WORKSPACE_ACCESS_MAX/);
   expect((await admin.getSettings()).adminWorkspaceAccess).toEqual(adminWorkspaceAccess);
   expect(await newestRecord({ kind: "setting" })).toEqual(setting);
 

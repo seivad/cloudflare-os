@@ -860,6 +860,29 @@ describe("the access level", () => {
     ]);
   }));
 
+  // No method of this view needs "content", so each answers there as it does at "metadata",
+  // withholding what it withholds, while its record names the level in force.
+  it("answers every call at content as at metadata, recording the level in force",
+      () => withAccount(async user => {
+    await seed(user);
+    let view = await open(user);
+    let atMetadata = await answersOf(view);
+
+    // A choice of content is held to metadata while the cap does not name it.
+    user.config.adminWorkspaceAccess = "content";
+    expect(await answersOf(view)).toStrictEqual(atMetadata);
+    setEnv(user, { ADMIN_WORKSPACE_ACCESS_MAX: "content" });
+    expect(await answersOf(view)).toStrictEqual(atMetadata);
+
+    let records = await recordsOf(user.id);
+    let levels = (from: number, to: number) => new Set(records.slice(from, to).map(r => r.access));
+    // The open, then seven calls at each of the three settings.
+    expect(records).toHaveLength(1 + 3 * 7);
+    expect(levels(0, 1 + 2 * 7)).toStrictEqual(new Set(["metadata"]));
+    expect(levels(1 + 2 * 7, records.length)).toStrictEqual(new Set(["content"]));
+    for (let record of records) expect(record.refused).toBeUndefined();
+  }));
+
   it("turns off for a stored level that is not one", () => withAccount(async user => {
     await createAccount(user);
     let view = await open(user);

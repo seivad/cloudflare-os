@@ -53,8 +53,11 @@ through logs and errors, then everything else.
   connection (an admin's reads of trees and history never pull). An `AdminUserView` reads only
   the account's own store, writes nothing to it, and returns no token, hash, API key, API URL or
   header value. No view method returns what the `"metadata"` level withholds (see
-  docs/admin-access.md). Flag a path that returns a workspace's or an account's data to an admin
-  without these, a method that returns content, or a `withhold*` helper applied conditionally.
+  docs/admin-access.md), except a gadget's code and stored data through a method that passes
+  `requires: "content"` to `adminViewCall()`. Flag a path that returns a workspace's or an
+  account's data to an admin without these, a method that returns content without that
+  requirement or any content beyond a gadget's code and data, or a `withhold*` helper applied
+  conditionally (by level included).
 - That an `AdminUserView` never calls a gatekeeper is a type, so check the diff, not a call graph:
   `AdminUserViewImpl` reaches the account only through `AdminUserViewHost`, whose `UserStoreReads`
   leaves out the collections that hold gatekeeper stubs and whose `connectedAccounts()` yields

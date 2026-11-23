@@ -1005,6 +1005,34 @@ describe("a live view's checks", () => {
     ]);
   }));
 
+  // "content" lets through only the methods that need it, and this view's seventeen need
+  // "metadata" alone, so each answers there as it does at "metadata", withholding what it
+  // withholds, while its record names the level in force.
+  it("answers every call at content as at metadata, recording the level in force",
+      () => withWorkspace(async ws => {
+    let view = await open(ws);
+    let atMetadata = await everyAnswer(ws, view);
+
+    // A choice of content is held to metadata while the cap does not name it.
+    ws.config.adminWorkspaceAccess = "content";
+    expect(await everyAnswer(ws, view)).toStrictEqual(atMetadata);
+    setEnv(ws, { ADMIN_WORKSPACE_ACCESS_MAX: "content" });
+    expect(await everyAnswer(ws, view)).toStrictEqual(atMetadata);
+
+    let records = await deploymentRecords(ws);
+    let levels = (from: number, to: number) => new Set(records.slice(from, to).map(r => r.access));
+    // The open, then seventeen calls at each of the three settings.
+    expect(records).toHaveLength(1 + 3 * 17);
+    expect(levels(0, 1 + 2 * 17)).toStrictEqual(new Set(["metadata"]));
+    expect(levels(1 + 2 * 17, records.length)).toStrictEqual(new Set(["content"]));
+    for (let record of records) expect(record.refused).toBeUndefined();
+    // Every answer still held metadata alone.
+    let exposed = await runInDurableObject(env.TEST_ADMIN_AUDIT.getByName(""), (_log, state) =>
+        state.storage.sql.exec<{ exposed: string }>(
+            "SELECT DISTINCT exposed FROM admin_audit WHERE workspace_id = ?", ws.id).toArray());
+    expect(exposed).toStrictEqual([{ exposed: "metadata" }]);
+  }));
+
   it("turns off for a stored level that is not one", () => withWorkspace(async ws => {
     let view = await open(ws);
     // What the deployment's settings store, as the fake KV then serves it.

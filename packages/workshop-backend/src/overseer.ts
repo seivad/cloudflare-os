@@ -15104,15 +15104,16 @@ class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
       audits: impl.adminAudits,
       logger: impl.logger,
       assertLive: () => this.#assertLive(),
-      recordOf: refused => this.#recordOf(method, args, refused),
+      recordOf: (access, refused) => this.#recordOf(method, args, access, refused),
     }, read);
   }
 
-  // The record of one call, as the deployment-wide log keeps it, as refused when `refused` names
-  // why. Synchronous: adminViewCall() builds and sends a record with nothing awaited since its
-  // last check.
+  // The record of one call at `access`, the level in force, as the deployment-wide log keeps it,
+  // as refused when `refused` names why. Synchronous: adminViewCall() builds and sends a record
+  // with nothing awaited since its last check.
   #recordOf(method: AdminWorkspaceMethod, args: Record<string, string | number | undefined>,
-      refused?: AdminAccessRecord["refused"]): AdminAccessRecord {
+      access: AdminAccessRecord["access"], refused?: AdminAccessRecord["refused"])
+      : AdminAccessRecord {
     let impl = this.#impl;
     return {
       kind: "workspace",
@@ -15128,7 +15129,7 @@ class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
       method,
       args: redactAdminAuditArgs(args),
       reason: this.#reason,
-      access: refused ? "off" : "metadata",
+      access,
       ...(refused ? {refused} : {}),
     };
   }
