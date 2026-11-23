@@ -67,6 +67,27 @@ function epochMs(date: Date | undefined): number | null {
   return date ? date.getTime() : null;
 }
 
+// A keyset cursor for a listing sorted by a time: the last row's sort value (null when it has
+// none) and id, as base64 of JSON so any id survives.
+function encodeCursor(value: number | null, id: string): string {
+  const bytes = new TextEncoder().encode(JSON.stringify([value, id]));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodeCursor(cursor: string): [number | null, string] {
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(
+      Uint8Array.from(atob(cursor), char => char.charCodeAt(0))));
+    if (Array.isArray(parsed) && parsed.length === 2
+        && (parsed[0] === null || typeof parsed[0] === "number") && typeof parsed[1] === "string") {
+      return [parsed[0], parsed[1]];
+    }
+  } catch { /* falls through to the rejection */ }
+  throw new Error("Invalid cursor.");
+}
+
 // Collects rows into one page in the order a query yields them: at most `limit` (the query asks
 // for one more, to learn whether another page follows), and fewer once their text would pass
 // MAX_PAGE_TEXT_LENGTH, though never none while any remain. Rows are read one at a time, so none
@@ -237,42 +258,80 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Users in id order after `cursor` (the previous page's last id, of any length), matching
-   * `query` as searchUsers() matches (blank matches all), with their activity and clamped names:
-   * at most `limit`, and fewer once the page's ids and names would pass a million characters
-   * (never none while any remain). Rejects a `query` over 1000 characters or with a line break;
-   * `limit` is validated by the caller (see adminListLimit()).
+   * Users matching `query` as searchUsers() matches (blank matches all), with their activity,
+   * the number of workspaces they own and clamped names: in id order by default, or by `sort`
+   * (`direction` "asc" by default; a user with no recorded time for a time sort comes last
+   * whichever the direction, ties by id). `activeSince` keeps only users whose last login is at
+   * or after it, so one with no recorded login is left out. A page is at most `limit`, and fewer
+   * once its ids and names would pass a million characters (never none while any remain).
+   * `cursor` is the previous page's `nextCursor`: the last id for an id sort, otherwise an opaque
+   * string naming the last user's sort value and id, so a page boundary falls the same however
+   * many users share a value. Rejects a `query` over 1000 characters or with a line break, and a
+   * cursor of a time sort that is not one this returned; `limit` is validated by the caller (see
+   * adminListLimit()).
    */
-  listUsers(options: { query?: string; cursor?: string; limit: number }): UserDirectoryPage {
-    const { query = "", cursor, limit } = options;
+  listUsers(options: {
+    query?: string; cursor?: string; limit: number; activeSince?: Date;
+    sort?: "id" | "lastLogin" | "created"; direction?: "asc" | "desc";
+  }): UserDirectoryPage {
+    const { query = "", cursor, limit, activeSince, sort = "id", direction = "asc" } = options;
     validateQuery(query);
     const needle = query.trim().toLowerCase();
     const conditions: string[] = [];
-    const bindings: string[] = [];
+    const bindings: (string | number)[] = [];
+    // The sort column and the order its keyset cursor walks.
+    const column = sort === "lastLogin" ? "user_activity.last_login"
+        : sort === "created" ? "user_activity.created" : "users.id";
+    const dir = direction === "desc" ? "DESC" : "ASC";
     if (cursor !== undefined) {
-      conditions.push("users.id > ?");
-      bindings.push(cursor);
+      if (sort === "id") {
+        conditions.push(`users.id ${direction === "desc" ? "<" : ">"} ?`);
+        bindings.push(cursor);
+      } else {
+        const [value, id] = decodeCursor(cursor);
+        const past = direction === "desc" ? "<" : ">";
+        if (value === null) {
+          conditions.push(`(${column} IS NULL AND users.id > ?)`);
+          bindings.push(id);
+        } else {
+          conditions.push(
+            `(${column} ${past} ? OR (${column} = ? AND users.id > ?) OR ${column} IS NULL)`);
+          bindings.push(value, value, id);
+        }
+      }
     }
     if (needle !== "") {
       conditions.push("instr(users.search_text, ?) > 0");
       bindings.push(needle);
     }
+    if (activeSince !== undefined) {
+      conditions.push("user_activity.last_login >= ?");
+      bindings.push(activeSince.getTime());
+    }
+    const order = sort === "id" ? `users.id ${dir}` : `${column} ${dir} NULLS LAST, users.id`;
     const rows = this.ctx.storage.sql.exec<{
       id: string; name: string; created: number | null; last_login: number | null;
+      owned: number;
     }>(
       `SELECT users.id AS id, users.name AS name, user_activity.created AS created,
-         user_activity.last_login AS last_login
+         user_activity.last_login AS last_login,
+         (SELECT COUNT(*) FROM workspaces WHERE workspaces.owner_id = users.id) AS owned
        FROM users LEFT JOIN user_activity ON user_activity.id = users.id
        ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
-       ORDER BY users.id LIMIT ?`,
+       ORDER BY ${order} LIMIT ?`,
       ...bindings, limit + 1);
     const { items, nextCursor } = collectPage(rows, limit, row => ({
       id: row.id,
       name: clamp(row.name),
       ...row.created !== null && { created: new Date(row.created) },
       ...row.last_login !== null && { lastLogin: new Date(row.last_login) },
+      ownedWorkspaces: row.owned,
     }), user => user.id.length + user.name.length);
-    return nextCursor === undefined ? { users: items } : { users: items, nextCursor };
+    if (nextCursor === undefined) return { users: items };
+    if (sort === "id") return { users: items, nextCursor };
+    const last = items[items.length - 1];
+    const value = (sort === "lastLogin" ? last.lastLogin : last.created)?.getTime() ?? null;
+    return { users: items, nextCursor: encodeCursor(value, last.id) };
   }
 
   /**

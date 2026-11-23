@@ -1537,9 +1537,16 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   async listUsers(options: AdminUserQuery = {}): Promise<AdminUserPage> {
     let limit = adminListLimit(options.limit);
+    let { activeSince } = options;
+    if (activeSince !== undefined
+        && (!(activeSince instanceof Date) || Number.isNaN(activeSince.getTime()))) {
+      throw new TypeError("activeSince must be a valid Date.");
+    }
     // Built field by field, so that nothing else the client sent reaches the directory.
-    let { users, nextCursor } = await this.directories.getByName("").listUsers(
-        { query: options.query, cursor: options.cursor, limit });
+    let { users, nextCursor } = await this.directories.getByName("").listUsers({
+      query: options.query, cursor: options.cursor, limit, activeSince,
+      sort: options.sort, direction: options.direction,
+    });
     let page = users.map(user => ({ ...user, isAdmin: isDeploymentAdmin(this.env, user.id) }));
     return nextCursor === undefined ? { users: page } : { users: page, nextCursor };
   }

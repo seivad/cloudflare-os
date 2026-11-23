@@ -1817,6 +1817,9 @@ export type AdminUserRecord = UserDirectoryRecord & {
   lastLogin?: Date;
   /** Whether the user is a deployment admin now: named in the deployment's ADMINS variable. */
   isAdmin: boolean;
+  /** How many workspaces the directory lists as this user's: 0 when none. Counts only the
+   * workspaces the directory knows (see AdminApi.listWorkspaces()). */
+  ownedWorkspaces: number;
 };
 
 /** Options for AdminApi.listUsers(). */
@@ -1829,12 +1832,20 @@ export type AdminUserQuery = {
   /** The page size: a whole number from 1 to ADMIN_LIST_MAX_LIMIT, ADMIN_LIST_DEFAULT_LIMIT when
    * absent. */
   limit?: number;
+  /** Only users whose `lastLogin` is at or after this: one with no recorded login is left out.
+   * Rejected when not a valid Date. Absent lists users whatever their activity. */
+  activeSince?: Date;
+  /** What orders the page: "id" (the default), "lastLogin" or "created". A user with no recorded
+   * time comes last whichever the direction, and ties fall in id order. */
+  sort?: "id" | "lastLogin" | "created";
+  /** "asc" (the default) or "desc", the direction of `sort`. */
+  direction?: "asc" | "desc";
 };
 
 /** One page of AdminApi.listUsers(). */
 export type AdminUserPage = {
-  /** The page's users, in id order: at most the query's `limit`, and fewer when their ids and
-   * names are long (see AdminApi.listUsers()). */
+  /** The page's users, in the query's order: at most the query's `limit`, and fewer when their
+   * ids and names are long (see AdminApi.listUsers()). */
   users: AdminUserRecord[];
   /** Pass as `cursor` for the next page; absent once there is none. */
   nextCursor?: string;
@@ -2573,12 +2584,13 @@ export interface AdminApi {
   // `lastLogin` until their next session; one with no session since then is listed at its next. A workspace is listed when it is next opened. One never used again is never listed.
 
   /**
-   * One page of the deployment's users, in id order: every account that has started a session
+   * One page of the deployment's users, in id order unless `sort` says otherwise: every account that has started a session
    * since the directory began recording accounts. Unaffected by setUserSearchEnabled(). A page
    * holds at most `limit` users and stops early, with a `nextCursor`, once their ids and names
    * would pass a million characters: an id has no length limit of its own, so a count alone cannot
-   * bound a page. Rejects a `query` over 1000 characters or with a line break, and a `limit` that
-   * is not a whole number from 1 to ADMIN_LIST_MAX_LIMIT.
+   * bound a page. Rejects a `query` over 1000 characters or with a line break, a `limit` that
+   * is not a whole number from 1 to ADMIN_LIST_MAX_LIMIT, and an `activeSince` that is not a valid
+   * Date.
    */
   listUsers(options?: AdminUserQuery): Promise<AdminUserPage>;
 

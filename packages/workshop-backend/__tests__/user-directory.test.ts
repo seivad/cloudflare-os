@@ -21,6 +21,11 @@ function user(id: string, name: string) {
   return { id, name };
 }
 
+// A user as listUsers() lists it: the record, owning no workspaces unless the test says.
+function listed(id: string, name: string, extra: Record<string, unknown> = {}) {
+  return { id, name, ...extra, ownedWorkspaces: 0 };
+}
+
 // Await a stub call's rejection with a single handler: expect(...).rejects forks the underlying
 // JsRpcPromise (each .then mints a fresh RPC continuation), and the leftover copy is reported as
 // an unhandled rejection (see overseer-hooks.test.ts).
@@ -165,14 +170,14 @@ describe("UserDirectoryDurableObject activity", () => {
       created: new Date(2_000 * HOUR), lastLogin: new Date(1_000 * HOUR),
     });
     await expect(stub.listUsers({ limit: 10 })).resolves.toEqual({
-      users: [{ id: "ada@example.com", name: "Ada", created, lastLogin: new Date(1_001 * HOUR) }],
+      users: [listed("ada@example.com", "Ada", { created, lastLogin: new Date(1_001 * HOUR) })],
     });
 
     // A stale profile revision leaves the name alone, but its activity still merges.
     await stub.syncUser(user("ada@example.com", "Augusta"), 1);
     await stub.syncUser(user("ada@example.com", "Stale"), 0, { lastLogin: new Date(1_005 * HOUR) });
     await expect(stub.listUsers({ limit: 10 })).resolves.toEqual({
-      users: [{ id: "ada@example.com", name: "Augusta", created, lastLogin: new Date(1_005 * HOUR) }],
+      users: [listed("ada@example.com", "Augusta", { created, lastLogin: new Date(1_005 * HOUR) })],
     });
   });
 
@@ -182,10 +187,10 @@ describe("UserDirectoryDurableObject activity", () => {
     await stub.syncUser(user("grace@example.com", "Grace"), 0, { lastLogin: new Date(HOUR) });
     const { users } = await stub.listUsers({ limit: 10 });
     expect(users).toEqual([
-      { id: "ada@example.com", name: "Ada" },
-      { id: "grace@example.com", name: "Grace", lastLogin: new Date(HOUR) },
+      listed("ada@example.com", "Ada"),
+      listed("grace@example.com", "Grace", { lastLogin: new Date(HOUR) }),
     ]);
-    expect(Object.keys(users[0])).toEqual(["id", "name"]);
+    expect(Object.keys(users[0])).toEqual(["id", "name", "ownedWorkspaces"]);
   });
 });
 
@@ -195,14 +200,14 @@ describe("UserDirectoryDurableObject.listUsers", () => {
     for (const id of ["e", "c", "a", "d", "b"]) await stub.syncUser(user(id, id.toUpperCase()), 0);
 
     const first = await stub.listUsers({ limit: 2 });
-    expect(first).toEqual({ users: [user("a", "A"), user("b", "B")], nextCursor: "b" });
+    expect(first).toEqual({ users: [listed("a", "A"), listed("b", "B")], nextCursor: "b" });
     const second = await stub.listUsers({ cursor: first.nextCursor, limit: 2 });
-    expect(second).toEqual({ users: [user("c", "C"), user("d", "D")], nextCursor: "d" });
+    expect(second).toEqual({ users: [listed("c", "C"), listed("d", "D")], nextCursor: "d" });
     const last = await stub.listUsers({ cursor: second.nextCursor, limit: 2 });
-    expect(last).toEqual({ users: [user("e", "E")] });
+    expect(last).toEqual({ users: [listed("e", "E")] });
     // A page that ends exactly at the last user has no cursor either.
     await expect(stub.listUsers({ cursor: "c", limit: 2 })).resolves.toEqual({
-      users: [user("d", "D"), user("e", "E")],
+      users: [listed("d", "D"), listed("e", "E")],
     });
   });
 
@@ -212,20 +217,102 @@ describe("UserDirectoryDurableObject.listUsers", () => {
     await stub.syncUser(user("grace@example.com", "Grace Hopper"), 0);
 
     await expect(stub.listUsers({ query: "  ", limit: 10 })).resolves.toEqual({
-      users: [user("ada@example.com", "Ada Lovelace"), user("grace@example.com", "Grace Hopper")],
+      users: [listed("ada@example.com", "Ada Lovelace"), listed("grace@example.com", "Grace Hopper")],
     });
     await expect(stub.listUsers({ query: "HOPPER", limit: 10 })).resolves.toEqual({
-      users: [user("grace@example.com", "Grace Hopper")],
+      users: [listed("grace@example.com", "Grace Hopper")],
     });
     await expect(stub.listUsers({ query: "ADA@", limit: 10 })).resolves.toEqual({
-      users: [user("ada@example.com", "Ada Lovelace")],
+      users: [listed("ada@example.com", "Ada Lovelace")],
     });
     await expectRejection(stub.listUsers({ query: "a".repeat(1001), limit: 10 }), "at most 1000 characters");
     await expectRejection(stub.listUsers({ query: "ada\nlove", limit: 10 }), "no line breaks");
     // A cursor is a previous page's last id, which has no length limit.
     await expect(stub.listUsers({ cursor: "a".repeat(300_000), limit: 10 })).resolves.toEqual({
-      users: [user("ada@example.com", "Ada Lovelace"), user("grace@example.com", "Grace Hopper")],
+      users: [listed("ada@example.com", "Ada Lovelace"), listed("grace@example.com", "Grace Hopper")],
     });
+  });
+});
+
+describe("UserDirectoryDurableObject.listUsers activity, sorting and ownership", () => {
+  const DAY = 24 * HOUR;
+  const NOW = 100 * DAY;
+
+  it("filters by activeSince, leaving out a user with no last login", async () => {
+    const stub = directory("active-since");
+    await stub.syncUser(user("recent", "Recent"), 0, { lastLogin: new Date(NOW - 10 * DAY) });
+    await stub.syncUser(user("old", "Old"), 0, { lastLogin: new Date(NOW - 40 * DAY) });
+    await stub.syncUser(user("never", "Never"), 0, { created: new Date(NOW - 50 * DAY) });
+    await stub.syncUser(user("bare", "Bare"), 0);
+
+    const { users } = await stub.listUsers({ limit: 10, activeSince: new Date(NOW - 30 * DAY) });
+    expect(users.map(listedUser => listedUser.id)).toEqual(["recent"]);
+    const exact = await stub.listUsers({ limit: 10, activeSince: new Date(NOW - 40 * DAY) });
+    expect(exact.users.map(listedUser => listedUser.id)).toEqual(["old", "recent"]);
+  });
+
+  it("sorts by lastLogin desc with stable cursor paging, users with none last", async () => {
+    const stub = directory("sort-last-login");
+    const at = (days: number) => ({ lastLogin: new Date(days * DAY) });
+    await stub.syncUser(user("a", "A"), 0, at(5));
+    await stub.syncUser(user("b", "B"), 0);
+    await stub.syncUser(user("c", "C"), 0, at(9));
+    await stub.syncUser(user("d", "D"), 0, at(5));
+    await stub.syncUser(user("e", "E"), 0);
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await stub.listUsers({ limit: 2, sort: "lastLogin", direction: "desc", cursor });
+      seen.push(...page.users.map(listedUser => listedUser.id));
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    expect(seen).toEqual(["c", "a", "d", "b", "e"]);
+
+    const ascending: string[] = [];
+    cursor = undefined;
+    do {
+      const page = await stub.listUsers({ limit: 2, sort: "lastLogin", cursor });
+      ascending.push(...page.users.map(listedUser => listedUser.id));
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    expect(ascending).toEqual(["a", "d", "c", "b", "e"]);
+  });
+
+  it("sorts by created and by id descending, and rejects a cursor it did not return", async () => {
+    const stub = directory("sort-created");
+    await stub.syncUser(user("a", "A"), 0, { created: new Date(3 * DAY) });
+    await stub.syncUser(user("b", "B"), 0, { created: new Date(1 * DAY) });
+    await stub.syncUser(user("c", "C"), 0);
+    const byCreated = await stub.listUsers({ limit: 10, sort: "created" });
+    expect(byCreated.users.map(listedUser => listedUser.id)).toEqual(["b", "a", "c"]);
+    const byIdDesc = await stub.listUsers({ limit: 2, sort: "id", direction: "desc" });
+    expect(byIdDesc.users.map(listedUser => listedUser.id)).toEqual(["c", "b"]);
+    expect(byIdDesc.nextCursor).toBe("b");
+    const rest = await stub.listUsers({ limit: 2, sort: "id", direction: "desc", cursor: "b" });
+    expect(rest.users.map(listedUser => listedUser.id)).toEqual(["a"]);
+    await expectRejection(stub.listUsers({ limit: 2, sort: "created", cursor: "nonsense" }),
+        "Invalid cursor");
+  });
+
+  it("counts the workspaces each user owns", async () => {
+    const stub = directory("owned");
+    await stub.syncUser(user("owner", "Owner"), 0);
+    await stub.syncUser(user("idle", "Idle"), 0);
+    for (const id of ["w1", "w2", "w3"]) await stub.syncWorkspace(workspace(id, id, "owner"), 1);
+    await stub.syncWorkspace(workspace("w4", "Other", "stranger"), 1);
+    const { users } = await stub.listUsers({ limit: 10 });
+    expect(users).toEqual([listed("idle", "Idle"), { ...listed("owner", "Owner"), ownedWorkspaces: 3 }]);
+  });
+
+  it("keeps id order and plain-id cursors when no sort is given", async () => {
+    const stub = directory("default-order");
+    for (const id of ["b", "c", "a"]) {
+      await stub.syncUser(user(id, id), 0, { lastLogin: new Date(({ a: 1, b: 3, c: 2 })[id]! * DAY) });
+    }
+    const page = await stub.listUsers({ limit: 2 });
+    expect(page.users.map(listedUser => listedUser.id)).toEqual(["a", "b"]);
+    expect(page.nextCursor).toBe("b");
   });
 });
 
@@ -329,7 +416,7 @@ describe("UserDirectoryDurableObject text bounds", () => {
     const clamped = name.slice(0, MAX_DIRECTORY_TEXT_LENGTH);
 
     await expect(stub.listUsers({ limit: 10 })).resolves.toEqual({
-      users: [user("ada@example.com", clamped)],
+      users: [listed("ada@example.com", clamped)],
     });
     await expect(stub.searchUsers("ada xx", [])).resolves.toEqual([user("ada@example.com", clamped)]);
     const [row] = await stored<{ name: number; search_text: number }>(stub,
@@ -347,7 +434,7 @@ describe("UserDirectoryDurableObject text bounds", () => {
     await stub.syncUser(user("straddling", straddling), 0);
 
     await expect(stub.listUsers({ limit: 10 })).resolves.toEqual({
-      users: [user("exact", exact), user("straddling", "s".repeat(MAX_DIRECTORY_TEXT_LENGTH - 1))],
+      users: [listed("exact", exact), listed("straddling", "s".repeat(MAX_DIRECTORY_TEXT_LENGTH - 1))],
     });
   });
 
@@ -380,7 +467,9 @@ describe("UserDirectoryDurableObject text bounds", () => {
     await stub.syncWorkspace({ id: "w1", title: "Old work", ownerId: "old" }, 1);
     const clamped = user("old", name.slice(0, MAX_DIRECTORY_TEXT_LENGTH));
 
-    await expect(stub.listUsers({ limit: 10 })).resolves.toEqual({ users: [clamped] });
+    await expect(stub.listUsers({ limit: 10 })).resolves.toEqual({
+      users: [{ ...clamped, ownedWorkspaces: 1 }],
+    });
     await expect(stub.listWorkspaces({ limit: 10 })).resolves.toEqual({
       workspaces: [{ id: "w1", title: "Old work", owner: clamped }],
     });
@@ -410,7 +499,7 @@ describe("UserDirectoryDurableObject text bounds", () => {
     expect(first.users.map(listed => listed.id)).toEqual([huge]);
     expect(first.nextCursor).toBe(huge);
     await expect(stub.listUsers({ cursor: first.nextCursor, limit: 50 })).resolves.toEqual({
-      users: [user("b", "B")],
+      users: [listed("b", "B")],
     });
   });
 

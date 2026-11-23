@@ -32,7 +32,9 @@ a user's account (see [User inspection](#user-inspection)) alike.
 - **Settings**: the setters (signups, user search, site name and logo, instructions,
   resource and gatekeeper availability, models, update checks, ...), plus
   `setAdminWorkspaceAccess()` and `setAdminAuditRetentionDays()`. Every setter is audited.
-- **The directory**: `listUsers()` and `listWorkspaces()`.
+- **The directory**: `listUsers()` and `listWorkspaces()`. `listUsers()` takes `activeSince` (only
+  users whose `lastLogin` is at or after it), `sort` (`"id"`, `"lastLogin"` or `"created"`) and
+  `direction`, and each record carries `ownedWorkspaces`.
 - **Inspection**: `inspectWorkspace(workspaceId, reason, { lifetimeSeconds })`, which returns an
   `AdminWorkspaceView` of the workspace's metadata.
 - **User inspection**: `inspectUser(userId, reason, { lifetimeSeconds })`, which returns an
@@ -61,6 +63,16 @@ table, the sync protocol and the per-session writes.
 User search keeps its own matching and its `userSearchEnabled` gate; the admin listings ignore that
 setting. Directory listings are unrecorded reads, visible whatever the access level, workspace
 titles included: they are what an admin uses to find a workspace before inspecting it.
+
+### Filtering, sorting and ownership
+
+`listUsers()` filters and orders in SQL. `activeSince` keeps users whose `last_login` is at or
+after it, so an account with no recorded login is left out. Without `sort` the order is id order and
+a cursor is the last id, as it always was. A time sort orders by that column with users that have no
+value last (whichever the direction) and ties by id; its cursor is opaque (the last user's sort
+value and id), so pages neither repeat nor skip users that share a value. `ownedWorkspaces` counts
+the workspaces the directory lists with that user as owner (the `workspaces_by_owner` index), so a
+workspace the directory has not yet learned of is not counted.
 
 ### Feeds
 

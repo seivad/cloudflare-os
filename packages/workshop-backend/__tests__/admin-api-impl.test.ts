@@ -462,7 +462,23 @@ describe("AdminApiImpl directory listings", () => {
       nextCursor: "user",
     });
     const [forwarded] = callsTo("directory", "listUsers")[0]!.args as [Record<string, unknown>];
-    expect(forwarded).toStrictEqual({ query: "a", cursor, limit: 2 });
+    expect(forwarded).toStrictEqual({
+      query: "a", cursor, limit: 2, activeSince: undefined, sort: undefined, direction: undefined,
+    });
+  });
+
+  it("forwards the directory's activity filter and sort, and rejects an invalid date", async () => {
+    const { mint, callsTo } = deployment(
+        { handlers: { directory: { listUsers: () => ({ users: [] }) } } });
+    const activeSince = new Date(1_000);
+    await mint().listUsers({ activeSince, sort: "lastLogin", direction: "desc" });
+    const [forwarded] = callsTo("directory", "listUsers")[0]!.args as [Record<string, unknown>];
+    expect(forwarded).toStrictEqual({
+      query: undefined, cursor: undefined, limit: 50, activeSince, sort: "lastLogin",
+      direction: "desc",
+    });
+    expect(await rejection(mint().listUsers({ activeSince: new Date(NaN) })))
+        .toBeInstanceOf(TypeError);
   });
 
   it("lists workspaces, forwarding only the query's fields", async () => {
