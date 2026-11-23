@@ -149,4 +149,21 @@ describe('UserPanel', () => {
     await click(document.querySelector('button[aria-label="Close"]')!)
     expect(onClose).toHaveBeenCalled()
   })
+
+  it('asks again, prefilled for the new user, when the panel is shown for another one', async () => {
+    const admin = fakeAdmin()
+    await render(admin)
+    await confirmReason()
+    admin.inspectUser.mockClear()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await act(async () => {
+      root.render(<UserPanel admin={admin as unknown as RpcStub<AdminApi>} userId="bob@example.com" userName="Bob" onClose={vi.fn<() => void>()} />)
+    })
+    await flush()
+    expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Reviewing Bob’s work')
+    expect(admin.inspectUser).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    expect(logged).not.toHaveBeenCalled()
+    logged.mockRestore()
+  })
 })

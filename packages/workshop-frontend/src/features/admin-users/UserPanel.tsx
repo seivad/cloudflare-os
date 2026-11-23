@@ -79,6 +79,7 @@ export const UserPanel = ({ admin, userId, userName, onClose }: {
             <div className="flex-1 overflow-y-auto p-4">
               {reason === null && (
                 <ReasonPrompt
+                  key={userId}
                   initial={`Reviewing ${userName || userId}’s work`}
                   onConfirm={views.setReason}
                   onCancel={onClose}

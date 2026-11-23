@@ -35,8 +35,10 @@ const disposeQuietly = (stub: unknown) => {
  * a few at a time. The reason, and every view, belong to one `userId`: another user starts over.
  */
 export const useAdminViews = (admin: RpcStub<AdminApi>, userId: string): AdminViews => {
-  const [reason, setReasonState] = useState<string | null>(null)
-  const reasonRef = useRef<string | null>(null)
+  // The reason belongs to the user it was given for: no render sees it under another id.
+  const [given, setGiven] = useState<{ userId: string; reason: string } | null>(null)
+  const reason = given !== null && given.userId === userId ? given.reason : null
+  const givenRef = useRef(given)
   const views = useRef({
     user: null as Promise<RpcStub<AdminUserView>> | null,
     workspaces: new Map<string, Promise<RpcStub<AdminWorkspaceView>>>(),
@@ -52,25 +54,25 @@ export const useAdminViews = (admin: RpcStub<AdminApi>, userId: string): AdminVi
     for (const opened of dropped) opened?.then(disposeQuietly, () => {})
   }, [])
 
-  // A different user: forget the reason and every view.
+  // A different user: forget every view (the reason is already out of reach, being keyed).
   const userIdRef = useRef(userId)
   useEffect(() => {
     if (userIdRef.current === userId) return
     userIdRef.current = userId
-    reasonRef.current = null
-    setReasonState(null)
     dropViews()
   }, [userId, dropViews])
   useEffect(() => dropViews, [dropViews])
 
   const setReason = useCallback((next: string) => {
-    reasonRef.current = next
-    setReasonState(next)
-  }, [])
+    givenRef.current = { userId, reason: next }
+    setGiven(givenRef.current)
+  }, [userId])
 
   const reasonOrThrow = () => {
-    if (reasonRef.current === null) throw new Error('A reason is needed before a view can be opened.')
-    return reasonRef.current
+    if (givenRef.current === null || givenRef.current.userId !== userId) {
+      throw new Error('A reason is needed before a view can be opened.')
+    }
+    return givenRef.current.reason
   }
 
   const userView = useCallback(() => {
@@ -89,15 +91,19 @@ export const useAdminViews = (admin: RpcStub<AdminApi>, userId: string): AdminVi
     let opened = held.workspaces.get(workspaceId)
     if (opened === undefined) {
       const open = async () => {
+        // A finishing open hands its slot straight to the next waiter, so `inFlight` never dips
+        // for a newcomer to take.
         if (held.inFlight >= MAX_CONCURRENT_WORKSPACE_OPENS) {
           await new Promise<void>((resolve) => held.waiting.push(resolve))
+        } else {
+          held.inFlight += 1
         }
-        held.inFlight += 1
         try {
           return await admin.inspectWorkspace(workspaceId, reasonOrThrow())
         } finally {
-          held.inFlight -= 1
-          held.waiting.shift()?.()
+          const next = held.waiting.shift()
+          if (next === undefined) held.inFlight -= 1
+          else next()
         }
       }
       const started = open()
@@ -106,7 +112,7 @@ export const useAdminViews = (admin: RpcStub<AdminApi>, userId: string): AdminVi
       started.catch(() => { if (held.workspaces.get(workspaceId) === started) held.workspaces.delete(workspaceId) })
     }
     return opened
-  }, [admin])
+  }, [admin, userId])
 
   const call = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
     try {

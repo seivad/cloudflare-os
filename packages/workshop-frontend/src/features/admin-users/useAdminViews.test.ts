@@ -99,4 +99,49 @@ describe('useAdminViews', () => {
     expect(admin.inspectWorkspace).toHaveBeenCalledTimes(10)
     expect(peak).toBe(MAX_CONCURRENT_WORKSPACE_OPENS)
   })
+
+  // A newcomer arriving at any microtask depth after a slot frees must not take it from a waiter.
+  it.each([0, 1, 2, 3, 4, 5, 6])('hands a freed slot to a waiter, not to a newcomer %i microtasks later', async (depth) => {
+    let inFlight = 0
+    let peak = 0
+    const releases: (() => void)[] = []
+    const admin = {
+      inspectWorkspace: vi.fn<(id: string) => Promise<unknown>>((id: string) => new Promise((resolve) => {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        releases.push(() => { inFlight -= 1; resolve({ id }) })
+      })),
+    }
+    const hook = await mount(admin)
+    await act(async () => { hook.views.setReason('r') })
+    const opened = Array.from({ length: 5 }, (_, i) => hook.views.workspaceView(`w${i}`))
+    await act(async () => { await Promise.resolve() })
+    expect(admin.inspectWorkspace).toHaveBeenCalledTimes(4)
+    await act(async () => {
+      releases.shift()!()
+      for (let tick = 0; tick < depth; tick += 1) await Promise.resolve()
+      opened.push(hook.views.workspaceView('late'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    while (releases.length > 0) {
+      await act(async () => { releases.shift()!(); await new Promise((r) => setTimeout(r, 0)) })
+    }
+    await Promise.all(opened)
+    expect(admin.inspectWorkspace).toHaveBeenCalledTimes(6)
+    expect(peak).toBe(MAX_CONCURRENT_WORKSPACE_OPENS)
+  })
+
+  it('does not carry a reason over to another user', async () => {
+    const admin = { inspectUser: vi.fn<() => Promise<unknown>>(async () => ({})) }
+    const out: { views?: AdminViews } = {}
+    const Probe = ({ id }: { id: string }) => { out.views = useAdminViews(admin as unknown as RpcStub<AdminApi>, id); return null }
+    root = createRoot(document.createElement('div'))
+    await act(async () => { root!.render(createElement(Probe, { id: 'a' })) })
+    await act(async () => { out.views!.setReason('r') })
+    expect(out.views!.reason).toBe('r')
+    await act(async () => { root!.render(createElement(Probe, { id: 'b' })) })
+    expect(out.views!.reason).toBeNull()
+    await expect(out.views!.userView()).rejects.toThrow(/reason/)
+    expect(admin.inspectUser).not.toHaveBeenCalled()
+  })
 })
