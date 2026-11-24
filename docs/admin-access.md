@@ -43,6 +43,9 @@ a user's account (see [User inspection](#user-inspection)) alike.
   lifetime, under the deployment's one level.
 - **The audit log**: `listAdminAudit()` and `getAdminAuditStats()`.
 
+The admin panel's **Users** tab is a front end to the directory and the two inspections; see
+[admin-users.md](admin-users.md).
+
 Each record's `via` (`AdminVia`) comes from the session's User-Agent: `"cli"` when the `/api`
 upgrade names `cf-os api` (`cf-os-api/<version>`), `"api"` for any other client, the Workshop's
 admin panel included. A client can send any User-Agent, so it labels records and grants nothing.
