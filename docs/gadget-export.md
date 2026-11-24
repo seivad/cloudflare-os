@@ -95,6 +95,9 @@ leaves the server ([admin-access.md](admin-access.md#copying-a-gadget) has the w
 | `"everything"` | `<slug>.zip` | That archive, `<slug>.data.json` (the gadget's SQLite tables and key-value storage, `"format": "cloudflare-os/gadget-data"`, `"version": 1`) and a `README.md` saying what each file is. Taking the data pauses the gadget, so anyone connected reconnects once. |
 
 `<slug>` is `fileNameSlug()` of the gadget's title. Nothing imports a `data.json` yet: it restores
-by hand, as its README says. The export limits apply: 30 seconds and 100 MB for the copy, and
-16 MB for the data in an `"everything"` copy, measured before it is read, so a gadget with more
-can be copied as `"code"` alone.
+by hand, as its README says. It holds each cell as SqlStorage reads it, so an `INTEGER` beyond
+2^53 is rounded, and leaves out a virtual table's shadow tables (an FTS5 index's `<name>_data`
+and the rest), which creating the virtual table makes again (`GadgetDataFile` in
+`packages/workshop-shared/src/api.ts` has the format). The export limits apply: 30 seconds and
+100 MB for the copy, and 16 MB for the data in an `"everything"` copy, measured before it is read,
+so a gadget with more can be copied as `"code"` alone.

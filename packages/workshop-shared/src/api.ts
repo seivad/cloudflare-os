@@ -7881,14 +7881,17 @@ export type GadgetDataValue =
  * A copy of a gadget's stored data (the `data.json` of an admin's export): its SQLite tables and
  * its key-value storage, as JSON.
  *
- * Rows are lossless: a `BLOB` cell is `{"$bytes": "<base64>"}`, and a number JSON cannot hold
- * (`NaN`, `Infinity`, `-Infinity`, `-0`) is `{"$number": "<its name>"}`. A key-value value JSON
+ * Each cell is as SqlStorage reads it: a `BLOB` cell is `{"$bytes": "<base64>"}`, and a number
+ * JSON cannot hold (`NaN`, `Infinity`, `-Infinity`, `-0`) is `{"$number": "<its name>"}`. SqlStorage
+ * reads an `INTEGER` as a JavaScript number, so one beyond 2^53 is rounded. A key-value value JSON
  * cannot hold is tagged the same way: `$bytes` (a Uint8Array), `$arrayBuffer` (base64),
  * `$typedArray` (`{type, bytes}`), `$date` (ISO 8601, or null for an invalid date), `$bigint`
  * (decimal), `$map` (`[key, value]` pairs), `$set` (values), `$regexp` (`{source, flags}`),
  * `$error` (`{name, message}`), `$undefined` (true), `$number`; and an object with a key that
  * starts with "$" is `{"$object": {...}}`, so that it is never read as a tag. Internal tables
- * (`_cf_*`, `sqlite_*`) are left out; the key-value storage is `kv`.
+ * (`_cf_*`, `sqlite_*`) are left out, and so are a virtual table's shadow tables (an FTS5 table's
+ * `<name>_data`, `_idx`, `_content`, `_docsize` and `_config`), which creating the virtual table
+ * makes again and inserting its rows fills; the key-value storage is `kv`.
  */
 export type GadgetDataFile = {
   /** What the file is. */

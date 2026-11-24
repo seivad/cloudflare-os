@@ -56,8 +56,11 @@ A copy of a Cloudflare OS gadget, taken ${exportedAt.toISOString()}.
 - \`gadget\`: the gadget's id and name in the workspace it came from.
 - \`sizeBytes\`: the size of its storage when copied.
 - \`sql\`: each table as \`{ "name", "createSql", "rows" }\`. The runtime's own tables (\`_cf_*\`,
-  \`sqlite_*\`) are left out. A \`BLOB\` value is \`{ "$bytes": "<base64>" }\`; a number JSON
-  cannot hold is \`{ "$number": "NaN" }\` (or \`"Infinity"\`, \`"-Infinity"\`, \`"-0"\`).
+  \`sqlite_*\`) are left out, and so are a virtual table's shadow tables (an FTS5 table's
+  \`<name>_data\`, \`_idx\` and the rest): creating the virtual table makes them again, and
+  inserting its rows fills them. A \`BLOB\` value is \`{ "$bytes": "<base64>" }\`; a number JSON
+  cannot hold is \`{ "$number": "NaN" }\` (or \`"Infinity"\`, \`"-Infinity"\`, \`"-0"\`). An
+  \`INTEGER\` beyond 2^53 is rounded to the nearest number JavaScript holds.
 - \`kv\`: each key-value entry as \`{ "key", "value" }\`. A value JSON cannot hold as itself is an
   object with one \`$\`-prefixed key naming its kind (\`$bytes\`, \`$date\`, \`$map\`, \`$set\`,
   \`$bigint\` and others), and a stored object that has a key starting with \`$\` is wrapped as

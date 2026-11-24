@@ -193,6 +193,16 @@ export class Gadget extends DurableObject {
     this.ctx.storage.kv.put("cycle", value);
   }
 
+  addSearch(body) {
+    this.ctx.storage.sql.exec("CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(body)");
+    this.ctx.storage.sql.exec("INSERT INTO search(body) VALUES (?)", body);
+  }
+
+  addBig() {
+    this.ctx.storage.sql.exec("CREATE TABLE big(n INTEGER)");
+    this.ctx.storage.sql.exec("INSERT INTO big VALUES (9007199254740993)");
+  }
+
   mintCallback() {
     return this.ctx.restore({ type: "callback" });
   }
@@ -307,6 +317,26 @@ describe("readGadgetStorage", () => {
     });
     expect(impl.storage.gadgetDataSizes.get(GADGET_ID).bytes).toBe(file.sizeBytes);
     expect(await (await gadgetOf(impl)).notes()).toStrictEqual(["only"]);
+  }));
+
+  it("leaves out an FTS5 table's shadow tables, which creating it makes again", () =>
+      withGadget(async impl => {
+    await (await gadgetOf(impl)).addSearch("hello world");
+    let file: GadgetDataFile = await impl.readGadgetStorage(GADGET_ID, "dump");
+    expect(file.sql).toStrictEqual([{
+      name: "search", createSql: "CREATE VIRTUAL TABLE search USING fts5(body)",
+      rows: [{ body: "hello world" }],
+    }]);
+  }));
+
+  // SqlStorage reads an INTEGER as a JavaScript number, so one past 2^53 arrives rounded, as
+  // data.json's documentation says.
+  it("copies an integer past 2^53 as the number SqlStorage reads it as", () =>
+      withGadget(async impl => {
+    await (await gadgetOf(impl)).addBig();
+    let file: GadgetDataFile = await impl.readGadgetStorage(GADGET_ID, "dump");
+    expect(file.sql.find(table => table.name === "big")!.rows)
+        .toStrictEqual([{ n: 9007199254740992 }]);
   }));
 
   it("copies a column named __proto__ from a real table", () => withGadget(async impl => {

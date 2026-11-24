@@ -289,8 +289,9 @@ the gadget and starts the Workshop's own class in its storage in its place:
 3. It reads within the export limits (`export-limits.ts`): `measure` asks for
    `ctx.storage.sql.databaseSize`; `dump` measures too, and refuses storage larger than 16 MB
    (`MAX_EXPORT_DATA_BYTES`) without reading any of it, naming the size and the limit. Otherwise
-   it asks for every table but the internal ones (`_cf_*`, `sqlite_*`) and every key-value entry
-   (`ctx.storage.kv.list()`, since `_cf_KV` cannot be read through SQL), encoded as
+   it asks for every table but the internal ones (`_cf_*`, `sqlite_*`) and a virtual table's shadow
+   tables (`PRAGMA table_list`'s `shadow`, which creating the virtual table makes again), and every
+   key-value entry (`ctx.storage.kv.list()`, since `_cf_KV` cannot be read through SQL), encoded as
    `GadgetDataFile` (`data.json`), which the reader sends as the UTF-8 bytes of its JSON, and
    fails once those pass 16 MB. The data crosses from the reader in one RPC message, which
    Workers caps at 32 MiB, and is held several times over while it is encoded and zipped, so its
@@ -897,7 +898,7 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
      wake, with no view opened, sees the notification delivered and the alarm armed, and every
      stored record outside notification delivery's own unchanged (the sessions, workspaces,
      connected accounts, profile and directory state among them).
-- `gadget-storage-reader.test.ts`: `data.json`'s encoding (rows lossless, BLOBs as `$bytes`,
+- `gadget-storage-reader.test.ts`: `data.json`'s encoding (rows as read, BLOBs as `$bytes`,
   each key-value kind JSON cannot hold tagged, an object with a `$` key wrapped, a value that
   refers to itself refused, a column named `__proto__` kept, internal tables left out, the byte
   limit stopping the read, and data.json's UTF-8 bytes held to the limit); the reader
@@ -905,11 +906,11 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   real gadget facet: a measure and a copy of its tables and key-value storage, the gadget coming
   back with its data, a connection and a stored persistent stub restored during a read each
   waiting for it and reaching the gadget's own class, storage over the limit refused before it is
-  dumped with its size and the limit named, a read that fails (on a value JSON cannot hold)
-  restoring the gadget, keeping nothing and releasing the lock, the lock released when the abort
-  that ends a read throws, two reads of one gadget in turn
-  with a code update between, a pending gadget refused, and the size forgotten when the gadget is
-  deleted.
+  dumped with its size and the limit named, an FTS5 table copied without its shadow tables, an
+  integer beyond 2^53 copied as SqlStorage rounds it, a read that fails (on a value JSON cannot
+  hold) restoring the gadget, keeping nothing and releasing the lock, the lock released when the
+  abort that ends a read throws, two reads of one gadget in turn with a code update between, a
+  pending gadget refused, and the size forgotten when the gadget is deleted.
 - `connection-creator.test.ts`: the creator stamped at each creation path, and absent on an ambient
   capsule and on a resource whose turn has no record; and which member sessions the live-session
   counts include: none of the owner's, a collaborator's by its role.

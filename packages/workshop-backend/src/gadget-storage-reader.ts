@@ -64,16 +64,23 @@ export class GadgetStorageReader extends DurableObject<Cloudflare.Env, GadgetSto
     let sql = this.ctx.storage.sql;
     let tables = sql.exec<{ name: string; sql: string }>(
         "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY rowid").toArray();
+    // A virtual table's shadow tables (an FTS5 index's `<name>_data`, `_idx` and the rest) are
+    // left out: creating the virtual table makes them again, and inserting its rows fills them.
+    let shadow = new Set(sql.exec<{ schema: string; name: string; type: string }>(
+        "PRAGMA table_list").toArray()
+        .filter(table => table.schema === "main" && table.type === "shadow")
+        .map(table => table.name));
     return encodeDataFile(encodeGadgetData({
       gadget: options.gadget,
       exportedAt: options.exportedAt,
       sizeBytes: sql.databaseSize,
-      sql: tables.filter(table => !isInternalTable(table.name)).map(table => ({
-        name: table.name,
-        createSql: table.sql,
-        // Read as the encoding reaches it, so a table past the limit is never read whole.
-        rows: { [Symbol.iterator]: () => tableRows(sql, table.name) },
-      })),
+      sql: tables.filter(table => !isInternalTable(table.name) && !shadow.has(table.name))
+          .map(table => ({
+            name: table.name,
+            createSql: table.sql,
+            // Read as the encoding reaches it, so a table past the limit is never read whole.
+            rows: { [Symbol.iterator]: () => tableRows(sql, table.name) },
+          })),
       kv: this.ctx.storage.kv.list(),
     }, options.maxBytes), options.maxBytes);
   }
