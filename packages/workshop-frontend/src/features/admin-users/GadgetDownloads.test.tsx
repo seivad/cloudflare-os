@@ -42,7 +42,7 @@ const fakeViews = (overrides: Record<string, unknown> = {}) => {
     describe: async () => ({ workpieces: [{ id: 'a', type: 'gadget', title: 'My Todo' }] }),
     listGatekeepers: async () => [],
     getDiagnostics: async () => ({ storageBytes: 1 }),
-    listGadgetDataSizes: async () => [{ gadgetId: 'a', bytes: 2048, measuredAt: new Date('2026-11-20T10:00:00Z') }],
+    getGadgetStorageSizes: async () => [{ gadgetId: 'a', bytes: 2048, measuredAt: new Date('2026-11-20T10:00:00Z') }],
     exportGadget: vi.fn<(id: string, mode: string) => Promise<ReadableStream<Uint8Array>>>(async (_id, mode) => streamOf(`export ${mode}`)),
     measureGadget: vi.fn<(id: string) => Promise<{ bytes: number; measuredAt: Date }>>(
       async () => ({ bytes: 5120, measuredAt: new Date('2026-11-23T10:00:00Z') })),

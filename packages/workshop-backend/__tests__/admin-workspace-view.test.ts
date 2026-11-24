@@ -618,7 +618,7 @@ async function everyAnswer(ws: Workspace, view: AdminWorkspaceView) {
     listAutoApprovals: await view.listAutoApprovals(),
     listBlueprints: await view.listBlueprints(),
     getDiagnostics: await view.getDiagnostics(),
-    listGadgetDataSizes: await view.listGadgetDataSizes(),
+    getGadgetStorageSizes: await view.getGadgetStorageSizes(),
   };
 }
 
@@ -695,7 +695,7 @@ describe("a metadata view", () => {
     await view.listAutoApprovals();
     await view.listBlueprints();
     await view.getDiagnostics();
-    await view.listGadgetDataSizes();
+    await view.getGadgetStorageSizes();
     expect(await codeOf(view.measureGadget(ws.gadgetId)))
         .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
     expect(await codeOf(view.exportGadget(ws.gadgetId, "code")))
@@ -724,7 +724,7 @@ describe("a metadata view", () => {
       ["listAutoApprovals", {}, "metadata", undefined],
       ["listBlueprints", {}, "metadata", undefined],
       ["getDiagnostics", {}, "metadata", undefined],
-      ["listGadgetDataSizes", {}, "metadata", undefined],
+      ["getGadgetStorageSizes", {}, "metadata", undefined],
       ["measureGadget", { gadgetId: ws.gadgetId }, "metadata",
        ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
       ["exportGadget", { gadgetId: ws.gadgetId, mode: "code" }, "metadata",
@@ -1003,11 +1003,11 @@ describe("measuring a gadget", () => {
     ws.config.adminWorkspaceAccess = "content";
     expect(await codeOf(view.measureGadget(ws.gadgetId)))
         .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
-    expect(await view.listGadgetDataSizes()).toStrictEqual([]);
+    expect(await view.getGadgetStorageSizes()).toStrictEqual([]);
     expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.access, r.refused]))
         .toStrictEqual([
           ["measureGadget", "metadata", ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
-          ["listGadgetDataSizes", "metadata", undefined],
+          ["getGadgetStorageSizes", "metadata", undefined],
         ]);
   }));
 
@@ -1019,7 +1019,7 @@ describe("measuring a gadget", () => {
     let measured = await view.measureGadget(ws.gadgetId);
     expect(measured).toStrictEqual({ bytes: expect.any(Number), measuredAt: expect.any(Date) });
     expect(measured.bytes).toBeGreaterThan(0);
-    expect(await view.listGadgetDataSizes())
+    expect(await view.getGadgetStorageSizes())
         .toStrictEqual([{ gadgetId: ws.gadgetId, ...measured }]);
 
     // The measurement is the one thing written to the workspace.
@@ -1034,7 +1034,7 @@ describe("measuring a gadget", () => {
     let records = (await deploymentRecords(ws)).slice(1);
     expect(records.map(r => [r.method, r.args, r.access, r.refused])).toStrictEqual([
       ["measureGadget", { gadgetId: ws.gadgetId }, "content", undefined],
-      ["listGadgetDataSizes", {}, "content", undefined],
+      ["getGadgetStorageSizes", {}, "content", undefined],
     ]);
     // A size is not content.
     let exposed = await runInDurableObject(env.TEST_ADMIN_AUDIT.getByName(""), (_log, state) =>
@@ -1051,13 +1051,13 @@ describe("measuring a gadget", () => {
     await view.measureGadget(ws.gadgetId);
     // A size kept for a gadget since deleted (as by a removal racing the read) is not listed.
     ws.impl.storage.gadgetDataSizes.put({ gadgetId: 998, bytes: 1, measuredAt: new Date(0) });
-    expect((await view.listGadgetDataSizes()).map(size => size.gadgetId))
+    expect((await view.getGadgetStorageSizes()).map(size => size.gadgetId))
         .toStrictEqual([ws.gadgetId]);
     expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.refused]))
         .toStrictEqual([
           ["measureGadget", { gadgetId: 999 }, undefined],
           ["measureGadget", { gadgetId: ws.gadgetId }, undefined],
-          ["listGadgetDataSizes", {}, undefined],
+          ["getGadgetStorageSizes", {}, undefined],
         ]);
   }));
 });
@@ -1097,12 +1097,12 @@ describe("exporting a gadget", () => {
     ws.config.adminWorkspaceAccess = "content";
     expect(await codeOf(view.exportGadget(ws.gadgetId, "everything")))
         .toBe(ADMIN_ACCESS_ERROR_CODES.accessInsufficient);
-    expect(await view.listGadgetDataSizes()).toStrictEqual([]);
+    expect(await view.getGadgetStorageSizes()).toStrictEqual([]);
     expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.access, r.refused]))
         .toStrictEqual([
           ["exportGadget", { gadgetId: ws.gadgetId, mode: "everything" }, "metadata",
            ADMIN_ACCESS_ERROR_CODES.accessInsufficient],
-          ["listGadgetDataSizes", {}, "metadata", undefined],
+          ["getGadgetStorageSizes", {}, "metadata", undefined],
         ]);
     // A refused call answered with nothing.
     expect((await exposedColumn(ws)).map(row => row.exposed))
@@ -1147,14 +1147,14 @@ describe("exporting a gadget", () => {
     expect(data.gadget).toStrictEqual({ id: ws.gadgetId, name: "Notes" });
     expect(decoder.decode(entries.get("README.md"))).toContain("| `notes.data.json` |");
 
-    let [size] = await view.listGadgetDataSizes();
+    let [size] = await view.getGadgetStorageSizes();
     expect(size).toStrictEqual({
       gadgetId: ws.gadgetId, bytes: data.sizeBytes, measuredAt: expect.any(Date),
     });
     expect((await deploymentRecords(ws)).slice(1).map(r => [r.method, r.args, r.access]))
         .toStrictEqual([
           ["exportGadget", { gadgetId: ws.gadgetId, mode: "everything" }, "content"],
-          ["listGadgetDataSizes", {}, "content"],
+          ["getGadgetStorageSizes", {}, "content"],
         ]);
     expect((await exposedColumn(ws)).map(row => row.exposed))
         .toStrictEqual(["metadata", "content", "metadata"]);

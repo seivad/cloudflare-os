@@ -1984,7 +1984,7 @@ export const ADMIN_WORKSPACE_METHODS = [
   "listActions", "listFiles", "getCommitLog", "listFilesAtCommit", "listChangedPaths",
   "listPendingChanges", "listGatekeepers", "listObservers", "listObserverRequirements",
   "listShareLinks", "listAutoApprovals", "listBlueprints", "getDiagnostics", "measureGadget",
-  "listGadgetDataSizes", "exportGadget",
+  "getGadgetStorageSizes", "exportGadget",
 ] as const satisfies readonly ("inspectWorkspace" | keyof AdminWorkspaceView)[];
 
 /** One of ADMIN_WORKSPACE_METHODS. */
@@ -2647,8 +2647,8 @@ export interface AdminApi {
 
   /**
    * Open a read-only view of a user's account to investigate it (see AdminUserView), as
-   * inspectWorkspace() opens one of a workspace: showing what the "metadata" level shows at any
-   * level above "off", with `reason` and `options` under the same rules, and refused while the
+   * inspectWorkspace() opens one of a workspace: at the "metadata" level, even while the level is
+   * "content", with `reason` and `options` under the same rules, and refused while the
    * deployment's one access level (AdminSettingsView.adminWorkspaceAccess.effective) is "off".
    * `userId` is the user's canonical id, exactly as listUsers() lists it. The open is recorded as
    * an AdminUserAccessRecord ("inspectUser") before the view is returned, so an open whose record
@@ -2787,7 +2787,8 @@ export type AdminGadgetMeasurement = {
   measuredAt: Date;
 };
 
-/** A gadget's last measured data size, as AdminWorkspaceView.listGadgetDataSizes() lists it. */
+/** A gadget's last measured data size, as AdminWorkspaceView.getGadgetStorageSizes() lists
+ * it. */
 export type AdminGadgetDataSize = {
   /** The gadget. */
   gadgetId: WorkpieceId;
@@ -3060,19 +3061,20 @@ export interface AdminWorkspaceView extends RpcTarget {
   getDiagnostics(): Promise<AdminWorkspaceDiagnostics>;
 
   /**
-   * Measures the size of a permanent gadget's stored data, and keeps it as the gadget's last
-   * measured size (listGadgetDataSizes()). Needs the "content" level, though it answers with a
-   * size alone: only a facet running in the gadget's storage can read it, so the gadget is paused
-   * while the Workshop's own reader takes its place, and anyone connected to it sees it reconnect
-   * once. Calls that reach the gadget meanwhile wait for it. Throws for a pending gadget, a
-   * worktree, or an id that names no gadget, and when the read takes longer than an export may.
+   * Measures the size of a permanent gadget's storage (see AdminGadgetMeasurement), and keeps it
+   * as the gadget's last measured size (getGadgetStorageSizes()). Needs the "content" level,
+   * though it answers with a size alone: only a facet running in the gadget's storage can read it,
+   * so the gadget is paused while the Workshop's own reader takes its place, and anyone connected
+   * to it sees it reconnect once. Calls that reach the gadget meanwhile wait for it. Throws for a
+   * pending gadget, a worktree, or an id that names no gadget, and when the read takes longer than
+   * an export may.
    */
   measureGadget(gadgetId: WorkpieceId): Promise<AdminGadgetMeasurement>;
 
-  /** The size each gadget's data had when last measured or copied by an admin, for the gadgets
-   * that still exist and have been measured, in gadget id order. Reads only what the workspace
-   * kept of those measurements: no gadget is paused or asked. */
-  listGadgetDataSizes(): Promise<AdminGadgetDataSize[]>;
+  /** The size each gadget's storage had when last measured or copied by an admin, for the gadgets
+   * that still exist and have been measured. They come in gadget id order, read only from what
+   * the workspace kept of those measurements: no gadget is paused or asked. */
+  getGadgetStorageSizes(): Promise<AdminGadgetDataSize[]>;
 
   /**
    * A copy of a permanent gadget, as a file to save. Needs the "content" level, and is the one

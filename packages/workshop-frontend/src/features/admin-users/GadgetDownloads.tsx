@@ -25,7 +25,7 @@ export const describeMeasurement = (measured: Measured | undefined): string =>
  * record a fresh measurement. Reading them is a metadata call and pauses nothing.
  */
 const useGadgetSizes = (views: AdminViews) => {
-  const state = useOwnedWorkspaceData<AdminGadgetDataSize[]>(views, (view) => view.listGadgetDataSizes())
+  const state = useOwnedWorkspaceData<AdminGadgetDataSize[]>(views, (view) => view.getGadgetStorageSizes())
   const [measured, setMeasured] = useState<ReadonlyMap<WorkpieceId, Measured>>(new Map())
   const sizeOf = (gadgetId: WorkpieceId): Measured | undefined => {
     const fresh = measured.get(gadgetId)

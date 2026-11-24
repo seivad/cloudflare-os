@@ -15623,8 +15623,8 @@ class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
         () => this.#impl.readGadgetStorage(gadgetId, "measure"), "content");
   }
 
-  async listGadgetDataSizes(): Promise<AdminGadgetDataSize[]> {
-    return this.#call("listGadgetDataSizes", {}, () => {
+  async getGadgetStorageSizes(): Promise<AdminGadgetDataSize[]> {
+    return this.#call("getGadgetStorageSizes", {}, () => {
       let storage = this.#impl.storage;
       return [...storage.gadgetDataSizes.list()]
           .filter(({gadgetId}) => storage.gadgets.get(gadgetId)?.type === "gadget")

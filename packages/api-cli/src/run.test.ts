@@ -781,13 +781,18 @@ test("an unknown command or option says which was meant: a near name, or where t
   real(["list-worksapces"], /Did you mean list-workspaces\? /);
 });
 
-test("an admin's view of a workspace has seventeen commands, and none reads content", () => {
-  assert.deepEqual(Object.keys(realTable.nodes.AdminWorkspaceView.commands).toSorted(), [
-    "describe", "get-chat-state", "get-commit-log", "get-diagnostics", "list-actions", "list-auto-approvals",
-    "list-blueprints", "list-changed-paths", "list-chat-attachments", "list-chats", "list-files",
-    "list-files-at-commit", "list-gatekeepers", "list-observer-requirements", "list-observers",
-    "list-pending-changes", "list-share-links",
+test("an admin's view of a workspace has twenty commands: none reads a chat or a file, and those reading a gadget's data need \"content\"", () => {
+  const commands = realTable.nodes.AdminWorkspaceView.commands;
+  assert.deepEqual(Object.keys(commands).toSorted(), [
+    "describe", "export-gadget", "get-chat-state", "get-commit-log", "get-diagnostics", "get-gadget-storage-sizes",
+    "list-actions", "list-auto-approvals", "list-blueprints", "list-changed-paths", "list-chat-attachments",
+    "list-chats", "list-files", "list-files-at-commit", "list-gatekeepers", "list-observer-requirements",
+    "list-observers", "list-pending-changes", "list-share-links", "measure-gadget",
   ]);
+  // At the default "metadata" level nothing reads content: the commands that read a gadget's code
+  // or stored data say they need the level above it, and no other does.
+  assert.deepEqual(Object.keys(commands).filter((name) => /\bNeeds the "content" level\b/.test(commands[name].doc.replace(/\s+/g, " "))).toSorted(),
+    ["export-gadget", "measure-gadget"]);
   for (const name of ["get-chat", "read-chat-attachment", "read-file", "read-file-at-commit", "read-pending-file"]) {
     assert.throws(() => parseInvocation(realTable, ["get-admin-api", "inspect-workspace", "w", "why", name]),
       (error: Error) => error instanceof UsageError && error.message.startsWith(`AdminWorkspaceView has no command "${name}"`));

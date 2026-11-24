@@ -204,8 +204,8 @@ the matching `Overseer` reads are where there is one:
   for each connection. `listObserverRequirements()` lists what a recipient of a share would have
   to verify: the connections that sharing the workspace, or one gadget, asks them to pass.
 - **Gadget data**: `measureGadget()`, which needs `"content"`, measures the size of a permanent
-  gadget's stored data and keeps it; `listGadgetDataSizes()` lists the sizes kept, each with when
-  it was measured, for the gadgets that still exist, reading nothing else.
+  gadget's stored data and keeps it; `getGadgetStorageSizes()` lists the sizes kept, each with
+  when it was measured, for the gadgets that still exist, reading nothing else.
 - **A copy of a gadget**: `exportGadget(gadgetId, mode)`, which needs `"content"`, returns a file to
   save: the gadget's code as a `.gadget` blueprint archive (`"code"`), or that archive in a ZIP with
   the gadget's stored data and a README (`"everything"`). See
@@ -671,7 +671,7 @@ read nothing the level withholds:
 | `listAutoApprovals()` | Each rule's connection, kind of action and who turned it on | Nothing |
 | `listBlueprints()` | Each published blueprint's title, description, version and code date | Each `id`, and `screenshotUrl`, which holds the id |
 | `getDiagnostics()` | Counts, the chats with an agent turn recorded, the storage's version and size, times and who is present | Nothing |
-| `listGadgetDataSizes()` | Each measured gadget's id, its data's size and when it was measured | Nothing: it reads the sizes kept, never a gadget |
+| `getGadgetStorageSizes()` | Each measured gadget's id, its data's size and when it was measured | Nothing: it reads the sizes kept, never a gadget |
 | `measureGadget()` (needs `"content"`) | The size of a gadget's stored data, and when it was measured | The data: the reader measures it, and only the size leaves the server |
 | `exportGadget()` (needs `"content"`) | A gadget's committed files as a blueprint archive, with, for `"everything"`, its stored data and a README | The gadget's history and commit messages, its chats and everything else of the workspace |
 
@@ -855,7 +855,7 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   RPC, and none that reads content (a helper must be `#private`: the class's public members, not its
   interface, are its RPC surface). `measureGadget()` refused and recorded below `"content"`; at
   `"content"`, answered, recorded at it with `exposed` `metadata`, and its size the one thing
-  written to the workspace; a failed read recorded; and `listGadgetDataSizes()` leaving out a
+  written to the workspace; a failed read recorded; and `getGadgetStorageSizes()` leaving out a
   gadget since deleted. `exportGadget()` refused and recorded below `"content"` (stored as
   `metadata`); `"code"` an archive of the head's files with the metadata publishing derives, its
   release the files' snapshot release, leaving the workspace as it was; `"everything"` a ZIP of

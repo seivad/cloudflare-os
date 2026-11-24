@@ -215,12 +215,12 @@ async function importAndInstall(archive: Uint8Array) {
 it("measures a gadget's stored data, and the gadget goes on with its data", async () => {
   await withNotesGadget(["first", "second"], async ({ gadget, gadgetId, workspaceId }) => {
     using view = await inspect(workspaceId);
-    expect(await view.listGadgetDataSizes()).toEqual([]);
+    expect(await view.getGadgetStorageSizes()).toEqual([]);
 
     const measured = await view.measureGadget(gadgetId);
     expect(measured.bytes).toBeGreaterThan(0);
     expect(measured.measuredAt).toBeInstanceOf(Date);
-    expect(await view.listGadgetDataSizes()).toEqual([{ gadgetId, ...measured }]);
+    expect(await view.getGadgetStorageSizes()).toEqual([{ gadgetId, ...measured }]);
 
     expect(await notesOf(gadget)).toEqual({ bodies: ["first", "second"], count: 2 });
     using facet = await gadget.connectToGadget() as NotesGadget;
@@ -228,7 +228,7 @@ it("measures a gadget's stored data, and the gadget goes on with its data", asyn
 
     const { records } = await admin.listAdminAudit({ kind: "workspace", limit: 2 });
     expect(records.map(record => [record.method, record.access, record.refused])).toEqual([
-      ["listGadgetDataSizes", "content", undefined],
+      ["getGadgetStorageSizes", "content", undefined],
       ["measureGadget", "content", undefined],
     ]);
   });
@@ -249,7 +249,7 @@ it("copies a gadget's code as a blueprint archive another account imports and in
 
     // Code alone: the gadget was never paused, so the connection made before the copy goes on.
     expect(await connected.notes()).toEqual({ bodies: ["kept"], count: 1 });
-    expect(await view.listGadgetDataSizes()).toEqual([]);
+    expect(await view.getGadgetStorageSizes()).toEqual([]);
     const [record] = (await admin.listAdminAudit({ kind: "workspace", limit: 2 })).records.slice(1);
     expect(record).toMatchObject({
       kind: "workspace", workspaceId, method: "exportGadget", args: { gadgetId, mode: "code" },
@@ -279,7 +279,7 @@ it("copies everything: the code archive, the gadget's data.json and a README", a
       }],
       kv: [{ key: "count", value: 2 }],
     });
-    expect(await view.listGadgetDataSizes())
+    expect(await view.getGadgetStorageSizes())
         .toEqual([{ gadgetId, bytes: data.sizeBytes, measuredAt: expect.any(Date) }]);
     expect(new TextDecoder().decode(entries.get("README.md"))).toContain("**Import blueprint**");
 
@@ -292,7 +292,7 @@ it("copies everything: the code archive, the gadget's data.json and a README", a
     expect(await notesOf(gadget)).toEqual({ bodies: ["first", "second"], count: 2 });
     const { records } = await admin.listAdminAudit({ kind: "workspace", limit: 2 });
     expect(records.map(record => [record.method, record.args, record.access])).toEqual([
-      ["listGadgetDataSizes", {}, "content"],
+      ["getGadgetStorageSizes", {}, "content"],
       ["exportGadget", { gadgetId, mode: "everything" }, "content"],
     ]);
   });
@@ -377,7 +377,7 @@ it("refuses measureGadget and exportGadget below content, recording each refusal
         method: "exportGadget", args: { gadgetId, mode: "everything" }, access: "metadata",
         refused: ADMIN_ACCESS_ERROR_CODES.accessInsufficient,
       });
-      expect(await view.listGadgetDataSizes()).toEqual([]);
+      expect(await view.getGadgetStorageSizes()).toEqual([]);
       // The gadget was never paused.
       using facet = await gadget.connectToGadget() as NotesGadget;
       expect(await facet.notes()).toEqual({ bodies: ["kept"], count: 1 });

@@ -1599,7 +1599,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         },
       }),
       // Each gadget's stored data size as an admin last measured or copied it
-      // (OverseerImpl.readGadgetStorage()), which AdminWorkspaceView.listGadgetDataSizes() lists.
+      // (OverseerImpl.readGadgetStorage()), which AdminWorkspaceView.getGadgetStorageSizes() lists.
       // Forgotten when the gadget is deleted.
       gadgetDataSizes: collection<{gadgetId: WorkpieceId; bytes: number; measuredAt: Date}>()({
         primaryKey: "gadgetId",
