@@ -869,9 +869,10 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   release the files' snapshot release, leaving the workspace as it was; `"everything"` a ZIP of
   that archive, the `data.json` a dump reads and the README, keeping the size; each recorded once
   with its mode and stored as `content`; a pending gadget, an unknown id and a gadget with no files
-  refused and recorded; and a copy past its size limit failing with the limit named, the gadget
-  readable after; "everything" refused for data past its own limit before reading it, with
-  "code" still copying; and a copy that runs out of time ending its data read with it.
+  refused and recorded, the first two before the owner's account is asked anything; and a copy
+  past its size limit failing with the limit named, the gadget readable after; "everything"
+  refused for data past its own limit before reading it, with "code" still copying; and a copy
+  that runs out of time ending its data read with it, or never starting one.
 - `admin-gadget-export.test.ts`: the code archive reading back as Import blueprint reads it (its
   metadata, and its pack's files), and the `"everything"` ZIP holding the archive, the data as
   given and the README.

@@ -1184,6 +1184,27 @@ describe("exporting a gadget", () => {
         .toStrictEqual(["metadata", "content", "content", "content"]);
   }));
 
+  it("refuses a gadget with no committed code before asking the owner's account anything",
+      () => withWorkspace(async ws => {
+    let users = ws.impl.users;
+    let asked = 0;
+    ws.impl.users = { ...users, get: (id: unknown) => ({
+      ...users.get(id), whoami: async () => (asked++, OWNER),
+    }) };
+    try {
+      let pending = ws.impl.createGadget("Draft gadget", "DRAFT", DRAFT_CHAT_ID);
+      await expect(ws.impl.exportGadgetCopy(999, "code"))
+          .rejects.toThrow("No gadget with committed code has id 999.");
+      await expect(ws.impl.exportGadgetCopy(pending.id, "everything"))
+          .rejects.toThrow(`No gadget with committed code has id ${pending.id}.`);
+      expect(asked).toBe(0);
+      await ws.impl.exportGadgetCopy(ws.gadgetId, "code");
+      expect(asked).toBe(1);
+    } finally {
+      ws.impl.users = users;
+    }
+  }));
+
   it("fails a copy past the size limit, naming it, and leaves the gadget readable",
       () => withWorkspace(async ws => {
     const TOO_LARGE = "The copy of the gadget is larger than 100 bytes, the most an export holds.";

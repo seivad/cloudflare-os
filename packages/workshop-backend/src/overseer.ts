@@ -5650,14 +5650,21 @@ class OverseerImpl implements AgentHooks {
 
   async #buildGadgetCopy(gadgetId: WorkpieceId, mode: AdminGadgetExportMode, maxBytes: number,
       maxDataBytes: number, deadline: ExportDeadline): Promise<Uint8Array> {
+    let committedRecord = (): GadgetRecord & {commitId: string} => {
+      let record = this.storage.gadgets.get(gadgetId);
+      if (record?.type !== "gadget" || record.pending || record.commitId === undefined) {
+        throw new Error(`No gadget with committed code has id ${gadgetId}.`);
+      }
+      return record as GadgetRecord & {commitId: string};
+    };
+    // Checked first, so that an id naming no such gadget reads nothing, the owner's account
+    // included.
+    committedRecord();
     // The owner is the author, as when they publish.
     let author = await retryOnDoReset(() => this.ownerUserDo().whoami(), this.logger);
-    // Read after the await, with nothing awaited from here to the bindings, so that the files and
-    // the bindings are of one head.
-    let record = this.storage.gadgets.get(gadgetId);
-    if (record?.type !== "gadget" || record.pending || record.commitId === undefined) {
-      throw new Error(`No gadget with committed code has id ${gadgetId}.`);
-    }
+    // Read again after the await, with nothing awaited from here to the bindings, so that the
+    // files and the bindings are of one head.
+    let record = committedRecord();
     let files = this.gitCache.readCommitFiles(record.commitId);
     if (files.size === 0) throw new Error(`Gadget ${gadgetId} has no code to copy.`);
     let exportedAt = new Date();
