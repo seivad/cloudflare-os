@@ -321,10 +321,11 @@ it("lists users and workspaces from the deployment directory", async () => {
 
   const listed = await waitFor("the new user to be listed", async () =>
     (await admin.listUsers({ query: ownerName })).users.find(user => user.id === ownerName) ?? null);
-  // A new account owns no workspace the directory lists yet.
+  // A new account owns no workspace the directory lists yet, and its first session reported what
+  // it has spent: nothing.
   expect(listed).toEqual({
     id: ownerName, name: "Dir Owner", created: expect.any(Date), lastLogin: expect.any(Date),
-    isAdmin: false, ownedWorkspaces: 0,
+    isAdmin: false, ownedWorkspaces: 0, totalCost: 0,
   });
   // Asked through the second admin's capability, which lists the same directory.
   for (const username of [ADMIN_USERNAME, AUDITOR_USERNAME]) {

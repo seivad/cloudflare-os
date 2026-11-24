@@ -4,7 +4,7 @@ import {
   ADMIN_ACCESS_ERROR_CODES, ADMIN_USER_METHODS, getAdminAccessErrorCode,
   MAX_ADMIN_ACCESS_REASON_LENGTH, MAX_ADMIN_VIEW_LIFETIME_SECONDS, type AdminAccessErrorCode,
   type AdminApi, type AdminUserAccessRecord, type AdminUserView, type AiChatAuthorInfo,
-  type AuthenticatedApi, type WorkpieceId,
+  type AuthenticatedApi, type UserCostSummary, type WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import { diffFiles } from "@gadgets/workshop-shared/code-change";
 import {
@@ -152,11 +152,13 @@ const headOf = (workpieces: WorkpieceRecorder, gadgetId: WorkpieceId, after?: st
         summary.commitId !== after ? summary.commitId : null;
   });
 
-/** What a user sees of their own account: who they are, their workspaces, their connections. */
+/** What a user sees of their own account: who they are, their workspaces, their connections,
+ * what they have spent. */
 type Seen = {
   profile: AiChatAuthorInfo;
   workspaces: { id: string; title: string }[];
   accounts: ConnectedAccount[];
+  costs: UserCostSummary;
 };
 
 async function seenBy(api: RpcStub<AuthenticatedApi>): Promise<Seen> {
@@ -164,6 +166,7 @@ async function seenBy(api: RpcStub<AuthenticatedApi>): Promise<Seen> {
     profile: await api.whoami(),
     workspaces: (await api.listWorkspaces()).map(({ id, title }) => ({ id, title })),
     accounts: await listConnectedAccounts(api),
+    costs: await api.getMyCostSummary(),
   };
 }
 
@@ -252,6 +255,7 @@ async function answersOf(view: RpcStub<AdminUserView>, run: Run = (_method, call
     listSessions: await run("listSessions", () => view.listSessions()),
     listBlueprints: await run("listBlueprints", () => view.listBlueprints()),
     getDiagnostics: await run("getDiagnostics", () => view.getDiagnostics()),
+    getCostSummary: await run("getCostSummary", () => view.getCostSummary()),
   };
 }
 
@@ -364,6 +368,14 @@ it("records every call into an account, and withholds what its user can read", a
     expect(Object.keys(session)
         .filter(key => !["created", "expiresAt", "pendingUntil"].includes(key))).toEqual([]);
   }
+
+  // The cost summary is the one the user reads of themselves: here, of an account that has spent
+  // nothing.
+  expect(answers.getCostSummary).toEqual(user.seen.costs);
+  expect(answers.getCostSummary).toEqual({
+    totalCost: 0, byKind: {}, byModel: {}, workspaces: [],
+    deletedWorkspaces: { totalCost: 0, lines: [] }, own: { totalCost: 0, lines: [] },
+  });
 
   // A user's records are those of their account and of the workspaces they own.
   using _workspaceView = await admin.inspectWorkspace(user.workspace.id, REASON);
