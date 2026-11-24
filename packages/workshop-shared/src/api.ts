@@ -715,10 +715,6 @@ export type DeviceSessionHandoffStart = {
   ticket: string;
 };
 
-/**
- * Top-level API exposed to the user after they have authenticated, from which they reach their
- * workspaces and the gadgets in them.
- */
 /** What a voice model does: turn speech into text, or text into speech. */
 export type VoiceModelKind = "transcribe" | "speak";
 
@@ -768,6 +764,10 @@ export const MAX_VOICE_AUDIO_BYTES = 10 * 1024 * 1024;
 /** The most characters one `speak()` takes. A longer reply is spoken in parts. */
 export const MAX_SPEAK_CHARS = 2000;
 
+/**
+ * Top-level API exposed to the user after they have authenticated, from which they reach their
+ * workspaces and the gadgets in them.
+ */
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
