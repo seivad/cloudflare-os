@@ -95,4 +95,6 @@ leaves the server ([admin-access.md](admin-access.md#copying-a-gadget) has the w
 | `"everything"` | `<slug>.zip` | That archive, `<slug>.data.json` (the gadget's SQLite tables and key-value storage, `"format": "cloudflare-os/gadget-data"`, `"version": 1`) and a `README.md` saying what each file is. Taking the data pauses the gadget, so anyone connected reconnects once. |
 
 `<slug>` is `fileNameSlug()` of the gadget's title. Nothing imports a `data.json` yet: it restores
-by hand, as its README says. The export limits apply: 30 seconds and 100 MB.
+by hand, as its README says. The export limits apply: 30 seconds and 100 MB for the copy, and
+16 MB for the data in an `"everything"` copy, measured before it is read, so a gadget with more
+can be copied as `"code"` alone.

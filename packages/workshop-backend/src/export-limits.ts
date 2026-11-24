@@ -4,6 +4,20 @@ export const MAX_EXPORT_DURATION_MS = 30_000;
 /** Largest export the Workshop will stream. */
 export const MAX_EXPORT_BYTES = 100 * 1024 * 1024;
 
+/**
+ * Largest gadget data an admin's copy reads (OverseerImpl.readGadgetStorage()): the storage as
+ * measured, and data.json as UTF-8. The reader hands data.json to the Overseer in one RPC message,
+ * which Workers caps at 32 MiB, and the copy is held several times over while it is encoded and
+ * zipped, inside one isolate's 128 MB; a quarter of the RPC cap leaves room for both.
+ */
+export const MAX_EXPORT_DATA_BYTES = 16 * 1024 * 1024;
+
+/** A size in bytes as a limit's message names it: bytes below a megabyte, megabytes above. */
+export function describeBytes(bytes: number): string {
+  const megabyte = 1024 * 1024;
+  return bytes < megabyte ? `${bytes} bytes` : `${Number((bytes / megabyte).toFixed(1))} MB`;
+}
+
 /** A deadline shared by export setup and stream delivery. */
 export type ExportDeadline = ReturnType<typeof createExportDeadline>;
 
@@ -11,11 +25,19 @@ export type ExportDeadline = ReturnType<typeof createExportDeadline>;
 export function createExportDeadline(message: string, durationMs = MAX_EXPORT_DURATION_MS) {
   const expired = Promise.withResolvers<never>();
   const error = new Error(message);
-  const timer = setTimeout(() => expired.reject(error), durationMs);
+  let hasExpired = false;
+  const timer = setTimeout(() => {
+    hasExpired = true;
+    expired.reject(error);
+  }, durationMs);
   expired.promise.catch(() => {});
 
   return {
     error,
+    /** Whether the deadline has passed: work that has not started yet need not. */
+    get expired(): boolean {
+      return hasExpired;
+    },
     race<T>(work: Promise<T>): Promise<T> {
       return Promise.race([work, expired.promise]);
     },

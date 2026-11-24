@@ -287,10 +287,16 @@ the gadget and starts the Workshop's own class in its storage in its place:
    `ctx.exports` has it, and no binding names it, so nothing but a facet runs it; it refuses every
    call that does not carry the nonce, and never writes.
 3. It reads within the export limits (`export-limits.ts`): `measure` asks for
-   `ctx.storage.sql.databaseSize`; `dump` asks for every table but the internal ones (`_cf_*`,
-   `sqlite_*`) and every key-value entry (`ctx.storage.kv.list()`, since `_cf_KV` cannot be read
-   through SQL), encoded as `GadgetDataFile` (`data.json`), and fails once the encoding passes
-   100 MB. A read that takes longer than 30 seconds fails too.
+   `ctx.storage.sql.databaseSize`; `dump` measures too, and refuses storage larger than 16 MB
+   (`MAX_EXPORT_DATA_BYTES`) without reading any of it, naming the size and the limit. Otherwise
+   it asks for every table but the internal ones (`_cf_*`, `sqlite_*`) and every key-value entry
+   (`ctx.storage.kv.list()`, since `_cf_KV` cannot be read through SQL), encoded as
+   `GadgetDataFile` (`data.json`), which the reader sends as the UTF-8 bytes of its JSON, and
+   fails once those pass 16 MB. The data crosses from the reader in one RPC message, which
+   Workers caps at 32 MiB, and is held several times over while it is encoded and zipped, so its
+   limit is well under both that and the isolate's memory. A read that takes longer than 30
+   seconds fails too; one that is part of a copy shares the copy's 30 seconds, ends when the copy
+   does, and never starts, pausing nothing, once they are up.
 4. A read that succeeds keeps the size as the gadget's last measured (`gadgetDataSizes`, forgotten
    when the gadget is deleted). On every path, the reader is aborted, the gadget's
    `#runningChatIds` entry reset and the lock released, so the next call to the gadget starts its
@@ -327,15 +333,17 @@ stream of the bytes built. It returns the file alone; the browser names it `<slu
   version 1. Nothing is published, and the gadget is not paused.
 - **`"everything"`** is a ZIP of `<slug>.gadget` (that archive), `<slug>.data.json` and
   `README.md`. The data is read as `measureGadget()` reads (the steps above), its size kept as the
-  gadget's last measured; `readGadgetStorage(…, "dumpJson")` hands over the JSON text the reader
+  gadget's last measured; `readGadgetStorage(…, "dumpJson")` hands over the UTF-8 JSON the reader
   wrote, which goes into the ZIP as it is, so a copy near the limit is not parsed and written out
   again. The README says what each file is, and that the data restores by hand for now: nothing
   imports a `data.json`, and a gadget made from the archive starts empty.
 
 A pending gadget, a worktree, an unknown id and a gadget whose head holds no files are refused,
-reading nothing. The copy fails, naming the limit, once it would be larger than 100 MB or take
-longer than 30 seconds (`export-limits.ts`); the data read inside it has the same limits of its
-own. A copy's record is stored with `exposed` `content` (see
+reading nothing. The copy fails, naming the limit, once it would be larger than 100 MB
+(`MAX_EXPORT_BYTES`) or take longer than 30 seconds (`export-limits.ts`). The data in an
+"everything" copy has a limit of its own, 16 MB (`MAX_EXPORT_DATA_BYTES`, above): a gadget whose
+storage is larger is refused before its data is read, and its code alone can still be copied. A
+copy's record is stored with `exposed` `content` (see
 [Three kinds of record](#three-kinds-of-record)), whether its read succeeded or failed; a refused
 one is `metadata`.
 
@@ -862,7 +870,8 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
   that archive, the `data.json` a dump reads and the README, keeping the size; each recorded once
   with its mode and stored as `content`; a pending gadget, an unknown id and a gadget with no files
   refused and recorded; and a copy past its size limit failing with the limit named, the gadget
-  readable after.
+  readable after; "everything" refused for data past its own limit before reading it, with
+  "code" still copying; and a copy that runs out of time ending its data read with it.
 - `admin-gadget-export.test.ts`: the code archive reading back as Import blueprint reads it (its
   metadata, and its pack's files), and the `"everything"` ZIP holding the archive, the data as
   given and the README.
@@ -890,11 +899,12 @@ Unit suites, in `packages/workshop-backend/__tests__/`:
 - `gadget-storage-reader.test.ts`: `data.json`'s encoding (rows lossless, BLOBs as `$bytes`,
   each key-value kind JSON cannot hold tagged, an object with a `$` key wrapped, a value that
   refers to itself refused, a column named `__proto__` kept, internal tables left out, the byte
-  limit stopping the read); the reader
+  limit stopping the read, and data.json's UTF-8 bytes held to the limit); the reader
   refusing every call without its nonce; and `readGadgetStorage()` on a
   real gadget facet: a measure and a copy of its tables and key-value storage, the gadget coming
   back with its data, a connection and a stored persistent stub restored during a read each
-  waiting for it and reaching the gadget's own class, a read that fails (over its byte limit)
+  waiting for it and reaching the gadget's own class, storage over the limit refused before it is
+  dumped with its size and the limit named, a read that fails (on a value JSON cannot hold)
   restoring the gadget, keeping nothing and releasing the lock, the lock released when the abort
   that ends a read throws, two reads of one gadget in turn
   with a code update between, a pending gadget refused, and the size forgotten when the gadget is

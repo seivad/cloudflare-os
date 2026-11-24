@@ -76,8 +76,8 @@ export type GadgetEverythingFiles = {
   slug: string;
   /** The `.gadget` archive (buildGadgetArchive()). */
   archive: Uint8Array;
-  /** The gadget's data.json, as JSON text. */
-  dataJson: string;
+  /** The gadget's data.json: JSON text, or its UTF-8 bytes as the reader wrote them. */
+  dataJson: string | Uint8Array;
   /** The README (gadgetExportReadme()). */
   readme: string;
 };

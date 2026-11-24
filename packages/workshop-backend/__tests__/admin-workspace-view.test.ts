@@ -1195,6 +1195,88 @@ describe("exporting a gadget", () => {
     expect((await ws.impl.readGadgetStorage(ws.gadgetId, "measure")).bytes).toBeGreaterThan(0);
     expect((await ws.impl.exportGadgetCopy(ws.gadgetId, "code")).byteLength).toBeGreaterThan(100);
   }));
+
+  it("refuses everything for data past its own limit, reading none of it, and still copies " +
+      "the code", () => withWorkspace(async ws => {
+    let size = (await ws.impl.readGadgetStorage(ws.gadgetId, "measure")).bytes;
+    await expect(ws.impl.exportGadgetCopy(ws.gadgetId, "everything", { maxDataBytes: 100 }))
+        .rejects.toThrow(`The gadget's stored data is ${size} bytes, more than the 100 bytes a ` +
+            "copy of its data may hold.");
+    expect((await ws.impl.exportGadgetCopy(ws.gadgetId, "code", { maxDataBytes: 100 }))
+        .byteLength).toBeGreaterThan(100);
+    expect((await ws.impl.readGadgetStorage(ws.gadgetId, "measure")).bytes).toBe(size);
+  }));
+
+  it("ends the data read when the copy runs out of time, restoring the gadget then",
+      () => withWorkspace(async ws => {
+    let impl = ws.impl;
+    // The owner's profile arrives late, so the read starts well into the copy's time.
+    let users = impl.users;
+    impl.users = { ...users, get: (id: unknown) => ({
+      ...users.get(id),
+      whoami: async () => {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        return OWNER;
+      },
+    }) };
+    // And the reader never answers.
+    let facets = impl.ctx.facets;
+    let get = facets.get;
+    let abort = facets.abort;
+    let aborts: string[] = [];
+    facets.get = () => ({ measure: () => new Promise(() => {}), dump: () => new Promise(() => {}) });
+    facets.abort = function(this: unknown, name: string, reason: unknown) {
+      aborts.push(String(reason));
+      return Reflect.apply(abort, facets, [name, reason]);
+    };
+    try {
+      await expect(impl.exportGadgetCopy(ws.gadgetId, "everything", { maxDurationMs: 300 }))
+          .rejects.toThrow("Copying the gadget took longer than 0.3 seconds.");
+      // The read ended with the copy, not a whole limit of its own later.
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(aborts.at(-1)).toContain("An admin's copy is taken");
+    } finally {
+      facets.get = get;
+      facets.abort = abort;
+      impl.users = users;
+    }
+    // The lock is released: the next read goes ahead.
+    expect((await impl.readGadgetStorage(ws.gadgetId, "measure")).bytes).toBeGreaterThan(0);
+  }));
+
+  it("never pauses the gadget for a copy that ran out of time before its data read",
+      () => withWorkspace(async ws => {
+    let impl = ws.impl;
+    let users = impl.users;
+    let answered = Promise.withResolvers<void>();
+    impl.users = { ...users, get: (id: unknown) => ({
+      ...users.get(id),
+      whoami: async () => {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        answered.resolve();
+        return OWNER;
+      },
+    }) };
+    let facets = impl.ctx.facets;
+    let abort = facets.abort;
+    let aborts: string[] = [];
+    facets.abort = function(this: unknown, name: string, reason: unknown) {
+      aborts.push(String(reason));
+      return Reflect.apply(abort, facets, [name, reason]);
+    };
+    try {
+      await expect(impl.exportGadgetCopy(ws.gadgetId, "everything", { maxDurationMs: 50 }))
+          .rejects.toThrow("Copying the gadget took longer than 0.05 seconds.");
+      // The copy goes on to its data read once the profile arrives, and stops there.
+      await answered.promise;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(aborts).toStrictEqual([]);
+    } finally {
+      facets.abort = abort;
+      impl.users = users;
+    }
+    expect(impl.storage.gadgetDataSizes.get(ws.gadgetId)).toBeUndefined();
+  }));
 });
 
 describe("a live view's checks", () => {

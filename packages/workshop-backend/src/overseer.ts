@@ -82,7 +82,8 @@ import {
 } from "./admin-access";
 import { adminViewCall } from "./admin-view";
 import {
-  createExportDeadline, MAX_EXPORT_BYTES, MAX_EXPORT_DURATION_MS, type ExportDeadline,
+  createExportDeadline, describeBytes, MAX_EXPORT_BYTES, MAX_EXPORT_DATA_BYTES,
+  MAX_EXPORT_DURATION_MS, type ExportDeadline,
 } from "./export-limits";
 import type { GadgetStorageReader } from "./gadget-storage-reader";
 import {
@@ -498,6 +499,15 @@ type GadgetReach = {
   gadgetIds: Set<WorkpieceId>;
   gatekeeperIds: Set<WorkpieceId>;
 };
+
+// The limits of OverseerImpl.readGadgetStorage(): the most a dump copies, in bytes, and how long a
+// read may take, or the deadline it shares with the copy it is part of instead.
+type GadgetStorageReadLimits = {
+  maxBytes?: number;
+  maxDurationMs?: number;
+  deadline?: ExportDeadline;
+};
+
 // Copied from normalizeText() in agent-catalog.ts, minus its length clamp
 function oneLineReason(reason: string): string {
   return reason.replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
@@ -5535,21 +5545,24 @@ class OverseerImpl implements AgentHooks {
   // can open: the gadget's facet is aborted and, in the same synchronous step, started as the
   // Workshop's own GadgetStorageReader, under a nonce drawn for this read. `measure` answers with
   // the storage's size, `dump` with all of it as data.json holds it (GadgetDataFile), and
-  // `dumpJson` with the same as the JSON text the reader wrote, for a caller that only stores it
+  // `dumpJson` with the same as the UTF-8 JSON the reader wrote, for a caller that only stores it
   // (exportGadgetCopy()), so that a copy near the limit is not parsed and written out again. Each
-  // keeps the size as the gadget's last measured. A read that takes longer than `maxDurationMs`,
-  // or whose copy passes `maxBytes`, fails. On every path the reader is aborted and the lock
-  // released, so the next call to the gadget starts its own class with its data, and anyone
-  // connected sees it reconnect once. Reads of one gadget run one at a time.
+  // keeps the size as the gadget's last measured. A dump first measures, and refuses storage
+  // larger than `maxBytes` without reading it; the reader also stops once the JSON passes it. A
+  // read that takes longer than `maxDurationMs` fails, or, given a `deadline`, one that outlasts
+  // that deadline (a copy's own, so the read ends when the copy does). On every path the reader is
+  // aborted and the lock released, so the next call to the gadget starts its own class with its
+  // data, and anyone connected sees it reconnect once. Reads of one gadget run one at a time.
   async readGadgetStorage(gadgetId: WorkpieceId, mode: "measure",
-      limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<AdminGadgetMeasurement>;
+      limits?: GadgetStorageReadLimits): Promise<AdminGadgetMeasurement>;
   async readGadgetStorage(gadgetId: WorkpieceId, mode: "dump",
-      limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<GadgetDataFile>;
+      limits?: GadgetStorageReadLimits): Promise<GadgetDataFile>;
   async readGadgetStorage(gadgetId: WorkpieceId, mode: "dumpJson",
-      limits?: {maxBytes?: number, maxDurationMs?: number}): Promise<string>;
+      limits?: GadgetStorageReadLimits): Promise<Uint8Array>;
   async readGadgetStorage(gadgetId: WorkpieceId, mode: "measure" | "dump" | "dumpJson",
-      {maxBytes = MAX_EXPORT_BYTES, maxDurationMs = MAX_EXPORT_DURATION_MS} = {})
-      : Promise<AdminGadgetMeasurement | GadgetDataFile | string> {
+      {maxBytes = MAX_EXPORT_DATA_BYTES, maxDurationMs = MAX_EXPORT_DURATION_MS,
+       deadline: sharedDeadline}: GadgetStorageReadLimits = {})
+      : Promise<AdminGadgetMeasurement | GadgetDataFile | Uint8Array> {
     let read: Promise<void> | undefined;
     while ((read = this.#storageReads.get(gadgetId))) await read;
     // Checked with nothing awaited before the lock is taken.
@@ -5557,12 +5570,14 @@ class OverseerImpl implements AgentHooks {
     if (record?.type !== "gadget" || record.pending) {
       throw new Error(`No permanent gadget has id ${gadgetId}.`);
     }
+    // A copy that has already run out of time does not pause the gadget for nothing.
+    if (sharedDeadline?.expired) throw sharedDeadline.error;
     let released = Promise.withResolvers<void>();
     let facetName = this.gadgetFacetName(gadgetId);
     let deadline: ExportDeadline | undefined;
     try {
       this.#storageReads.set(gadgetId, released.promise);
-      deadline = createExportDeadline(
+      deadline = sharedDeadline ?? createExportDeadline(
           `Reading the gadget's data took longer than ${maxDurationMs / 1000} seconds.`,
           maxDurationMs);
       // Whatever ran in the facet, mainline or a chat's version, runs nothing until the read
@@ -5575,25 +5590,21 @@ class OverseerImpl implements AgentHooks {
         id: facetName,
       }));
       let measuredAt = new Date();
-      let result: AdminGadgetMeasurement | GadgetDataFile | string;
-      let bytes: number;
+      // Nothing writes while the reader holds the storage, so this is the size a dump records.
+      let bytes = await deadline.race(reader.measure(nonce));
+      let result: AdminGadgetMeasurement | GadgetDataFile | Uint8Array;
       if (mode === "measure") {
-        bytes = await deadline.race(reader.measure(nonce));
         result = {bytes, measuredAt};
       } else {
+        // Refused before the reader holds any of it in memory or sends it in one RPC message.
+        if (bytes > maxBytes) {
+          throw new Error(`The gadget's stored data is ${describeBytes(bytes)}, more than the ` +
+              `${describeBytes(maxBytes)} a copy of its data may hold.`);
+        }
         let json = await deadline.race(reader.dump(nonce, {
           gadget: {id: gadgetId, name: record.title}, exportedAt: measuredAt, maxBytes,
         }));
-        if (mode === "dump") {
-          let file: GadgetDataFile = JSON.parse(json);
-          bytes = file.sizeBytes;
-          result = file;
-        } else {
-          // The size again rather than parsing the text for it: nothing writes while the reader
-          // holds the storage, so it is the size the text records.
-          bytes = await deadline.race(reader.measure(nonce));
-          result = json;
-        }
+        result = mode === "dump" ? JSON.parse(new TextDecoder().decode(json)) : json;
       }
       // Unless the gadget was deleted while it was read.
       if (this.storage.gadgets.get(gadgetId)) {
@@ -5604,7 +5615,8 @@ class OverseerImpl implements AgentHooks {
       // The lock is released even if the abort throws (as for a facet the gadget's removal
       // deleted during the read), so no later call to the gadget waits on it for ever.
       try {
-        deadline?.clear();
+        // A shared deadline is its owner's to clear.
+        if (!sharedDeadline) deadline?.clear();
         this.ctx.facets.abort(facetName, new Error("An admin's copy is taken"));
         this.#runningChatIds.delete(gadgetId);
       } finally {
@@ -5619,21 +5631,25 @@ class OverseerImpl implements AgentHooks {
   // gadget's committed head, with the metadata createBlueprint() would derive, publishing and
   // writing nothing. "everything" is a ZIP of that archive, the gadget's data.json (read by
   // readGadgetStorage(), which pauses the gadget and keeps the size) and a README. The copy fails,
-  // naming the limit, once it would pass `maxBytes` or take longer than `maxDurationMs`.
+  // naming the limit, once it would pass `maxBytes` or take longer than `maxDurationMs`; the data
+  // in it, once it would pass `maxDataBytes`, which is refused before any of it is read. The read
+  // shares the copy's deadline, so a copy that runs out of time leaves the gadget paused no longer.
   async exportGadgetCopy(gadgetId: WorkpieceId, mode: AdminGadgetExportMode,
-      {maxBytes = MAX_EXPORT_BYTES, maxDurationMs = MAX_EXPORT_DURATION_MS} = {})
+      {maxBytes = MAX_EXPORT_BYTES, maxDataBytes = MAX_EXPORT_DATA_BYTES,
+       maxDurationMs = MAX_EXPORT_DURATION_MS} = {})
       : Promise<Uint8Array> {
     let deadline = createExportDeadline(
         `Copying the gadget took longer than ${maxDurationMs / 1000} seconds.`, maxDurationMs);
     try {
-      return await deadline.race(this.#buildGadgetCopy(gadgetId, mode, maxBytes, maxDurationMs));
+      return await deadline.race(
+          this.#buildGadgetCopy(gadgetId, mode, maxBytes, maxDataBytes, deadline));
     } finally {
       deadline.clear();
     }
   }
 
   async #buildGadgetCopy(gadgetId: WorkpieceId, mode: AdminGadgetExportMode, maxBytes: number,
-      maxDurationMs: number): Promise<Uint8Array> {
+      maxDataBytes: number, deadline: ExportDeadline): Promise<Uint8Array> {
     // The owner is the author, as when they publish.
     let author = await retryOnDoReset(() => this.ownerUserDo().whoami(), this.logger);
     // Read after the await, with nothing awaited from here to the bindings, so that the files and
@@ -5659,7 +5675,8 @@ class OverseerImpl implements AgentHooks {
 
     let copy = archive;
     if (mode === "everything") {
-      let dataJson = await this.readGadgetStorage(gadgetId, "dumpJson", {maxBytes, maxDurationMs});
+      let dataJson = await this.readGadgetStorage(
+          gadgetId, "dumpJson", {maxBytes: maxDataBytes, deadline});
       let slug = fileNameSlug(record.title);
       let readme = gadgetExportReadme({title: record.title, slug, exportedAt});
       copy = await zipGadgetEverything({slug, archive, dataJson, readme});

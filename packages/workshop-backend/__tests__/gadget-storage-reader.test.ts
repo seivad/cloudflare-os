@@ -10,7 +10,9 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { GadgetDataFile } from "@gadgets/workshop-shared/api";
 import type { OverseerDurableObject } from "../src/overseer.js";
-import { encodeGadgetData, encodeKvValue } from "../src/gadget-storage-reader.js";
+import {
+  encodeDataFile, encodeGadgetData, encodeKvValue,
+} from "../src/gadget-storage-reader.js";
 // Load the whole backend (the pool's `main`) up front, so its slow load does not count against the
 // first test's timeout.
 import "./test-worker.js";
@@ -133,6 +135,27 @@ describe("encodeGadgetData", () => {
   });
 });
 
+describe("encodeDataFile", () => {
+  const file = (body: string): GadgetDataFile => ({
+    format: "cloudflare-os/gadget-data", version: 1, gadget: { id: 3, name: "Notes" },
+    exportedAt: "2026-11-23T10:00:00.000Z", sizeBytes: 12288,
+    sql: [{ name: "notes", createSql: "CREATE TABLE notes(body)", rows: [{ body }] }], kv: [],
+  });
+
+  it("writes the file as UTF-8 JSON", () => {
+    let bytes = encodeDataFile(file("caf\u00e9"), 1000);
+    expect(JSON.parse(new TextDecoder().decode(bytes))).toStrictEqual(file("caf\u00e9"));
+  });
+
+  it("refuses a file whose UTF-8 bytes pass the limit, though its JSON text is within it", () => {
+    // 300 characters of JSON text for the body, 900 bytes of UTF-8.
+    let text = JSON.stringify(file("\u20ac".repeat(300)));
+    expect(text.length).toBeLessThan(600);
+    expect(() => encodeDataFile(file("\u20ac".repeat(300)), 600))
+        .toThrow("The gadget's data is larger than 600 bytes");
+  });
+});
+
 const GADGET_ID = 1;
 
 // A gadget that keeps notes in SQL and a counter in its key-value storage.
@@ -162,6 +185,12 @@ export class Gadget extends DurableObject {
   addOdd(value) {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS odd("__proto__" TEXT)');
     this.ctx.storage.sql.exec('INSERT INTO odd("__proto__") VALUES (?)', value);
+  }
+
+  addCycle() {
+    let value = {};
+    value.self = value;
+    this.ctx.storage.kv.put("cycle", value);
   }
 
   mintCallback() {
@@ -344,11 +373,28 @@ describe("readGadgetStorage", () => {
     expect(order).toStrictEqual(["read", "restored"]);
   }));
 
+  it("refuses data whose storage is larger than its limit without copying it, naming both",
+      () => withGadget(async impl => {
+    await (await gadgetOf(impl)).add("kept");
+    let size = (await impl.readGadgetStorage(GADGET_ID, "measure")).bytes;
+    for (let mode of ["dump", "dumpJson"]) {
+      await expect(impl.readGadgetStorage(GADGET_ID, mode, { maxBytes: 100 })).rejects.toThrow(
+          `The gadget's stored data is ${size} bytes, more than the 100 bytes a copy of its ` +
+          "data may hold.");
+    }
+    // The gadget answers with its data, and the next read goes ahead.
+    let gadget = await gadgetOf(impl);
+    expect(await gadget.notes()).toStrictEqual(["kept"]);
+    expect((await impl.readGadgetStorage(GADGET_ID, "dump")).sql[0].rows).toHaveLength(1);
+  }));
+
   it("restores the gadget and releases the lock when the read fails", () =>
       withGadget(async impl => {
-    await (await gadgetOf(impl)).add("x".repeat(500));
-    await expect(impl.readGadgetStorage(GADGET_ID, "dump", { maxBytes: 100 }))
-        .rejects.toThrow("larger than 100 bytes");
+    let stub = await gadgetOf(impl);
+    await stub.add("x");
+    // A value JSON cannot hold, which the reader fails on as it encodes.
+    await stub.addCycle();
+    await expect(impl.readGadgetStorage(GADGET_ID, "dump")).rejects.toThrow("refers to itself");
     // Nothing is kept of a read that failed, and the gadget answers as before.
     expect(impl.storage.gadgetDataSizes.get(GADGET_ID)).toBeUndefined();
     let gadget = await gadgetOf(impl);

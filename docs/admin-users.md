@@ -114,7 +114,9 @@ gadgets**. The menu offers:
 
 `<slug>` is made from the gadget's title. A copy is refused at the server once it would exceed
 100 MB or take longer than 30 seconds, and a gadget's committed code, packed, may not exceed 32 MB
-(`MAX_RELEASE_PACK_BYTES`). A failed copy shows its message under the menu.
+(`MAX_RELEASE_PACK_BYTES`). Everything also refuses a gadget whose stored data is larger than
+16 MB, before reading any of it; Code only still copies that gadget. A failed copy shows its
+message under the menu.
 
 **Download all** copies every gadget in every workspace the user owns, one after another, into one
 ZIP named for the user (`<user id>-gadgets.zip`) with a folder per workspace, named by its title,

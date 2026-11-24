@@ -3096,7 +3096,9 @@ export interface AdminWorkspaceView extends RpcTarget {
    * The whole copy is built before it is recorded and returned. Throws for a pending gadget, a
    * worktree, or an id that names no gadget; for a gadget with no committed files; for a
    * connection that a blueprint cannot express (as publishing does); and when the copy would be
-   * larger than 100 MB or take longer than 30 seconds, naming the limit.
+   * larger than 100 MB or take longer than 30 seconds, naming the limit. "everything" also throws,
+   * before reading the data, for a gadget whose stored data is larger than 16 MB, naming its size;
+   * "code" still copies that gadget.
    */
   exportGadget(gadgetId: WorkpieceId, mode: AdminGadgetExportMode)
       : Promise<ReadableStream<Uint8Array>>;

@@ -6,7 +6,7 @@
 
 import type { GadgetDataFile, GadgetDataValue } from "@gadgets/workshop-shared/api";
 import { DurableObject } from "cloudflare:workers";
-import { MAX_EXPORT_BYTES } from "./export-limits";
+import { describeBytes, MAX_EXPORT_DATA_BYTES } from "./export-limits";
 
 /** What the Overseer starts a GadgetStorageReader with. */
 export type GadgetStorageReaderProps = {
@@ -20,7 +20,7 @@ export type GadgetDumpOptions = {
   gadget: GadgetDataFile["gadget"];
   /** When the copy is taken. */
   exportedAt: Date;
-  /** The most the encoded copy may hold, in bytes (approximately: JSON text length). */
+  /** The most the encoded copy may hold, in bytes of UTF-8. */
   maxBytes: number;
 };
 
@@ -55,15 +55,16 @@ export class GadgetStorageReader extends DurableObject<Cloudflare.Env, GadgetSto
     return this.ctx.storage.sql.databaseSize;
   }
 
-  /** The gadget's tables and key-value storage as data.json holds them: a GadgetDataFile, as JSON
-   * text, which crosses to the Overseer as one string rather than an object per row and value.
-   * Throws once the encoding passes `options.maxBytes`. */
-  dump(nonce: string, options: GadgetDumpOptions): string {
+  /** The gadget's tables and key-value storage as data.json holds them: a GadgetDataFile, as the
+   * UTF-8 bytes of its JSON, which cross to the Overseer as one message of exactly that size
+   * rather than an object per row and value, or a string that may travel as two bytes a
+   * character. Throws once the encoding passes `options.maxBytes`. */
+  dump(nonce: string, options: GadgetDumpOptions): Uint8Array {
     this.#check(nonce);
     let sql = this.ctx.storage.sql;
     let tables = sql.exec<{ name: string; sql: string }>(
         "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY rowid").toArray();
-    return JSON.stringify(encodeGadgetData({
+    return encodeDataFile(encodeGadgetData({
       gadget: options.gadget,
       exportedAt: options.exportedAt,
       sizeBytes: sql.databaseSize,
@@ -74,8 +75,22 @@ export class GadgetStorageReader extends DurableObject<Cloudflare.Env, GadgetSto
         rows: { [Symbol.iterator]: () => tableRows(sql, table.name) },
       })),
       kv: this.ctx.storage.kv.list(),
-    }, options.maxBytes));
+    }, options.maxBytes), options.maxBytes);
   }
+}
+
+// The message of a copy past its limit.
+function tooLarge(maxBytes: number): Error {
+  return new Error(`The gadget's data is larger than ${describeBytes(maxBytes)}, the most a copy ` +
+      "holds.");
+}
+
+/** data.json as the UTF-8 bytes of its JSON. Throws when they pass `maxBytes`: encodeGadgetData()
+ * counts characters of JSON text, which a character outside ASCII takes up to three bytes of. */
+export function encodeDataFile(file: GadgetDataFile, maxBytes: number): Uint8Array {
+  let bytes = new TextEncoder().encode(JSON.stringify(file));
+  if (bytes.byteLength > maxBytes) throw tooLarge(maxBytes);
+  return bytes;
 }
 
 // A table's rows, each with its columns as own properties: built from the raw cells, since a row
@@ -104,14 +119,12 @@ export function isInternalTable(name: string): boolean {
  * tables. Throws once the encoded rows and values pass `maxBytes`, counted as JSON text, so a
  * copy that would be larger than an export may hold stops there.
  */
-export function encodeGadgetData(dump: GadgetStorageDump, maxBytes = MAX_EXPORT_BYTES)
+export function encodeGadgetData(dump: GadgetStorageDump, maxBytes = MAX_EXPORT_DATA_BYTES)
     : GadgetDataFile {
   let total = 0;
   let count = (value: unknown) => {
     total += JSON.stringify(value).length;
-    if (total > maxBytes) {
-      throw new Error(`The gadget's data is larger than ${maxBytes} bytes, the most a copy holds.`);
-    }
+    if (total > maxBytes) throw tooLarge(maxBytes);
   };
 
   let sql: GadgetDataFile["sql"] = [];
