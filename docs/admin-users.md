@@ -168,8 +168,10 @@ Every open, every read and every download is recorded in the deployment-wide aud
 admin, the reason and the access level in force. So are refusals: a read refused because the level
 is `off`, a download refused because the level is below `content`, and a read that failed. A copy is
 recorded before its bytes leave the server. [Which refusals are
-recorded](admin-access.md#which-refusals-are-recorded) lists what is and is not. Nothing a user can
-read shows an inspection, unless they are a deployment admin who reads the log.
+recorded](admin-access.md#which-refusals-are-recorded) lists what is and is not. The log is the
+only record of an inspection, and only deployment admins read it. Users are not told of one, but
+reading a gadget's data (Everything and Measure size) pauses the gadget: anyone connected to it
+sees it reconnect once, with "Paused while an admin takes a copy" as the reason.
 
 ## What depends on the cost ledger
 
