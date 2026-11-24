@@ -22,7 +22,8 @@ type Answer = { request: string } & ({ page: AdminUserPage } | { failed: true })
 
 /**
  * The Users tab: a table of every account, searched by name or id, filtered by when the user last
- * signed in, and ordered by id, last sign-in or joined date, 50 to a page. Pages are reached
+ * signed in or whether they have spent anything, and ordered by id, last sign-in, joined date or
+ * total cost, 50 to a page. Pages are reached
  * through each page's cursor and left by going back through the cursors used; any change to the
  * search, the filter or the order starts again from the first page. A row opens that user through
  * `onSelectUser`; `selectedUserId` names the open one.
@@ -77,7 +78,7 @@ export const AdminUsersPanel = ({ admin, accessLevel, selectedUserId, onSelectUs
   const failed = answer !== null && 'failed' in answer && !busy
   const nextCursor = page?.nextCursor
   const pageNumber = cursors.length + 1
-  const filtered = filter.search.trim() !== '' || filter.active !== 'any'
+  const filtered = filter.search.trim() !== '' || filter.active !== 'any' || filter.hasSpend
 
   return (
     <div className="space-y-4">
@@ -104,6 +105,14 @@ export const AdminUsersPanel = ({ admin, accessLevel, selectedUserId, onSelectUs
             <Select.Option key={active} value={active}>{ACTIVE_NAMES[active]}</Select.Option>
           ))}
         </Select>
+        <label className="flex items-center gap-2 self-end pb-2 text-sm">
+          <input
+            type="checkbox"
+            checked={filter.hasSpend}
+            onChange={(event) => setFilter({ ...filter, hasSpend: event.target.checked })}
+          />
+          Has spend
+        </label>
         {filter.active === 'since' && (
           <Input
             label="Signed in since"

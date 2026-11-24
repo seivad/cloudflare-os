@@ -30,6 +30,11 @@ describe('usersQueryOf', () => {
       .toBeUndefined()
   })
 
+  it('sends hasSpend only when it is ticked', () => {
+    expect(usersQueryOf({ ...DEFAULT_USERS_FILTER, hasSpend: true }, now).hasSpend).toBe(true)
+    expect(usersQueryOf(DEFAULT_USERS_FILTER, now).hasSpend).toBeUndefined()
+  })
+
   it('passes the cursor on', () => {
     expect(usersQueryOf(DEFAULT_USERS_FILTER, now, 'c1').cursor).toBe('c1')
   })
@@ -43,6 +48,7 @@ describe('sortedBy', () => {
 
   it('starts another column newest first, and id ascending', () => {
     expect(sortedBy(DEFAULT_USERS_FILTER, 'lastLogin')).toMatchObject({ sort: 'lastLogin', direction: 'desc' })
+    expect(sortedBy(DEFAULT_USERS_FILTER, 'totalCost')).toMatchObject({ sort: 'totalCost', direction: 'desc' })
     expect(sortedBy({ ...DEFAULT_USERS_FILTER, sort: 'created', direction: 'desc' }, 'id'))
       .toMatchObject({ sort: 'id', direction: 'asc' })
   })

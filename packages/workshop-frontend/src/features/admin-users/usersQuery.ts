@@ -16,13 +16,15 @@ export type UsersFilter = {
   active: ActiveFilter
   /** The date input's value (`yyyy-mm-dd`), used when `active` is `since`; empty when none. */
   since: string
+  /** Only users who have spent something (the Has spend checkbox). */
+  hasSpend: boolean
   sort: UsersSort
   direction: NonNullable<AdminUserQuery['direction']>
 }
 
 /** The filter before anything is chosen: everyone, in id order. */
 export const DEFAULT_USERS_FILTER: UsersFilter = {
-  search: '', active: 'any', since: '', sort: 'id', direction: 'asc',
+  search: '', active: 'any', since: '', hasSpend: false, sort: 'id', direction: 'asc',
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -35,8 +37,8 @@ const startOfDay = (value: string): Date | undefined => {
 }
 
 /**
- * The listUsers query for `filter`, `now` and the page's `cursor`. A blank search and an unset
- * date send nothing, so "Since a date" with no date lists everyone.
+ * The listUsers query for `filter`, `now` and the page's `cursor`. A blank search, an unset
+ * date and an unticked Has spend send nothing, so "Since a date" with no date lists everyone.
  */
 export const usersQueryOf = (filter: UsersFilter, now: Date, cursor?: string): AdminUserQuery => {
   const query = filter.search.trim()
@@ -50,6 +52,7 @@ export const usersQueryOf = (filter: UsersFilter, now: Date, cursor?: string): A
     cursor,
     limit: USERS_PAGE_SIZE,
     activeSince,
+    hasSpend: filter.hasSpend ? true : undefined,
     sort: filter.sort,
     direction: filter.direction,
   }

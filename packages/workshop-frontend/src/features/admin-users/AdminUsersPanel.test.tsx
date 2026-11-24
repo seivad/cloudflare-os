@@ -20,7 +20,7 @@ const user = (patch: Partial<AdminUserRecord> & { id: string }): AdminUserRecord
   ({ name: patch.id.toUpperCase(), isAdmin: false, ownedWorkspaces: 0, ...patch })
 
 const ADA = user({
-  id: 'ada@example.com', name: 'Ada', isAdmin: true, ownedWorkspaces: 3,
+  id: 'ada@example.com', name: 'Ada', isAdmin: true, ownedWorkspaces: 3, totalCost: 12.345,
   created: new Date('2026-01-02T10:00:00Z'), lastLogin: new Date('2026-11-20T10:00:00Z'),
 })
 const BOB = user({ id: 'bob@example.com', name: 'Bob' })
@@ -100,15 +100,17 @@ describe('AdminUsersPanel', () => {
     await render()
 
     expect([...container.querySelectorAll('thead th')].map((head) => head.textContent))
-      .toEqual(['User', 'Workspaces', 'Last sign-in', 'Joined'])
+      .toEqual(['User', 'Workspaces', 'Last sign-in', 'Joined', 'Total cost'])
     const cells = [...rows()[0].querySelectorAll('td')]
     expect(cells[0].textContent).toContain('Ada')
     expect(cells[0].textContent).toContain('ada@example.com')
     expect(cells[0].textContent).toContain('Admin')
     expect(cells[1].textContent).toBe('3')
     expect(cells[2].textContent).not.toBe('—')
+    expect(cells[4].textContent).toBe('$12.35')
+    expect([...rows()[1].querySelectorAll('td')][4].textContent).toBe('—')
     expect(rows()[1].textContent).not.toContain('Admin')
-    expect([...rows()[1].querySelectorAll('td')].slice(2).map((cell) => cell.textContent)).toEqual(['—', '—'])
+    expect([...rows()[1].querySelectorAll('td')].slice(2).map((cell) => cell.textContent)).toEqual(['—', '—', '—'])
     expect(container.textContent)
       .toContain('Lists everyone who has signed in since the user directory was added.')
   })
@@ -165,6 +167,19 @@ describe('AdminUsersPanel', () => {
     expect(lastQuery(admin)).toMatchObject({ sort: 'created', direction: 'desc' })
     await click(button('User'))
     expect(lastQuery(admin)).toMatchObject({ sort: 'id', direction: 'asc' })
+  })
+
+  it('orders by total cost, and lists only users who have spent when Has spend is ticked', async () => {
+    const admin = fakeAdmin()
+    await render(admin)
+    expect(lastQuery(admin).hasSpend).toBeUndefined()
+
+    await click(button('Total cost'))
+    expect(lastQuery(admin)).toMatchObject({ sort: 'totalCost', direction: 'desc' })
+    await click(container.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    expect(lastQuery(admin)).toMatchObject({ hasSpend: true, sort: 'totalCost' })
+    await click(container.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    expect(lastQuery(admin).hasSpend).toBeUndefined()
   })
 
   it('turns pages through the cursors', async () => {

@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Loader, Table } from '@cloudflare/kumo'
-import type { AdminUserWorkspace } from '@gadgets/workshop-shared/api'
+import type { AdminUserWorkspace, CostLine, UserCostSummary } from '@gadgets/workshop-shared/api'
 import { formatAttachmentSize } from '../chat/attachmentFormatting'
 import { mergeServices, summarizeServices, type ServicesSummary } from './services'
 import type { AdminViews } from './useAdminViews'
@@ -23,15 +23,125 @@ const ServiceList = ({ label, items, unit }: { label: string; items: { id: strin
   </div>
 )
 
+const usd = (amount: number) => `$${amount.toFixed(2)}`
+
+const KIND_NAMES: Record<string, string> = {
+  text: 'Text', image: 'Image', video: 'Video', music: 'Music', speech: 'Speech', transcription: 'Transcription',
+}
+
+type ModelRow = { model: string; usd: number; requests: number; tokens: number | undefined; estimated: boolean }
+
+// The summary's model totals with what its lines add: requests, tokens, and whether any part is an estimate.
+const modelRows = (summary: UserCostSummary): ModelRow[] => {
+  const lines: CostLine[] = [
+    ...summary.workspaces.flatMap((workspace) => workspace.lines),
+    ...summary.deletedWorkspaces.lines,
+    ...summary.own.lines,
+  ]
+  return Object.entries(summary.byModel)
+    .map(([model, amount]) => {
+      const own = lines.filter((line) => line.model === model)
+      const counted = own.filter((line) => line.inputTokens !== undefined || line.outputTokens !== undefined)
+      return {
+        model,
+        usd: amount,
+        requests: own.reduce((sum, line) => sum + line.requests, 0),
+        tokens: counted.length === 0 ? undefined
+          : counted.reduce((sum, line) => sum + (line.inputTokens ?? 0) + (line.outputTokens ?? 0), 0),
+        estimated: own.some((line) => line.estimated),
+      }
+    })
+    .toSorted((a, b) => b.usd - a.usd || a.model.localeCompare(b.model))
+}
+
+// The user's cost summary through the audited user view: undefined while it loads, null when it could not be read.
+const useCostSummary = (views: AdminViews): UserCostSummary | null | undefined => {
+  const [summary, setSummary] = useState<UserCostSummary | null | undefined>(undefined)
+  const { call, userView } = views
+  useEffect(() => {
+    let current = true
+    call(async () => (await userView()).getCostSummary()).then(
+      (found) => { if (current) setSummary(found) },
+      () => { if (current) setSummary(null) },
+    )
+    return () => { current = false }
+  }, [call, userView])
+  return summary
+}
+
+const CostBreakdown = ({ summary }: { summary: UserCostSummary }) => {
+  const kinds = Object.entries(summary.byKind).toSorted(([, a], [, b]) => (b ?? 0) - (a ?? 0))
+  const models = modelRows(summary)
+  return (
+    <>
+      <section aria-label="Cost by kind" className="space-y-2">
+        <h3 className="text-sm font-semibold">Cost by kind</h3>
+        {kinds.length === 0
+          ? <p className="text-sm text-kumo-subtle">No spend.</p>
+          : (
+            <Table>
+              <Table.Header>
+                <Table.Row><Table.Head>Kind</Table.Head><Table.Head>Cost</Table.Head></Table.Row>
+              </Table.Header>
+              <Table.Body>
+                {kinds.map(([kind, amount]) => (
+                  <Table.Row key={kind}>
+                    <Table.Cell>{KIND_NAMES[kind] ?? kind}</Table.Cell>
+                    <Table.Cell>{usd(amount ?? 0)}</Table.Cell>
+                  </Table.Row>
+                ))}
+              </Table.Body>
+            </Table>
+          )}
+      </section>
+      <section aria-label="Cost by model" className="space-y-2">
+        <h3 className="text-sm font-semibold">Cost by model</h3>
+        {models.length === 0
+          ? <p className="text-sm text-kumo-subtle">No spend.</p>
+          : (
+            <div className="overflow-x-auto">
+              <Table>
+                <Table.Header>
+                  <Table.Row>
+                    <Table.Head>Model</Table.Head>
+                    <Table.Head>Cost</Table.Head>
+                    <Table.Head>Requests</Table.Head>
+                    <Table.Head>Tokens</Table.Head>
+                  </Table.Row>
+                </Table.Header>
+                <Table.Body>
+                  {models.map((row) => (
+                    <Table.Row key={row.model}>
+                      <Table.Cell>{row.model === 'earlier' ? 'earlier (not broken down)' : row.model}</Table.Cell>
+                      <Table.Cell>{usd(row.usd)}{row.estimated && <span className="text-kumo-subtle"> (estimated)</span>}</Table.Cell>
+                      <Table.Cell>{row.requests}</Table.Cell>
+                      <Table.Cell>{row.tokens === undefined ? '—' : row.tokens.toLocaleString('en-US')}</Table.Cell>
+                    </Table.Row>
+                  ))}
+                </Table.Body>
+              </Table>
+            </div>
+          )}
+        {summary.deletedWorkspaces.totalCost > 0 && (
+          <p className="text-sm">Deleted workspaces: {usd(summary.deletedWorkspaces.totalCost)}</p>
+        )}
+      </section>
+    </>
+  )
+}
+
 /**
- * The Usage tab: the total cost across the workspaces the user owns, each one's storage, and the
- * services their gadgets are connected to. `renderDataSizes`, when given, adds a section under
+ * The Usage tab: the user's total cost with its breakdown by kind and by model (the audited
+ * user view's cost summary: owned and deleted workspaces and their own use), each owned
+ * workspace's storage, and the services their gadgets are connected to. While the summary has not
+ * arrived, or cannot be read, the total is the owned workspaces' costs added up. `renderDataSizes`, when given, adds a section under
  * the storage table for the gadgets' measured data sizes of one workspace.
  */
 export const UsageTab = ({ views, renderDataSizes }: {
   views: AdminViews
   renderDataSizes?: (workspace: AdminUserWorkspace) => ReactNode
 }) => {
+  const summary = useCostSummary(views)
   const state = useOwnedWorkspaceData<Loaded>(views, async (view) => {
     const [diagnostics, gatekeepers] = await Promise.all([view.getDiagnostics(), view.listGatekeepers()])
     return { storageBytes: diagnostics.storageBytes, services: summarizeServices(gatekeepers) }
@@ -39,7 +149,8 @@ export const UsageTab = ({ views, renderDataSizes }: {
   if (state === null) return <div className="flex justify-center py-8"><Loader /></div>
   if ('error' in state) return <p role="alert" className="text-sm text-kumo-danger">{state.error}</p>
 
-  const totalCost = state.workspaces.reduce((sum, workspace) => sum + (workspace.totalCost ?? 0), 0)
+  const totalCost = summary?.totalCost
+    ?? state.workspaces.reduce((sum, workspace) => sum + (workspace.totalCost ?? 0), 0)
   const loaded = state.workspaces.flatMap((workspace) => {
     const data = state.data.get(workspace.id)
     return data === undefined || data === 'unavailable' ? [] : [data]
@@ -51,8 +162,14 @@ export const UsageTab = ({ views, renderDataSizes }: {
       <section aria-label="Total cost" className="space-y-1">
         <h3 className="text-sm font-semibold">Total cost</h3>
         <p className="text-2xl font-semibold">${totalCost.toFixed(2)}</p>
-        <p className="text-xs text-kumo-subtle">Across the {state.workspaces.length} {state.workspaces.length === 1 ? 'workspace' : 'workspaces'} they own.</p>
+        <p className="text-xs text-kumo-subtle">
+          {summary
+            ? 'Their workspaces, those they deleted and their own use.'
+            : `Across the ${state.workspaces.length} ${state.workspaces.length === 1 ? 'workspace' : 'workspaces'} they own.`}
+        </p>
+        {summary === null && <p role="alert" className="text-xs text-kumo-danger">Couldn’t load the cost breakdown.</p>}
       </section>
+      {summary && <CostBreakdown summary={summary} />}
       <section aria-label="Storage" className="space-y-2">
         <h3 className="text-sm font-semibold">Storage</h3>
         {state.workspaces.length === 0

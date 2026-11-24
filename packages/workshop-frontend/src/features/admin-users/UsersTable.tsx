@@ -4,6 +4,8 @@ import type { AdminUserRecord } from '@gadgets/workshop-shared/api'
 import { formatFullTimestamp } from '../../utils/formatTimestamp'
 import type { UsersSort } from './usersQuery'
 
+const costOrDash = (cost: number | undefined) => cost === undefined ? '—' : `$${cost.toFixed(2)}`
+
 const dateOrDash = (date: Date | undefined) => date === undefined ? '—' : formatFullTimestamp(date)
 
 // A header that orders the table: a button naming the column, with the direction when it is the one in force.
@@ -28,8 +30,9 @@ const SortHead = ({ label, sort, current, direction, onSort }: {
 }
 
 /**
- * One page of users: name (with id and an Admin badge), workspaces owned, last sign-in and joined
- * date. The User, Last sign-in and Joined headers order the table. A row opens that user through
+ * One page of users: name (with id and an Admin badge), workspaces owned, last sign-in, joined
+ * date and total cost (as the user's account last reported it). The User, Last sign-in, Joined and
+ * Total cost headers order the table. A row opens that user through
  * `onSelect`; the row of `selectedId` is highlighted.
  */
 export const UsersTable = ({ users, sort, direction, onSort, selectedId, onSelect, emptyText }: {
@@ -49,13 +52,14 @@ export const UsersTable = ({ users, sort, direction, onSort, selectedId, onSelec
         <Table.Head>Workspaces</Table.Head>
         <SortHead label="Last sign-in" sort="lastLogin" current={sort} direction={direction} onSort={onSort} />
         <SortHead label="Joined" sort="created" current={sort} direction={direction} onSort={onSort} />
+        <SortHead label="Total cost" sort="totalCost" current={sort} direction={direction} onSort={onSort} />
       </Table.Row>
     </Table.Header>
     <Table.Body>
       {users.length === 0
         ? (
           <Table.Row>
-            <Table.Cell colSpan={4} className="py-8 text-center text-kumo-subtle">{emptyText}</Table.Cell>
+            <Table.Cell colSpan={5} className="py-8 text-center text-kumo-subtle">{emptyText}</Table.Cell>
           </Table.Row>
         )
         : users.map((user) => (
@@ -81,6 +85,7 @@ export const UsersTable = ({ users, sort, direction, onSort, selectedId, onSelec
             <Table.Cell>{user.ownedWorkspaces}</Table.Cell>
             <Table.Cell>{dateOrDash(user.lastLogin)}</Table.Cell>
             <Table.Cell>{dateOrDash(user.created)}</Table.Cell>
+            <Table.Cell>{costOrDash(user.totalCost)}</Table.Cell>
           </Table.Row>
         ))}
     </Table.Body>
