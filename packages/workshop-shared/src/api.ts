@@ -4892,9 +4892,8 @@ export interface Overseer extends RpcTarget {
   getGatekeeperById(id: WorkpieceId): Promise<GatekeeperClient<any>>;
 
   /**
-   * Try to create a new gatekeeper for this resource URL, such as a repository or MCP server.
-   * The gatekeeper is a connection to that one resource of a connected account, such as a GitHub
-   * repository or an MCP server's endpoint.
+   * Try to create a new gatekeeper for this resource URL: a connection to that one resource of a
+   * connected account, such as a GitHub repository or an MCP server's endpoint.
    *
    * `accountId` is the user's connected account to use to access this resource. To determine an
    * appropriate account, use `subscribeConnectedAccounts()` with a `filter` for this URL, then
