@@ -3,17 +3,17 @@ import type { AdminGatekeeperInfo } from '@gadgets/workshop-shared/api'
 import { mergeServices, summarizeServices } from './services'
 
 const keeper = (over: Partial<AdminGatekeeperInfo>): AdminGatekeeperInfo =>
-  ({ id: 'g', bindings: [], hooks: [], ...over }) as AdminGatekeeperInfo
+  ({ id: 0, bindings: [], hooks: [], ...over }) as AdminGatekeeperInfo
 const model = (modelId: string) => ({ type: 'aiModel', modelId, provider: 'p', modelName: modelId }) as const
 
 describe('summarizeServices', () => {
   it('counts distinct gadgets per model and per vendor, and agent spawners', () => {
     const summary = summarizeServices([
-      keeper({ creationSpec: model('claude'), bindings: [{ gadgetId: 'a', name: 'AI' }, { gadgetId: 'b', name: 'AI' }] }),
-      keeper({ id: 'g2', creationSpec: model('claude'), bindings: [{ gadgetId: 'a', name: 'AI2' }] }),
-      keeper({ id: 'g3', vendorId: 'google', bindings: [{ gadgetId: 'a', name: 'G' }, { gadgetId: 'a', name: 'G2' }] }),
+      keeper({ creationSpec: model('claude'), bindings: [{ gadgetId: 1, name: 'AI' }, { gadgetId: 2, name: 'AI' }] }),
+      keeper({ id: 2, creationSpec: model('claude'), bindings: [{ gadgetId: 1, name: 'AI2' }] }),
+      keeper({ id: 3, vendorId: 'google', bindings: [{ gadgetId: 1, name: 'G' }, { gadgetId: 1, name: 'G2' }] }),
       keeper({
-        id: 'g4', bindings: [{ gadgetId: 'b', name: 'S' }],
+        id: 4, bindings: [{ gadgetId: 2, name: 'S' }],
         creationSpec: { type: 'agentSpawner', config: { displayName: 's', modelId: null, bindings: {} } } as never,
       }),
     ])
@@ -24,8 +24,8 @@ describe('summarizeServices', () => {
 
   it('leaves out bindings pending in a chat, and connections nothing else is bound to', () => {
     const summary = summarizeServices([
-      keeper({ creationSpec: model('claude'), bindings: [{ gadgetId: 'a', name: 'AI', chatId: 3 }] }),
-      keeper({ id: 'g2', vendorId: 'google', bindings: [{ gadgetId: 'a', name: 'G', chatId: 3 }, { gadgetId: 'b', name: 'G' }] }),
+      keeper({ creationSpec: model('claude'), bindings: [{ gadgetId: 1, name: 'AI', chatId: 3 }] }),
+      keeper({ id: 2, vendorId: 'google', bindings: [{ gadgetId: 1, name: 'G', chatId: 3 }, { gadgetId: 2, name: 'G' }] }),
     ])
     expect(summary).toEqual({ models: [], vendors: [{ id: 'google', gadgets: 1 }], spawners: 0 })
   })

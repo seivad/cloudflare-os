@@ -20,8 +20,10 @@ function crc32(bytes: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+// Copies into a plain ArrayBuffer-backed array, which is what a Blob accepts (the caller's bytes
+// may sit in a SharedArrayBuffer).
+async function deflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
+  const stream = new Blob([new Uint8Array(bytes)]).stream().pipeThrough(new CompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
@@ -43,13 +45,13 @@ const MAX_BYTES = 0xffffffff;
  * a file or archive of 4 GiB or more.
  */
 export async function zipFiles(files: ReadonlyMap<string, string | Uint8Array>)
-    : Promise<Uint8Array> {
+    : Promise<Uint8Array<ArrayBuffer>> {
   if (files.size > MAX_ENTRIES) {
     throw new RangeError(`A ZIP holds at most ${MAX_ENTRIES} files.`);
   }
   const encoder = new TextEncoder();
-  const parts: Uint8Array[] = [];
-  const central: Uint8Array[] = [];
+  const parts: Uint8Array<ArrayBuffer>[] = [];
+  const central: Uint8Array<ArrayBuffer>[] = [];
   let offset = 0;
   for (const [path, content] of files) {
     const name = encoder.encode(path);

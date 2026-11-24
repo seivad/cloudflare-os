@@ -78,7 +78,11 @@ describe('AdminUsersPanel', () => {
   }
   const activeSelect = () => container.querySelector<HTMLElement>('[role="combobox"]')!
   const searchBox = () => container.querySelector<HTMLInputElement>('input[type="search"]')!
-  const lastQuery = (admin: ReturnType<typeof fakeAdmin>) => admin.listUsers.mock.lastCall![0]
+  const lastQuery = (admin: ReturnType<typeof fakeAdmin>) => {
+    const query = admin.listUsers.mock.lastCall?.[0]
+    if (!query) throw new Error('listUsers was not called with a query')
+    return query
+  }
 
   beforeEach(() => {
     vi.useFakeTimers()
@@ -118,8 +122,8 @@ describe('AdminUsersPanel', () => {
   it('loads the first page of 50 in id order', async () => {
     const admin = (await render()).listUsers
     expect(admin).toHaveBeenCalledTimes(1)
-    expect(admin.mock.lastCall![0]).toMatchObject({ limit: 50, sort: 'id', direction: 'asc' })
-    expect(admin.mock.lastCall![0]!.query).toBeUndefined()
+    expect(admin.mock.lastCall?.[0]).toMatchObject({ limit: 50, sort: 'id', direction: 'asc' })
+    expect(admin.mock.lastCall?.[0]?.query).toBeUndefined()
   })
 
   it('searches after typing pauses, from the first page', async () => {

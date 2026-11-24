@@ -1,4 +1,4 @@
-import type { AdminGatekeeperInfo } from '@gadgets/workshop-shared/api'
+import type { AdminGatekeeperInfo, WorkpieceId } from '@gadgets/workshop-shared/api'
 
 /** What a user's gadgets are connected to, counted in gadgets (spawners in agent spawners). */
 export type ServicesSummary = {
@@ -11,13 +11,13 @@ type Count = { id: string; gadgets: number }
 
 const byCount = (a: Count, b: Count) => b.gadgets - a.gadgets || a.id.localeCompare(b.id)
 
-const addGadget = (into: Map<string, Set<string>>, key: string, gadgetId: string) => {
-  const gadgets = into.get(key) ?? new Set<string>()
+const addGadget = (into: Map<string, Set<WorkpieceId>>, key: string, gadgetId: WorkpieceId) => {
+  const gadgets = into.get(key) ?? new Set<WorkpieceId>()
   gadgets.add(gadgetId)
   into.set(key, gadgets)
 }
 
-const counted = (from: Map<string, Set<string>>): Count[] =>
+const counted = (from: Map<string, Set<WorkpieceId>>): Count[] =>
   [...from].map(([id, gadgets]) => ({ id, gadgets: gadgets.size })).toSorted(byCount)
 
 /**
@@ -28,8 +28,8 @@ const counted = (from: Map<string, Set<string>>): Count[] =>
  * different workspaces are summed with `mergeServices`.
  */
 export const summarizeServices = (gatekeepers: AdminGatekeeperInfo[]): ServicesSummary => {
-  const models = new Map<string, Set<string>>()
-  const vendors = new Map<string, Set<string>>()
+  const models = new Map<string, Set<WorkpieceId>>()
+  const vendors = new Map<string, Set<WorkpieceId>>()
   let spawners = 0
   for (const gatekeeper of gatekeepers) {
     const bound = gatekeeper.bindings.filter((binding) => binding.chatId === undefined)
