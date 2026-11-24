@@ -16,7 +16,9 @@ import {
 } from "./storage-schema/user-storage.js";
 import { chatKey, chatKeyPrefix } from "./storage-schema/overseer-storage.js";
 import { recordAnalytics } from "./analytics";
-import { addCost, MAX_REPORTED_LOG_AGE_DAYS, mergeLines, userCostSummary, withEarlier, type CostEntry } from "./cost-ledger.js";
+import {
+  addCost, MAX_REPORTED_LOG_AGE_DAYS, mergeLines, userCostSummary, userCostTotal, withEarlier, type CostEntry,
+} from "./cost-ledger.js";
 import { createWorkshopLogger } from "./observability";
 import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
 import { voiceCostEntry, type VoiceCost, type VoiceCostOutcome } from "./voice.js";
@@ -433,7 +435,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const createdAt = this.storage.createdAt.get();
     // The total goes with the activity report, so the directory's figure is at most an hour old
     // even for an account whose spend moves by less than a cent at a time.
-    const totalCost = reportLogin ? userCostSummary(this.storage).totalCost : undefined;
+    const totalCost = reportLogin ? userCostTotal(this.storage) : undefined;
     const activity: UserDirectoryActivity = {
       ...createdAt && { created: createdAt },
       ...reportLogin && { lastLogin: new Date(now) },
@@ -466,7 +468,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       this.#costSyncAgain = true;
       return;
     }
-    const totalCost = userCostSummary(this.storage).totalCost;
+    const totalCost = userCostTotal(this.storage);
     if (Math.abs(totalCost - this.storage.directoryCostUsd.get()) < DIRECTORY_COST_STEP_USD) return;
     this.#costSyncing = true;
     const profile = this.storage.profile.get();

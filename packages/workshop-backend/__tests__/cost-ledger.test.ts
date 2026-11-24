@@ -7,8 +7,8 @@ import {
 } from "@gadgets/workshop-shared/api";
 import {
   actionCostEntry, addCost, byKind, byModel, costLineKey, isActionCost, isActionLog, mergeLines,
-  textCostEntry,
-  withEarlier, type CostAttribution, type CostEntry,
+  textCostEntry, userCostSummary, userCostTotal,
+  withEarlier, type CostAttribution, type CostEntry, type UserCostReads,
 } from "../src/cost-ledger.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import {
@@ -122,6 +122,21 @@ describe("cost ledger", () => {
     // Neither input is changed.
     expect(a[0]?.usd).toBe(1);
     expect(b[0]?.usd).toBe(0.5);
+  });
+
+  it("userCostTotal is the user summary's total, counting only owned workspaces", () => {
+    let workspace = (id: string, totalCost: number | undefined, owner?: { id: string }) =>
+        ({ id, title: id, totalCost, ...(owner ? { owner } : {}) });
+    let reads = {
+      gadgets: { list: () => [
+        workspace("w1", 1.5), workspace("w2", undefined), workspace("w3", 4, { id: "bob" }),
+        workspace("w4", 0.25),
+      ] },
+      deletedWorkspaceCost: { get: () => ({ totalCost: 2, lines: [] }) },
+      ownCostLines: { get: () => addCost([], entry({ usd: 0.125 })) },
+    } as unknown as UserCostReads;
+    expect(userCostTotal(reads)).toBe(3.875);
+    expect(userCostTotal(reads)).toBe(userCostSummary(reads).totalCost);
   });
 });
 

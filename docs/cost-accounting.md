@@ -28,7 +28,7 @@ Each workspace keeps a **ledger**: one line per source, kind (`text`, `image`, `
 - the workspaces they **deleted**: a workspace's final cost is folded into one bucket on its owner when it is removed;
 - their **own ledger**: voice, which belongs to no workspace.
 
-A deployment admin reads the same summary through the audited user view (`AdminUserView.getCostSummary()`, see [admin-access.md](admin-access.md#user-inspection)), and the admin users directory lists each user's total (`AdminUserRecord.totalCost`), which the user's account reports to the directory with its hourly activity report and whenever the total moves by a cent. Both are computed by `userCostSummary()` in `cost-ledger.ts`.
+A deployment admin reads the same summary through the audited user view (`AdminUserView.getCostSummary()`, see [admin-access.md](admin-access.md#user-inspection)), and the admin users directory lists each user's total (`AdminUserRecord.totalCost`), which the user's account reports to the directory with its hourly activity report and whenever the total moves by a cent. The summary is computed by `userCostSummary()` in `cost-ledger.ts`, and the total it reports to the directory by `userCostTotal()` beside it, which adds the same figures without building the breakdowns.
 
 A workspace shared with someone counts to its owner, never to them. A cost reaches the owner's summary from the workspace's own ledger, through the same retried delivery as the other updates a workspace sends its owner; a workspace delivering a cost also resets the owner-update retry once a drain has gone clean, so a collaborator's update can arrive slightly sooner or later than it did.
 

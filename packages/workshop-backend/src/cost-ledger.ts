@@ -188,10 +188,24 @@ export type UserCostReads = {
 };
 
 /**
+ * userCostSummary()'s total alone, without the breakdowns: what the directory is told, after
+ * every cost a user's account records.
+ */
+export function userCostTotal(storage: UserCostReads): number {
+  // Added in the summary's order, so that the two agree to the last bit.
+  let workspaces = 0;
+  for (let workspace of storage.gadgets.list()) {
+    if (!workspace.owner && workspace.totalCost) workspaces += workspace.totalCost;
+  }
+  let own = storage.ownCostLines.get().reduce((sum, line) => sum + line.usd, 0);
+  return workspaces + storage.deletedWorkspaceCost.get().totalCost + own;
+}
+
+/**
  * What a user is counted as having spent: the workspaces they own (collaborators' spend in them
  * included), the workspaces they deleted, and their own spend outside any workspace. Shared by the
- * user's own summary (UserDurableObject.getCostSummary()), the admin view's, and the directory's
- * total.
+ * user's own summary (UserDurableObject.getCostSummary()) and the admin view's; the directory's
+ * total is userCostTotal().
  */
 export function userCostSummary(storage: UserCostReads): UserCostSummary {
   let workspaces: WorkspaceCostSummary[] = [];
