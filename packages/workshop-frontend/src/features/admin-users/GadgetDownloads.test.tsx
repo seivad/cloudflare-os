@@ -10,6 +10,8 @@ import { CONTENT_LEVEL_TEXT } from './downloads'
 import type { AdminViews } from './useAdminViews'
 
 const saved = vi.hoisted(() => [] as { name: string; type: string; text: string }[])
+// The files the last ZIP was made of.
+const zipped = vi.hoisted(() => ({ files: new Map<string, string | Uint8Array>() }))
 // jsdom's Blob cannot be read with text(); a FileReader can.
 const readText = (blob: Blob) => new Promise<string>((resolve) => {
   const reader = new FileReader()
@@ -19,7 +21,10 @@ const readText = (blob: Blob) => new Promise<string>((resolve) => {
 // zipFiles reads jsdom's Blob with stream(), which jsdom lacks; downloads.test.ts covers the ZIP itself.
 vi.mock('@gadgets/workshop-shared/zip', async (original) => ({
   ...await original<typeof import('@gadgets/workshop-shared/zip')>(),
-  zipFiles: async (files: ReadonlyMap<string, string | Uint8Array>) => new TextEncoder().encode([...files.keys()].join('|')),
+  zipFiles: async (files: ReadonlyMap<string, string | Uint8Array>) => {
+    zipped.files = new Map(files)
+    return new TextEncoder().encode([...files.keys()].join('|'))
+  },
 }))
 vi.mock('../../fileTransfers', () => ({
   saveBlobToFile: async (blob: Blob, name: string) => { saved.push({ name, type: blob.type, text: await readText(blob) }) },
@@ -126,6 +131,23 @@ describe('GadgetsWithDownloads', () => {
     expect(view.exportGadget).not.toHaveBeenCalled()
   })
 
+  it('offers no download or size for a gadget still pending in a chat, saying so', async () => {
+    const { views } = fakeViews({
+      describe: async () => ({
+        workpieces: [
+          { id: 'a', type: 'gadget', title: 'My Todo' },
+          { id: 'p', type: 'gadget', title: 'Draft', chatId: 3 },
+        ],
+      }),
+    })
+    await renderGadgets(views, 'content')
+    const draft = [...container.querySelectorAll('tbody tr')].find((tr) => tr.textContent?.startsWith('Draft'))!
+    expect(draft.querySelector('button')).toBeNull()
+    expect(draft.textContent).toContain('Pending in a chat')
+    expect(draft.textContent).not.toContain('Not measured')
+    expect(button('Download My Todo')).toBeDefined()
+  })
+
   it('shows the same text when the server refuses with accessInsufficient', async () => {
     const { views } = fakeViews({
       exportGadget: async () => { throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.accessInsufficient) },
@@ -162,5 +184,25 @@ describe('DownloadAll', () => {
     expect(view.exportGadget).toHaveBeenCalledWith('a', 'everything')
     expect(saved).toEqual([{ name: 'ada-example.com-gadgets.zip', type: 'application/zip', text: 'atlas/my-todo.zip|README.md' }])
     expect(container.textContent).toContain('Done')
+  })
+
+  it('leaves out a gadget still pending in a chat, listing it in the README', async () => {
+    const { views, view } = fakeViews({
+      describe: async () => ({
+        workpieces: [
+          { id: 'p', type: 'gadget', title: 'Draft', chatId: 3 },
+          { id: 'a', type: 'gadget', title: 'My Todo' },
+        ],
+      }),
+    })
+    await act(async () => { root.render(<DownloadAll views={views} userId="ada" level="content" />) })
+    await click(button('Download all gadgets'))
+    await click(button('Code only'))
+    await flush()
+    await flush()
+    await flush()
+    expect(view.exportGadget.mock.calls).toEqual([['a', 'code']])
+    expect([...zipped.files.keys()]).toEqual(['atlas/my-todo.gadget', 'README.md'])
+    expect(zipped.files.get('README.md')).toContain('- Atlas / Draft: pending in a chat')
   })
 })

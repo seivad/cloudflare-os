@@ -97,7 +97,8 @@ what the `metadata` level allows (see [Access levels](#access-levels)).
 ## Downloads
 
 Each row of the Gadgets tab has a **Download** menu, and the panel's header has one for **all
-gadgets**. The menu offers:
+gadgets**. A gadget still pending in a chat has no committed code to copy, so its row has no menu
+and no size, and says "Pending in a chat" instead. The menu offers:
 
 - **Code only**: `<slug>.gadget`, a blueprint archive of the gadget's committed head that any
   Cloudflare OS takes in through **Import blueprint**. It carries no history and no data, and it
@@ -121,7 +122,8 @@ message under the menu.
 **Download all** copies every gadget in every workspace the user owns, one after another, into one
 ZIP named for the user (`<user id>-gadgets.zip`) with a folder per workspace, named by its title,
 and a top-level `README.md`. A gadget that fails does not stop the rest: the README lists it with
-its message, and lists any workspace whose gadgets could not be listed at all. Progress shows as
+its message, and lists any workspace whose gadgets could not be listed at all, and each gadget
+left out because it is still pending in a chat. Progress shows as
 gadgets done of the total. The page builds the ZIP in the browser, so every copy is held in the
 browser's memory until it is saved: a user with a great deal of data can exhaust it, and their
 gadgets are better taken one at a time.

@@ -44,35 +44,45 @@ const useGadgetSizes = (views: AdminViews) => {
   return { sizeOf, sizesOfWorkspace, record: (gadgetId: WorkpieceId, size: Measured) => setMeasured(new Map(measured).set(gadgetId, size)) }
 }
 
-/** The Gadgets tab with each gadget's last measured size and its download menu. */
+/** What a gadget still pending in a chat shows in place of a size and a menu: it has no committed
+ * code, so the server refuses every copy and read of it. */
+export const PENDING_GADGET_TEXT = 'Pending in a chat'
+
+/** The Gadgets tab with each gadget's last measured size and its download menu. A gadget still
+ * pending in a chat (`chatId` set) has neither. */
 export const GadgetsWithDownloads = ({ views, level }: { views: AdminViews; level?: AdminWorkspaceAccess }) => {
   const { sizeOf, record } = useGadgetSizes(views)
   const disabledReason = downloadsDisabledReason(level)
-  const actionsOf = ({ workspace, gadget }: GadgetRowContext) => (
-    <DownloadMenu
-      label={gadget.title}
-      confirmText={RECONNECT_NOTICE}
-      disabledReason={disabledReason}
-      actions={{
-        code: async () => {
-          const bytes = await exportGadgetBytes(views, workspace.id, gadget.id, 'code')
-          saveBlobToFile(new Blob([bytes as BlobPart]), exportFileName(gadget.title, 'code'))
-        },
-        everything: async () => {
-          const bytes = await exportGadgetBytes(views, workspace.id, gadget.id, 'everything')
-          saveBlobToFile(new Blob([bytes as BlobPart], { type: 'application/zip' }), exportFileName(gadget.title, 'everything'))
-        },
-        measure: async () => {
-          const result = await views.call(async () => (await views.workspaceView(workspace.id)).measureGadget(gadget.id))
-          record(gadget.id, result)
-        },
-      }}
-    />
-  )
+  const actionsOf = ({ workspace, gadget }: GadgetRowContext) => {
+    if (gadget.chatId !== undefined) return <span className="text-xs text-kumo-subtle">{PENDING_GADGET_TEXT}</span>
+    return (
+      <DownloadMenu
+        label={gadget.title}
+        confirmText={RECONNECT_NOTICE}
+        disabledReason={disabledReason}
+        actions={{
+          code: async () => {
+            const bytes = await exportGadgetBytes(views, workspace.id, gadget.id, 'code')
+            saveBlobToFile(new Blob([bytes as BlobPart]), exportFileName(gadget.title, 'code'))
+          },
+          everything: async () => {
+            const bytes = await exportGadgetBytes(views, workspace.id, gadget.id, 'everything')
+            saveBlobToFile(new Blob([bytes as BlobPart], { type: 'application/zip' }), exportFileName(gadget.title, 'everything'))
+          },
+          measure: async () => {
+            const result = await views.call(async () => (await views.workspaceView(workspace.id)).measureGadget(gadget.id))
+            record(gadget.id, result)
+          },
+        }}
+      />
+    )
+  }
   return (
     <GadgetsTab
       views={views}
-      renderSize={({ gadget }) => <span className="text-xs">{describeMeasurement(sizeOf(gadget.id))}</span>}
+      renderSize={({ gadget }) => (
+        <span className="text-xs">{gadget.chatId !== undefined ? '—' : describeMeasurement(sizeOf(gadget.id))}</span>
+      )}
       renderActions={actionsOf}
     />
   )
@@ -97,7 +107,9 @@ export const UsageWithSizes = ({ views }: { views: AdminViews }) => {
   )
 }
 
-/** Every gadget in the workspaces the user owns, and the workspaces that could not be read. */
+/** Every permanent gadget in the workspaces the user owns, and notes of what is left out: a
+ * workspace that could not be read, and a gadget still pending in a chat, which has no committed
+ * code to copy. */
 const collectGadgets = async (views: AdminViews): Promise<{ gadgets: GadgetToCopy[]; notes: string[] }> => {
   const workspaces = (await views.call(async () => (await views.userView()).listWorkspaces()))
     .filter((workspace) => workspace.owner === undefined)
@@ -107,7 +119,9 @@ const collectGadgets = async (views: AdminViews): Promise<{ gadgets: GadgetToCop
     try {
       const description = await views.call(async () => (await views.workspaceView(workspace.id)).describe())
       for (const piece of description.workpieces) {
-        if (piece.type === 'gadget') gadgets.push({ workspace, gadget: piece })
+        if (piece.type !== 'gadget') continue
+        if (piece.chatId === undefined) gadgets.push({ workspace, gadget: piece })
+        else notes.push(`${workspace.title} / ${piece.title}: pending in a chat, with no committed code to copy yet`)
       }
     } catch (err) {
       notes.push(`${workspace.title}: its gadgets could not be listed (${failureMessage(err)})`)
