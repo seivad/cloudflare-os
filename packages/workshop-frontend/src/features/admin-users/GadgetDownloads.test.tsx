@@ -57,7 +57,7 @@ const fakeViews = (overrides: Record<string, unknown> = {}) => {
     reason: 'r', setReason: vi.fn<(reason: string) => void>(),
     userView: async () => ({ listWorkspaces: async () => [{ id: 'w1', title: 'Atlas', totalCost: 0 }] }) as never,
     workspaceView: async () => view as never,
-    call: (fn) => fn(),
+    call: (fn) => fn(views),
   }
   return { views, view }
 }

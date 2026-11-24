@@ -23,18 +23,21 @@ const keepers: Record<string, unknown[]> = {
   w2: [{ id: 'k2', creationSpec: { type: 'aiModel', modelId: 'claude-x', provider: 'p', modelName: 'x' }, bindings: [{ gadgetId: 'z', name: 'AI' }], hooks: [] }],
 }
 const sizes: Record<string, number> = { w1: 2048, w2: 1048576 }
-const fakeViews = (list: unknown[], summary?: unknown): AdminViews => ({
-  reason: 'r', setReason: vi.fn<(reason: string) => void>(),
-  userView: async () => ({
-    listWorkspaces: async () => list,
-    getCostSummary: async () => { if (summary === undefined) throw new Error('no summary'); return summary },
-  }) as never,
-  workspaceView: async (id: string) => ({
-    getDiagnostics: async () => ({ storageBytes: sizes[id] }),
-    listGatekeepers: async () => keepers[id],
-  }) as never,
-  call: (fn) => fn(),
-})
+const fakeViews = (list: unknown[], summary?: unknown): AdminViews => {
+  const fakes: AdminViews = {
+    reason: 'r', setReason: vi.fn<(reason: string) => void>(),
+    userView: async () => ({
+      listWorkspaces: async () => list,
+      getCostSummary: async () => { if (summary === undefined) throw new Error('no summary'); return summary },
+    }) as never,
+    workspaceView: async (id: string) => ({
+      getDiagnostics: async () => ({ storageBytes: sizes[id] }),
+      listGatekeepers: async () => keepers[id],
+    }) as never,
+    call: (fn) => fn(fakes),
+  }
+  return fakes
+}
 
 let container: HTMLDivElement
 let root: Root

@@ -12,15 +12,15 @@ const HELD_NAMES: Record<AdminUserBlueprint['held'], string> = {
 /** The Blueprints tab: every blueprint the account holds, the user's own and their library. */
 export const BlueprintsTab = ({ views }: { views: AdminViews }) => {
   const [state, setState] = useState<{ blueprints: AdminUserBlueprint[] } | { error: string } | null>(null)
-  const { call, userView } = views
+  const { call } = views
   useEffect(() => {
     let current = true
-    call(async () => (await userView()).listBlueprints()).then(
+    call(async ({ userView }) => (await userView()).listBlueprints()).then(
       (blueprints) => { if (current) setState({ blueprints }) },
       (err: unknown) => { if (current) setState({ error: describeFailure(err, 'blueprints') }) },
     )
     return () => { current = false }
-  }, [call, userView])
+  }, [call])
 
   if (state === null) return <div className="flex justify-center py-8"><Loader /></div>
   if ('error' in state) return <p role="alert" className="text-sm text-kumo-danger">{state.error}</p>

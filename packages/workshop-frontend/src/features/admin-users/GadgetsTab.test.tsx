@@ -41,12 +41,13 @@ const fakeViews = (): AdminViews => {
       listGatekeepers: async () => [],
     },
   }
-  return {
+  const fakes: AdminViews = {
     reason: 'r', setReason: vi.fn<(reason: string) => void>(),
     userView: async () => ({ listWorkspaces: async () => workspaces }) as never,
     workspaceView: async (id: string) => views[id] as never,
-    call: (fn) => fn(),
+    call: (fn) => fn(fakes),
   }
+  return fakes
 }
 
 let container: HTMLDivElement
@@ -92,7 +93,11 @@ describe('GadgetsTab', () => {
   })
 
   it('says so when the user owns no gadgets', async () => {
-    const views = { ...fakeViews(), userView: async () => ({ listWorkspaces: async () => [] }) as never }
+    const views: AdminViews = {
+      ...fakeViews(),
+      userView: async () => ({ listWorkspaces: async () => [] }) as never,
+      call: (fn) => fn(views),
+    }
     await act(async () => { root.render(<GadgetsTab views={views} />) })
     await flush()
     expect(container.textContent).toContain('owns no workspaces')

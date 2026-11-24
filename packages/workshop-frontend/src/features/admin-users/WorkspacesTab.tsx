@@ -14,10 +14,10 @@ const formatCost = (cost: number | undefined) => cost === undefined ? '—' : `$
 
 const OwnedRow = ({ workspace, views }: { workspace: AdminUserWorkspace; views: AdminViews }) => {
   const [detail, setDetail] = useState<Detail | null>(null)
-  const { call, workspaceView } = views
+  const { call } = views
   useEffect(() => {
     let current = true
-    call(async () => {
+    call(async ({ workspaceView }) => {
       const view = await workspaceView(workspace.id)
       const [description, diagnostics] = await Promise.all([view.describe(), view.getDiagnostics()])
       return {
@@ -30,7 +30,7 @@ const OwnedRow = ({ workspace, views }: { workspace: AdminUserWorkspace; views: 
       () => { if (current) setDetail('unavailable') },
     )
     return () => { current = false }
-  }, [call, workspaceView, workspace.id])
+  }, [call, workspace.id])
 
   const loading = detail === null
   const known = detail !== null && detail !== 'unavailable' ? detail : null
@@ -54,15 +54,15 @@ const OwnedRow = ({ workspace, views }: { workspace: AdminUserWorkspace; views: 
  */
 export const WorkspacesTab = ({ views }: { views: AdminViews }) => {
   const [state, setState] = useState<{ workspaces: AdminUserWorkspace[] } | { error: string } | null>(null)
-  const { call, userView } = views
+  const { call } = views
   useEffect(() => {
     let current = true
-    call(async () => (await userView()).listWorkspaces()).then(
+    call(async ({ userView }) => (await userView()).listWorkspaces()).then(
       (workspaces) => { if (current) setState({ workspaces }) },
       (err: unknown) => { if (current) setState({ error: describeFailure(err, 'workspaces') }) },
     )
     return () => { current = false }
-  }, [call, userView])
+  }, [call])
 
   if (state === null) return <div className="flex justify-center py-8"><Loader /></div>
   if ('error' in state) return <p role="alert" className="text-sm text-kumo-danger">{state.error}</p>

@@ -32,14 +32,17 @@ const views: Record<string, unknown> = {
   },
   w2: { describe: async () => ({ workpieces: [], collaborators: [] }), listShareLinks: async () => [] },
 }
-const fakeViews = (): AdminViews => ({
-  reason: 'r', setReason: vi.fn<(reason: string) => void>(),
-  userView: async () => ({
-    listWorkspaces: async () => [{ id: 'w1', title: 'Atlas' }, { id: 'w2', title: 'Quiet' }, { id: 'w3', title: 'Theirs', owner: { id: 'o' } }],
-  }) as never,
-  workspaceView: async (id: string) => views[id] as never,
-  call: (fn) => fn(),
-})
+const fakeViews = (): AdminViews => {
+  const fakes: AdminViews = {
+    reason: 'r', setReason: vi.fn<(reason: string) => void>(),
+    userView: async () => ({
+      listWorkspaces: async () => [{ id: 'w1', title: 'Atlas' }, { id: 'w2', title: 'Quiet' }, { id: 'w3', title: 'Theirs', owner: { id: 'o' } }],
+    }) as never,
+    workspaceView: async (id: string) => views[id] as never,
+    call: (fn) => fn(fakes),
+  }
+  return fakes
+}
 
 let container: HTMLDivElement
 let root: Root

@@ -61,7 +61,8 @@ longer than `MAX_ADMIN_ACCESS_REASON_LENGTH`). A reason belongs to the user it w
 opening another user asks again.
 
 The panel's reads go through views that expire (15 minutes unless asked otherwise). The page
-reopens an expired view once, on its own, and records that open as the audit records any other. A
+reopens an expired view once, on its own, and records that open as the audit records any other.
+Only the view that expired is reopened: the others stay open for the reads still using them. A
 workspace is opened only when a tab needs it, and at most four are opened at a time, because each
 open is recorded and wakes the workspace.
 

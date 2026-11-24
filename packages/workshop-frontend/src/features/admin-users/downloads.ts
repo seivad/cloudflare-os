@@ -36,12 +36,12 @@ const readAll = async (stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
 /** Copies one gadget, returning the file's bytes. Runs through `views.call`, so an expired view
  * is reopened once. */
 export const exportGadgetBytes = (
-  views: Pick<AdminViews, 'call' | 'workspaceView'>,
+  views: Pick<AdminViews, 'call'>,
   workspaceId: string,
   gadgetId: WorkpieceId,
   mode: AdminGadgetExportMode,
 ): Promise<Uint8Array> =>
-  views.call(async () => readAll(await (await views.workspaceView(workspaceId)).exportGadget(gadgetId, mode)))
+  views.call(async ({ workspaceView }) => readAll(await (await workspaceView(workspaceId)).exportGadget(gadgetId, mode)))
 
 /** A gadget to copy, with the workspace that holds it. */
 export type GadgetToCopy = { workspace: { id: string; title: string }; gadget: { id: WorkpieceId; title: string } }
@@ -62,7 +62,7 @@ const uniqueName = (name: string, taken: Set<string>): string => {
  * first and after each.
  */
 export const downloadAll = async (
-  views: Pick<AdminViews, 'call' | 'workspaceView'>,
+  views: Pick<AdminViews, 'call'>,
   gadgets: readonly GadgetToCopy[],
   mode: AdminGadgetExportMode,
   onProgress: (done: number, total: number) => void,

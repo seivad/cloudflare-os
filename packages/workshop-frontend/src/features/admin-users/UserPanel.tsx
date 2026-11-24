@@ -42,16 +42,16 @@ export const UserPanel = ({ admin, userId, userName, accessLevel, onClose }: {
   const [tab, setTab] = useState<UserPanelTab>('usage')
   const [profile, setProfile] = useState<{ userId: string; description: AdminUserDescription } | { userId: string; error: string } | null>(null)
 
-  const { reason, call, userView } = views
+  const { reason, call } = views
   useEffect(() => {
     if (reason === null) return
     let current = true
-    call(async () => (await userView()).describe()).then(
+    call(async ({ userView }) => (await userView()).describe()).then(
       (description) => { if (current) setProfile({ userId, description }) },
       (err: unknown) => { if (current) setProfile({ userId, error: describeFailure(err, 'profile') }) },
     )
     return () => { current = false }
-  }, [reason, userId, call, userView])
+  }, [reason, userId, call])
 
   const shown = profile !== null && profile.userId === userId ? profile : null
   const description = shown !== null && 'description' in shown ? shown.description : null

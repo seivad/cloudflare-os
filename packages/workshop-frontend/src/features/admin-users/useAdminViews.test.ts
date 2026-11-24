@@ -50,14 +50,66 @@ describe('useAdminViews', () => {
     const hook = await mount(admin)
     await act(async () => { hook.views.setReason('r') })
     let attempts = 0
-    const result = await hook.views.call(async () => {
-      await hook.views.userView()
+    const result = await hook.views.call(async ({ userView }) => {
+      await userView()
       if (attempts++ === 0) throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.viewExpired)
       return 'ok'
     })
     expect(result).toBe('ok')
     expect(attempts).toBe(2)
     expect(admin.inspectUser).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops and reopens only the view that expired, leaving the others open', async () => {
+    const opened: string[] = []
+    const disposed: string[] = []
+    const admin = {
+      inspectWorkspace: vi.fn<(id: string) => Promise<unknown>>(async (id: string) => {
+        const name = `${id}#${opened.filter((entry) => entry.startsWith(`${id}#`)).length + 1}`
+        opened.push(name)
+        return { name, [Symbol.dispose]: () => { disposed.push(name) } }
+      }),
+    }
+    const hook = await mount(admin)
+    await act(async () => { hook.views.setReason('r') })
+    const sibling = await hook.views.workspaceView('w2')
+    let attempts = 0
+    const name = await hook.views.call(async ({ workspaceView }) => {
+      const view = await workspaceView('w1') as unknown as { name: string }
+      if (attempts++ === 0) throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.viewExpired)
+      return view.name
+    })
+    expect(name).toBe('w1#2')
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(opened).toEqual(['w2#1', 'w1#1', 'w1#2'])
+    expect(disposed).toEqual(['w1#1'])
+    expect(await hook.views.workspaceView('w2')).toBe(sibling)
+  })
+
+  it('leaves a view another call just reopened, when both found it expired', async () => {
+    const opened: string[] = []
+    const disposed: string[] = []
+    const admin = {
+      inspectWorkspace: vi.fn<(id: string) => Promise<unknown>>(async (id: string) => {
+        const name = `${id}#${opened.length + 1}`
+        opened.push(name)
+        return { name, [Symbol.dispose]: () => { disposed.push(name) } }
+      }),
+    }
+    const hook = await mount(admin)
+    await act(async () => { hook.views.setReason('r') })
+    const read = () => {
+      let attempts = 0
+      return hook.views.call(async ({ workspaceView }) => {
+        const view = await workspaceView('w1') as unknown as { name: string }
+        if (attempts++ === 0) throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.viewExpired)
+        return view.name
+      })
+    }
+    expect(await Promise.all([read(), read()])).toEqual(['w1#2', 'w1#2'])
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(opened).toEqual(['w1#1', 'w1#2'])
+    expect(disposed).toEqual(['w1#1'])
   })
 
   it('surfaces a second expiry without looping', async () => {

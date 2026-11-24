@@ -19,11 +19,15 @@ export type AdminViews = {
   /** A workspace's view, opened on the first call and reused; at most
    * `MAX_CONCURRENT_WORKSPACE_OPENS` opens are in flight at once. */
   workspaceView: (workspaceId: string) => Promise<RpcStub<AdminWorkspaceView>>
-  /** Run `fn`, which gets its views from `userView()`/`workspaceView()`. When it fails because a
-   * view expired, the cached views are dropped and `fn` runs once more on fresh ones; a second
-   * expiry is thrown. */
-  call: <T>(fn: () => Promise<T>) => Promise<T>
+  /** Run `fn`, which gets its views through the `ViewAccess` it is given. When it fails because a
+   * view expired, the views it got are dropped, and `fn` runs once more on fresh ones; a second
+   * expiry is thrown. Views other calls got stay open: they may be in use, or just reopened. A
+   * `fn` that got no view through its `ViewAccess` drops every cached view. */
+  call: <T>(fn: (views: ViewAccess) => Promise<T>) => Promise<T>
 }
+
+/** The views a `call` gives its function: `userView` and `workspaceView`, noting which it got. */
+export type ViewAccess = Pick<AdminViews, 'userView' | 'workspaceView'>
 
 const disposeQuietly = (stub: unknown) => {
   try { (stub as { [Symbol.dispose]?: () => void })[Symbol.dispose]?.() } catch { /* already gone */ }
@@ -46,12 +50,22 @@ export const useAdminViews = (admin: RpcStub<AdminApi>, userId: string): AdminVi
     waiting: [] as (() => void)[],
   })
 
-  const dropViews = useCallback(() => {
+  // Forgets and disposes the cached views in `which`, or every one when it is undefined. A view
+  // `which` names that is no longer cached (another call reopened it) leaves its successor be.
+  const dropViews = useCallback((which?: ReadonlySet<Promise<unknown>>) => {
     const held = views.current
-    const dropped = [held.user, ...held.workspaces.values()]
-    held.user = null
-    held.workspaces.clear()
-    for (const opened of dropped) opened?.then(disposeQuietly, () => {})
+    const drops = (opened: Promise<unknown>) => which === undefined || which.has(opened)
+    const dropped: Promise<unknown>[] = []
+    if (held.user !== null && drops(held.user)) {
+      dropped.push(held.user)
+      held.user = null
+    }
+    for (const [workspaceId, opened] of held.workspaces) {
+      if (!drops(opened)) continue
+      dropped.push(opened)
+      held.workspaces.delete(workspaceId)
+    }
+    for (const opened of dropped) opened.then(disposeQuietly, () => {})
   }, [])
 
   // A different user: forget every view (the reason is already out of reach, being keyed).
@@ -61,7 +75,7 @@ export const useAdminViews = (admin: RpcStub<AdminApi>, userId: string): AdminVi
     userIdRef.current = userId
     dropViews()
   }, [userId, dropViews])
-  useEffect(() => dropViews, [dropViews])
+  useEffect(() => () => dropViews(), [dropViews])
 
   const setReason = useCallback((next: string) => {
     givenRef.current = { userId, reason: next }
@@ -114,15 +128,28 @@ export const useAdminViews = (admin: RpcStub<AdminApi>, userId: string): AdminVi
     return opened
   }, [admin, userId])
 
-  const call = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
+  const call = useCallback(async <T,>(fn: (views: ViewAccess) => Promise<T>): Promise<T> => {
+    const got = new Set<Promise<unknown>>()
+    const access: ViewAccess = {
+      userView: () => {
+        const opened = userView()
+        got.add(opened)
+        return opened
+      },
+      workspaceView: (workspaceId) => {
+        const opened = workspaceView(workspaceId)
+        got.add(opened)
+        return opened
+      },
+    }
     try {
-      return await fn()
+      return await fn(access)
     } catch (err) {
       if (getAdminAccessErrorCode(err) !== ADMIN_ACCESS_ERROR_CODES.viewExpired) throw err
-      dropViews()
-      return await fn()
+      dropViews(got.size > 0 ? new Set(got) : undefined)
+      return await fn(access)
     }
-  }, [dropViews])
+  }, [dropViews, userView, workspaceView])
 
   return useMemo(
     () => ({ reason, setReason, userView, workspaceView, call }),

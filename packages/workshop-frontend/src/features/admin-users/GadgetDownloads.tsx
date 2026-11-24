@@ -70,7 +70,7 @@ export const GadgetsWithDownloads = ({ views, level }: { views: AdminViews; leve
             saveBlobToFile(new Blob([bytes as BlobPart], { type: 'application/zip' }), exportFileName(gadget.title, 'everything'))
           },
           measure: async () => {
-            const result = await views.call(async () => (await views.workspaceView(workspace.id)).measureGadget(gadget.id))
+            const result = await views.call(async ({ workspaceView }) => (await workspaceView(workspace.id)).measureGadget(gadget.id))
             record(gadget.id, result)
           },
         }}
@@ -111,13 +111,13 @@ export const UsageWithSizes = ({ views }: { views: AdminViews }) => {
  * workspace that could not be read, and a gadget still pending in a chat, which has no committed
  * code to copy. */
 const collectGadgets = async (views: AdminViews): Promise<{ gadgets: GadgetToCopy[]; notes: string[] }> => {
-  const workspaces = (await views.call(async () => (await views.userView()).listWorkspaces()))
+  const workspaces = (await views.call(async ({ userView }) => (await userView()).listWorkspaces()))
     .filter((workspace) => workspace.owner === undefined)
   const gadgets: GadgetToCopy[] = []
   const notes: string[] = []
   for (const workspace of workspaces) {
     try {
-      const description = await views.call(async () => (await views.workspaceView(workspace.id)).describe())
+      const description = await views.call(async ({ workspaceView }) => (await workspaceView(workspace.id)).describe())
       for (const piece of description.workpieces) {
         if (piece.type !== 'gadget') continue
         if (piece.chatId === undefined) gadgets.push({ workspace, gadget: piece })

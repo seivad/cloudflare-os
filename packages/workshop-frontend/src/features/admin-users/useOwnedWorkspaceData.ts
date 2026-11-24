@@ -26,17 +26,17 @@ export const useOwnedWorkspaceData = <T,>(
   const [state, setState] = useState<OwnedWorkspaces<T>>(null)
   const loadRef = useRef(load)
   loadRef.current = load
-  const { call, userView, workspaceView } = views
+  const { call } = views
   useEffect(() => {
     let current = true
     const data = new Map<string, WorkspaceData<T>>()
-    call(async () => (await userView()).listWorkspaces()).then(
+    call(async ({ userView }) => (await userView()).listWorkspaces()).then(
       (listed) => {
         if (!current) return
         const workspaces = listed.filter((workspace) => workspace.owner === undefined)
         setState({ workspaces, data: new Map(data) })
         for (const workspace of workspaces) {
-          call(async () => loadRef.current(await workspaceView(workspace.id), workspace)).then(
+          call(async ({ workspaceView }) => loadRef.current(await workspaceView(workspace.id), workspace)).then(
             (found) => { data.set(workspace.id, found) },
             () => { data.set(workspace.id, 'unavailable') },
           ).then(() => { if (current) setState({ workspaces, data: new Map(data) }) })
@@ -45,6 +45,6 @@ export const useOwnedWorkspaceData = <T,>(
       (err: unknown) => { if (current) setState({ error: describeFailure(err, 'workspaces') }) },
     )
     return () => { current = false }
-  }, [call, userView, workspaceView])
+  }, [call])
   return state
 }

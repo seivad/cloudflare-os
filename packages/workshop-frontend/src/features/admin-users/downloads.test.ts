@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createAdminAccessError, ADMIN_ACCESS_ERROR_CODES } from '@gadgets/workshop-shared/api'
 import { downloadAll, downloadsDisabledReason, exportFileName, CONTENT_LEVEL_TEXT } from './downloads'
+import type { ViewAccess } from './useAdminViews'
 
 const streamOf = (text: string) => new ReadableStream<Uint8Array>({
   start(controller) { controller.enqueue(new TextEncoder().encode(text)); controller.close() },
 })
 
-const viewsFor = (exporter: (gadgetId: number, mode: string) => Promise<ReadableStream<Uint8Array>>) => ({
-  call: <T,>(fn: () => Promise<T>) => fn(),
-  workspaceView: async () => ({ exportGadget: exporter }) as never,
-})
+const viewsFor = (exporter: (gadgetId: number, mode: string) => Promise<ReadableStream<Uint8Array>>) => {
+  const access: ViewAccess = {
+    userView: async () => { throw new Error('No user view here') },
+    workspaceView: async () => ({ exportGadget: exporter }) as never,
+  }
+  return { call: <T,>(fn: (views: ViewAccess) => Promise<T>) => fn(access) }
+}
 
 // Entry names of a ZIP, read from its central directory.
 const entryNames = async (blob: Blob): Promise<string[]> => {
