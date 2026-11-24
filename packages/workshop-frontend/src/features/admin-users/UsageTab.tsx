@@ -57,15 +57,15 @@ const modelRows = (summary: UserCostSummary): ModelRow[] => {
 // The user's cost summary through the audited user view: undefined while it loads, null when it could not be read.
 const useCostSummary = (views: AdminViews): UserCostSummary | null | undefined => {
   const [summary, setSummary] = useState<UserCostSummary | null | undefined>(undefined)
-  const { call, userView } = views
+  const { call } = views
   useEffect(() => {
     let current = true
-    call(async () => (await userView()).getCostSummary()).then(
+    call(async ({ userView }) => (await userView()).getCostSummary()).then(
       (found) => { if (current) setSummary(found) },
       () => { if (current) setSummary(null) },
     )
     return () => { current = false }
-  }, [call, userView])
+  }, [call])
   return summary
 }
 
